@@ -29,7 +29,7 @@ def show_or_savefig(
         
 def plot_loss_curve(
     loss_history: list[float], run_dir: Path,
-    show: bool = True, save_path: Path = None
+    show: bool = True
 ):
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(range(1, len(loss_history) + 1), loss_history, marker="o", linewidth=2)
@@ -39,14 +39,8 @@ def plot_loss_curve(
     ax.grid(True, alpha=0.4)
     fig.tight_layout()
 
-    curve_path = run_dir / "loss_curve.png"
-    
+    save_path = run_dir / "loss_curve.png"
     show_or_savefig(fig, show, save_path)
-    
-    
-    fig.savefig(curve_path, dpi=150)
-    plt.close(fig)
-    print("   Loss curve saved to run directory")
 
 # =============================================================================
 # Displacement geometry
@@ -55,7 +49,7 @@ def plot_loss_curve(
 def displacement_hist_mag_v_label(
     delta: np.ndarray, labels: np.ndarray,
     show: bool = True, save_path: Path = None,
-    vector_name: str = "Δ (P−C)",
+    vector_name: str = "Δ (P-C)",
 ):
     delta_norm  = np.linalg.norm(delta, axis=1)
     colors = {0: "steelblue", 1: "tomato"}
@@ -77,7 +71,7 @@ def displacement_hist_mag_v_label(
 def displacement_boxp_mw(
     delta: np.ndarray, labels: np.ndarray,
     show: bool = True, save_path: Path | None = None,
-    vector_name: str = "Δ (P−C)",
+    vector_name: str = "Δ (P-C)",
 ):
     # https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.mannwhitneyu.html
     delta_norm  = np.linalg.norm(delta, axis=1)
@@ -110,7 +104,7 @@ def displacement_boxp_mw(
 def displacement_heatmap(
     delta: np.ndarray, labels: np.ndarray,
     show: bool = True, save_path: Path | None = None,
-    vector_name: str = "Δ (P−C)",
+    vector_name: str = "Δ (P-C)",
 ):
     sort_idx     = np.argsort(labels)
     delta_sorted = delta[sort_idx]
@@ -126,7 +120,7 @@ def displacement_heatmap(
                 label="label boundary")
     ax.set_xlabel("Sample (sorted by label)")
     ax.set_ylabel("Embedding dimension")
-    ax.set_title(f"{vector_name} | left=label 0, right=label 1  (red= +, blue= −)")
+    ax.set_title(f"{vector_name} | left=label 0, right=label 1  (red= +, blue= -)")
     plt.colorbar(im, ax=ax, shrink=0.8)
     ax.legend(loc="upper left", fontsize=8)
     fig.tight_layout()
@@ -326,14 +320,10 @@ def plot_shared_basis_decomposition(
 ):
     """Grouped bar chart of per-axis variance in the shared (observed_traj) PCA basis.
 
-    Three bars per axis: observed trajectory (T−C), predicted trajectory (P−C),
-    and prediction error (P−T).  Annotated with per-axis capture ratio
-    ``1 − var(P−T) / var(T−C)``.
+    Three bars per axis: observed trajectory (T-C), predicted trajectory (P-C),
+    and prediction error (P-T).  Annotated with per-axis capture ratio
+    ``1 - var(P-T) / var(T-C)``.
 
-    Parameters
-    ----------
-    variances_observed, variances_delta, variances_pred_error : (D,) or (k,)
-    explained_variance_ratio : (D,) or (k,) from the reference PCA
     top_k : axes to show (default: min(10, len))
     """
     k = min(top_k or 10, len(variances_observed))
@@ -366,10 +356,10 @@ def plot_shared_basis_decomposition(
     ax.set_xticks(x)
     ax.set_xticklabels([f"PC{i+1}\n({evr[i]:.1%})" for i in range(k)],
                        fontsize=7)
-    ax.set_xlabel("Shared PCA axis  (% variance of T−C)")
+    ax.set_xlabel("Shared PCA axis  (% variance of T-C)")
     ax.set_ylabel("Projection variance")
     ax.set_title("Shared-Basis Decomposition  |  annotations = capture ratio "
-                 "(1 − var(P−T)/var(T−C))")
+                 "(1 - var(P-T)/var(T-C))")
     ax.legend(fontsize=8)
     fig.tight_layout()
 

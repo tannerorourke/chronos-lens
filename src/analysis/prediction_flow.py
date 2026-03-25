@@ -12,11 +12,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from numba.core.types import unknown
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
+from sklearn.decomposition import PCA
 
 from src.models.sae import SparseAutoencoder
 from src.analysis.plotting import show_or_savefig
@@ -128,7 +128,7 @@ def build_patient_profile_figure(
     
     decomposition: dict,
     labels: np.ndarray,
-    pca_basis: str = "PCA",
+    pca_basis: PCA,
     metadata_summary: str | None = None,
     show: bool = True,
     save_path: Path | str | None = None,

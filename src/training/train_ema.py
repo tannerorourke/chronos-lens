@@ -131,7 +131,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- TRAINING LOOP ------------------------------------------------
     # ------------------------------------------------------------------
     print(f"Training for {len(loader)} batches (size: {batch_size}) for {epochs} epochs")
-    print(f"Description: {params['meta']['name']}: {params['meta']['description']}")
+    print(f"Description: {params['meta']['tag']}: {params['meta']['description']}")
     
     for epoch in range(start_epoch, epochs + 1):
         model.train()

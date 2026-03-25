@@ -38,7 +38,7 @@ if __name__ == "__main__":
                         help=f"Minimum encounters per patient")
     parser.add_argument("--readm-window-days",  default=READM_WINDOW_DAYS, type=int,
                         help=f"Readmission window in days")
-    parser.add_argument("--val-seq",            default=True, action="store_false")
+    parser.add_argument("--val-seq",            default=False, action="store_false")
     parser.add_argument("--baseline",           default=False, action="store_true")
     parser.add_argument("--dry-run",            default=False, action="store_true")
     args = parser.parse_args()

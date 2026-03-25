@@ -101,7 +101,7 @@ def init_optimizers(
             optimizer,
             warmup_steps=ipe*opt_params.get("warmup_epochs", 0),
             total_steps=ipe*num_epochs,
-            min_lr=base_lr)
+            min_lr=opt_params.get("min_lr", 0.0))
     elif sched_type == "linear_decay":
         min_lr_ratio = opt_params.get("min_lr_ratio", 0.0)
         

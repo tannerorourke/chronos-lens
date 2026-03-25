@@ -95,6 +95,8 @@ class TrainingLogger:
         for key, value in row.items():
             if key in ("epoch", "wall_sec", "steps"):
                 continue
+            if value == "":
+                continue
             v = int(value) if isinstance(value, bool) else float(value)
             self.writer.add_scalar(f"epoch/{key}", v, self.epoch)
         if lr is not None:

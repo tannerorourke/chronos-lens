@@ -79,7 +79,7 @@ def get_pca_stats(pca: PCA, k: int, n_samples: int):
 
     trace_cov = float(eigenvalues.sum())
     mp_upper  = marchenko_pastur_upper(n_samples, D, trace_cov)
-    n_signal  = int((eigenvalues.tolist() > mp_upper).sum())
+    n_signal  = int((eigenvalues > mp_upper).sum())
     
     ev_sq_sum = float(np.sum(eigenvalues ** 2))
     d_eff     = (trace_cov ** 2) / ev_sq_sum if ev_sq_sum > 0 else 0

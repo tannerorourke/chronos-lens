@@ -1,4 +1,3 @@
-import argparse
 from pathlib import Path
 from typing import Any, Dict
 
@@ -7,22 +6,23 @@ import torch
 from torch.utils.data import DataLoader
 from scipy import stats
 
-from src.models.sequential_jepa import JEPA
-from ..utils.io import load_checkpoint
-
 
 
 rng = np.random.default_rng(42)
 
 
 @torch.no_grad()
-def calc_embedding_vecs(model: JEPA, loader: DataLoader, device: torch.device) -> tuple:
+def calc_embedding_vecs(model: torch.nn.Module, loader: DataLoader, device: torch.device) -> dict:
     """ Calculate context, predicted, and target embeddings for all masked tokens in the dataset.
+        This is run ona checkpoint cycle during training.
+
         Returns:
             z_context:      (N, D) context embeddings
             z_pred:         (N, D) predicted embeddings
             z_target:       (N, D) target embeddings
             delta:          (N, D) displacement vectors (pred - ctx)
+            pred_error:     (N, D) prediction error vectors (pred - target)
+            observed_traj:  (N, D) observed trajectory vectors (target - ctx)
             subject_ids:    (N,) arr of subject IDs
             mask_positions: (N,) arr of masked positions in sequence
             labels:         (N,) arr of true tokens at masked positions
@@ -53,11 +53,23 @@ def calc_embedding_vecs(model: JEPA, loader: DataLoader, device: torch.device) -
     z_pred_arr  = np.concatenate(all_z_pred, axis=0)
     z_target    = np.concatenate(all_z_tgt,  axis=0)
     z_pc_delta  = z_pred_arr - z_context
+    pred_error  = z_pred_arr - z_target
+    observed_traj = z_target - z_context
     subject_ids = np.array(all_sids)
     mask_positions = np.concatenate(all_mpos,  axis=0)
     labels      = np.concatenate(all_labels, axis=0)
 
-    return z_context, z_pred_arr, z_target, z_pc_delta, subject_ids, mask_positions, labels
+    return {
+        "z_context": z_context,
+        "z_pred": z_pred_arr,
+        "z_target": z_target,
+        "delta": z_pc_delta,
+        "pred_error": pred_error,
+        "observed_traj": observed_traj,
+        "subject_ids": subject_ids,
+        "mask_positions": mask_positions,
+        "labels": labels
+    }
 
 
 def run_embedding_stat_check(
@@ -65,6 +77,8 @@ def run_embedding_stat_check(
     z_pred:     np.ndarray,
     z_target:   np.ndarray,
     z_pc_delta: np.ndarray,
+    pred_error: np.ndarray = None,
+    observed_traj: np.ndarray = None,
     labels:     np.ndarray = None,
     frac_nontrivial_thresh: float = 0.5,
 ) -> dict:
@@ -110,37 +124,19 @@ def run_embedding_stat_check(
     stat_log["||z_pred-z_tgt||"] = pred_dist
     stat_log["||rand-z_tgt||"] = rand_dist
 
+    # Norm stats for pred_error (P - T) and observed_traj (T - C)
+    if pred_error is not None:
+        pe_norms = np.linalg.norm(pred_error, axis=-1)
+        stat_log["pred_error_norm_mean"] = float(pe_norms.mean())
+        stat_log["pred_error_norm_std"]  = float(pe_norms.std())
+        stat_log["pred_error_norm_min"]  = float(pe_norms.min())
+        stat_log["pred_error_norm_max"]  = float(pe_norms.max())
+
+    if observed_traj is not None:
+        ot_norms = np.linalg.norm(observed_traj, axis=-1)
+        stat_log["observed_traj_norm_mean"] = float(ot_norms.mean())
+        stat_log["observed_traj_norm_std"]  = float(ot_norms.std())
+        stat_log["observed_traj_norm_min"]  = float(ot_norms.min())
+        stat_log["observed_traj_norm_max"]  = float(ot_norms.max())
+
     return stat_log
-    
-    
-def save_embedding_vecs(
-    model: JEPA,
-    loader: DataLoader,
-    device: torch.device,
-    out_fn: Path,
-    log = False
-):
-    """ Fetch context, predicted, and target embeddings for all masked tokens,
-        and save to a .npz file for later analysis.
-    """
-    model.eval()
-
-    z_context, z_pred, z_target, z_pc_delta, subject_ids, mask_positions, labels = \
-        calc_embedding_vecs(model, loader, device)
-
-    # don't save if predictor collapsed
-    stat_log = run_embedding_stat_check(z_context, z_pred, z_target, z_pc_delta, labels=labels)
-    if not all([stat_log['z_pred_ok'], stat_log['zpc_delta_ok'], stat_log["pred_ok"]]):
-        print("Embeddings NOT saved: one or more sanity checks failed.")
-        return out_fn, stat_log
-
-    np.savez(out_fn,
-             z_context = z_context, 
-             z_pred = z_pred, 
-             z_target = z_target,
-             delta = z_pc_delta,
-             subject_ids = subject_ids,
-             mask_positions = mask_positions,
-             labels = labels)
-    
-    return out_fn, stat_log

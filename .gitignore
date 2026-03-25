@@ -1,10 +1,15 @@
+# Build artifacts
+data/**
+
+# Model artifacts
+experiments/*/**
+!experiments/*/*.yaml
+!experiments/*/run_summary.json
+
+
 # compile files
 __pycache__/
 *.egg-info/
-
-# Build artifacts
-data/parquet
-data/processed
 
 # Jupyter Notebook
 .ipynb_checkpoints

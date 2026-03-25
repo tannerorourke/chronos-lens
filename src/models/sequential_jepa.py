@@ -124,7 +124,8 @@ class TransformerEncoder(nn.Module):
             single sequence-level vector (mean-pool over valid positions), i.e. shape (B, embed_dim).
         """
         B, T, _ = x.shape
-        positions = torch.arange(T, device=x.device).unsqueeze(0)  # (1, T)
+        max_pos = self.pos_embedding.num_embeddings - 1
+        positions = torch.arange(T, device=x.device).clamp(max=max_pos).unsqueeze(0)  # (1, T)
         x = x + self.pos_embedding(positions)
 
         for layer in self.layers:
@@ -171,7 +172,7 @@ class JEPA(nn.Module):
         self.tau         = tau
         self.max_seq_len = max_seq_len
 
-        # Shared token embedding, used by context and target
+        # Online token embedding (context path; target gets its own EMA copy)
         self.token_embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=pad_idx)
         self.context_encoder = TransformerEncoder(
             embed_dim, num_heads, num_layers, max_seq_len, ffn_dim)
@@ -179,6 +180,11 @@ class JEPA(nn.Module):
         # Target encoder: EMA shadow of context_encoder. No backprop.
         self.target_encoder = copy.deepcopy(self.context_encoder)
         for p in self.target_encoder.parameters():
+            p.requires_grad_(False)
+
+        # Target token embedding: EMA shadow of token_embedding. No backprop.
+        self.target_token_embedding = copy.deepcopy(self.token_embedding)
+        for p in self.target_token_embedding.parameters():
             p.requires_grad_(False)
 
         # Positional embedding for the mask (target) position
@@ -193,10 +199,15 @@ class JEPA(nn.Module):
 
     @torch.no_grad()
     def update_target_encoder(self):
-        """Exponential moving average update of target encoder weights."""
+        """Exponential moving average update of target encoder and embedding weights."""
         for p_ctx, p_tgt in zip(
             self.context_encoder.parameters(),
             self.target_encoder.parameters(),
+        ):
+            p_tgt.data.mul_(self.tau).add_((1.0 - self.tau) * p_ctx.data)
+        for p_ctx, p_tgt in zip(
+            self.token_embedding.parameters(),
+            self.target_token_embedding.parameters(),
         ):
             p_tgt.data.mul_(self.tau).add_((1.0 - self.tau) * p_ctx.data)
 
@@ -229,11 +240,9 @@ class JEPA(nn.Module):
 
         # -- Target path (no grads - EMA encoder) ---------------------
         with torch.no_grad():
-            # (B, 1, D) single encounter as target
-            tgt_embs = embed_and_pool(self.token_embedding, tgt_tokens, tgt_tok_mask).unsqueeze(1)
-            # single encounter: no padding, so pad mask is all False
-            tgt_pad_mask = torch.zeros(B, 1, dtype=torch.bool, device=tgt_tokens.device)
-            z_target = self.target_encoder(tgt_embs, tgt_pad_mask) # (B, D)
+            # (B, 1, D) single encounter as target — use EMA embedding
+            tgt_embs = embed_and_pool(self.target_token_embedding, tgt_tokens, tgt_tok_mask).unsqueeze(1)
+            z_target = self.target_encoder(tgt_embs)  # (B, D)  single encounter, no padding
 
         # -- Predictor ----------------------------------------------------
         # Clamp mask_pos to stay within positional embedding capacity

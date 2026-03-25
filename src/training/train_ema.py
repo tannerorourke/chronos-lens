@@ -4,12 +4,15 @@ Minimal JEPA training pipeline for longitudinal patient sequences.
 Architecture
 ------------
   token_embedding  : nn.Embedding(vocab_size, 64), mean-pooled per encounter
-  context_encoder  : hand-rolled Transformer — shared by context & target paths
-  target path      : stop-gradient (no EMA)
+  context_encoder  : hand-rolled Transformer (2 layers, 2 heads, dim=64) → z_context
+  target_encoder   : EMA copy of context_encoder (τ=0.996), no backprop → z_target
   predictor        : MLP(z_context ⊕ pos_emb → z_pred, hidden=128)
-  loss             : MSE(z_pred, z_target) + VICReg variance/covariance regularization
+  loss             : MSE(z_pred, z_target)
 """
 from os import environ
+
+
+
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # ^^ Odd non-breaking Windows issue where PyTorch's MKL/Intel OpenMP gets initialized during the save operation
 
@@ -20,10 +23,10 @@ import random
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from src.models.jepa_stopgrad import JEPAStopGrad
-from src.training.losses import jepa_stopgrad_loss
+from src.models.sequential_jepa import JEPA
 from src.training.dataset import JEPADataset, collate_fn
 from src.training.optimizers import init_optimizers
 from src.training.logging import GradientMonitor, TrainingLogger
@@ -31,12 +34,12 @@ from src.training.checkpoint import save_embedding_vecs, save_checkpoint, load_c
 from src.utils.io import load_sequences, build_vocab, EXPERIMENTS_DIR
 
 
+
 SEED = 42
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 np.random.seed(SEED)
 random.seed(SEED)
-
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- Params passed from config file ---
@@ -53,9 +56,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- optimization
     opt_params =    params['optimization']
     epochs =        opt_params['epochs']
-    sim_weight =    opt_params.get('sim_weight', 1.0)
-    var_weight =    opt_params.get('var_weight', 1.0)
-    cov_weight =    opt_params.get('cov_weight', 0.04)
+    tau =           opt_params.get('tau', 0.996)
     
     # --- data settings
     data_p =        params['data']
@@ -87,23 +88,20 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         json.dump(vocab, fh, indent=2)
         
     dataset = JEPADataset(patients, vocab)
-    use_cuda = device.type == "cuda"
     loader = DataLoader(
         dataset, batch_size,
-        shuffle=True, collate_fn=collate_fn, drop_last=False,
-        num_workers=2, persistent_workers=True,
-        pin_memory=use_cuda)
+        shuffle=True, collate_fn=collate_fn, drop_last=False)
 
     
     # --- init model ---
-    model = JEPAStopGrad(
+    model = JEPA(
         embed_dim=embed_dim,
         num_heads=num_heads,
         num_layers=num_layers,
         max_seq_len=max_seq_len,
         ffn_dim=ffn_dim,
         predictor_hidden=predictor_hidden,
-        vocab_size=len(vocab), pad_idx=pad_idx,
+        vocab_size=len(vocab), tau=tau, pad_idx=pad_idx,
     ).to(device)
     
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -133,64 +131,55 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- TRAINING LOOP ------------------------------------------------
     # ------------------------------------------------------------------
     print(f"Training for {len(loader)} batches (size: {batch_size}) for {epochs} epochs")
-    print(f"Description: {params['meta'].get('tag', '')}: {params['meta']['description']}")
+    print(f"Description: {params['meta']['name']}: {params['meta']['description']}")
     
-    vicreg_keys = ("sim", "var_pred", "var_ctx", "cov_pred", "cov_ctx")
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         epoch_losses: list[float] = []
-        vicreg_accum = {k: 0.0 for k in vicreg_keys}
-        n_batches = 0
         
         for batch in loader:
             batch_dev = {
-                k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+                k: v.to(device) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
             }
 
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad()
             
             if use_bfloat16 and scaler is not None:
                 with torch.amp.autocast('cuda', dtype=torch.bfloat16): # type: ignore # (pylance)
                     z_context, z_pred, z_target = model(batch_dev)
-                    loss_dict = jepa_stopgrad_loss(
-                        z_pred, z_target, z_context,
-                        sim_weight, var_weight, cov_weight)
-                    loss = loss_dict["loss"]
-
+                    loss = F.mse_loss(z_pred, z_target)
+                    
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
                 grad_mon.capture()
                 scaler.step(optimizer)
                 scaler.update()
-
+                
             else:
                 z_context, z_pred, z_target = model(batch_dev)
-                loss_dict = jepa_stopgrad_loss(
-                    z_pred, z_target, z_context,
-                    sim_weight, var_weight, cov_weight)
-                loss = loss_dict["loss"]
+                loss = F.mse_loss(z_pred, z_target)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
                 grad_mon.capture()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float('inf'))
                 optimizer.step()
-
+                
             if scheduler is not None:
                 scheduler.step()
 
+            model.update_target_encoder()
+            
             epoch_losses.append(loss.item())
             logger.log_step(loss.item())
-            for k in vicreg_keys:
-                vicreg_accum[k] += loss_dict[k].item()
-            n_batches += 1
 
         # ----------------------------------------------------------------------------
         model.eval()
         
         if checkpoint_every is not None and (epoch % checkpoint_every == 0 or epoch == epochs):
-            save_checkpoint(epoch, logger.global_step, model, optimizer, scheduler, scaler, logger._loss_history, {
-                "architecture": "stopgrad",
+            save_checkpoint(epoch, logger.global_step,model, optimizer, scheduler, scaler, logger._loss_history, {
                 "embed_dim":    embed_dim,
                 "num_heads":    num_heads,
                 "num_layers":   num_layers,
@@ -198,6 +187,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 "max_seq_len":  max_seq_len,
                 "predictor_hidden": predictor_hidden,
                 "vocab_size":   len(vocab),
+                "tau":          tau,
                 "pad_idx":      pad_idx,
             }, ckpt_dir)
             
@@ -205,12 +195,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         if log_emb_vecs and (epoch % log_emb_vecs_every == 0 or epoch == epochs or epoch == 1):
             _, stat_log = save_embedding_vecs(model, loader, device, epoch, emb_dir)
         
-        vicreg_log = {k: vicreg_accum[k] / n_batches for k in vicreg_keys}
-        logger.log_epoch(
-            loss=float(np.mean(epoch_losses)),
-            lr=optimizer.param_groups[0]['lr'],
-            **vicreg_log, **stat_log, **grad_mon.get_metrics(),
-        )
+        logger.log_epoch(loss=float(np.mean(epoch_losses)), **stat_log)
         grad_mon.reset()
     
     # ------------------------------------------------------------------

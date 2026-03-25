@@ -10,12 +10,18 @@ Clinical ML models operating on temporal patient data demand interpretability, y
 
 This project aims to utilize JEPA's prediction of it's latent embedding space as a medium of mechanistic interpretability (MI) analysis directly, rather than force human labels and discretize them out of the model. Instead of realigning labels to basis directions in an SAE, the core contribution of this work is to identify geometric clusters, basis directions, and bands, and then iterate the **entire** clinical concept space to extract features. In doing this, the hypothesis is the model may show a learned geometry that doesn't exist directly in our vocabulary.
 
-The JEPA encodes patient encounter sequences (ICD codes, active medications) and predicts the embedding of a masked future encounter. A context encoder processes the sequence an EMA-updated target encoder providing training signal. The predictor maps context representations to target representations in latent space, producing the displacement field $\Delta$ that is the primary object of analysis. Because both $z_{pred}$ and $z_{context}$ live in the same embedding space by construction, their difference is more easily geometrically interpreted than a softmax'ed model. In doing this, we can question:
+The JEPA encodes patient encounter sequences (ICD codes, active medications) and predicts the embedding of a masked future encounter. A context encoder processes the sequence an EMA-updated target encoder providing training signal. The predictor maps context representations to target representations in latent space. Because $z_{pred}$, $z_{context}$, and $z_{target}$ live in the same embedding space by construction, three displacement vectors decompose the prediction geometry:
+- **$\Delta$ (P$-$C)**: the predicted displacement — what the model expects to change
+- **pred_error (P$-$T)**: the prediction error — what the model gets wrong
+- **observed_traj (T$-$C)**: the observed trajectory — what actually changed
+
+These are geometrically interpretable in ways that softmax'ed models are not. In doing this, we can question:
 - what of clinical importance in JEPA's latent space's geometric structure can be explained by clinical metadata via LASSO regression?
 - How does the predictor learn the *structure* of the embedding space?
 - Can we map latent space embedding predictions to untampered human labels?
 - where in the encoder do meaningful representations emerge?
 - do principal component axes correspond to stable patients traits vs. dynamic patient state changes?
+- how much of each axis of real patient change does the predictor capture vs. miss?
 
 Simply, *can the latent space of a [JEPA] model explain its predictions?*
 

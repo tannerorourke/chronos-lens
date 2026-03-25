@@ -24,6 +24,7 @@ class JEPAStopGrad(nn.Module):
         ffn_dim:          int = 256,
         predictor_hidden: int = 128,
         pad_idx:          int = 0,
+        **kwargs # absorb saving architecture and use_bfloat16 in model params
     ):
         super().__init__()
         self.embed_dim   = embed_dim

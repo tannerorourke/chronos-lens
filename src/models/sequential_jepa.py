@@ -166,6 +166,7 @@ class JEPA(nn.Module):
         predictor_hidden: int = 128,
         tau:              float = 0.996,
         pad_idx:          int = 0,
+        **kwargs # absorb saving architecture and use_bfloat16 in model params
     ):
         super().__init__()
         self.embed_dim   = embed_dim

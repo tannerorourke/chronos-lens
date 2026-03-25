@@ -9,10 +9,10 @@ Public API
   freeze_jepa(checkpoint_path, device)
       → loads a trained JEPA, sets eval + requires_grad_(False)
 
-  train_sae(delta, n_features, top_k, epochs, lr, batch_size, device, seed)
+  train_sae(disp_vec, n_features, top_k, epochs, lr, batch_size, device, seed)
       → trained SparseAutoencoder, loss history
 
-  save_sae_results(model, delta, loss_history, output_dir)
+  save_sae_results(model, disp_vec, loss_history, output_dir)
       → persists checkpoint, dictionary, activations, loss curve
 """
 
@@ -29,25 +29,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from src.models.sae import SparseAutoencoder
-from src.training.checkpoint import load_model_from_checkpoint
+from src.training.checkpoint import load_model_notrain
 
 
 SEED = 42
-
-
-# =========================================================================
-# Freeze JEPA
-# =========================================================================
-
-def freeze_jepa(
-    checkpoint_path: Path,
-    device: torch.device,
-) -> torch.nn.Module:
-    """ Load trained JEPA checkpoint -> eval + freeze all parameters """
-    model, _ = load_model_from_checkpoint(checkpoint_path, device, restore_rng=False)
-    model.eval()
-    model.requires_grad_(False)
-    return model
 
 
 # =========================================================================
@@ -55,7 +40,7 @@ def freeze_jepa(
 # =========================================================================
 
 def train_sae(
-    delta: np.ndarray,
+    disp_vec: np.ndarray,
     n_features: int = 256,
     top_k: int = 12,
     epochs: int = 200,
@@ -68,7 +53,7 @@ def train_sae(
 
     Parameters
     ----------
-    delta      : (N, embed_dim) displacement field
+    disp_vec   : (N, embed_dim) displacement field
     n_features : dictionary size (overcomplete, typically 4x embed_dim)
     top_k      : active features per sample
     epochs     : training epochs
@@ -85,16 +70,17 @@ def train_sae(
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    N, embed_dim = delta.shape
-    tensor_delta = torch.tensor(delta, dtype=torch.float32)
-    dataset = TensorDataset(tensor_delta)
+    # --- Dataset ---
+    N, embed_dim = disp_vec.shape
+    tensor_disp_vec = torch.tensor(disp_vec, dtype=torch.float32)
+    dataset = TensorDataset(tensor_disp_vec)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
 
     model = SparseAutoencoder(embed_dim, n_features, top_k).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
+    # --- Training loop ---
     loss_history: list[float] = []
-
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_losses: list[float] = []
@@ -117,7 +103,7 @@ def train_sae(
         if epoch % max(1, epochs // 10) == 0 or epoch == epochs:
             model.eval()
             with torch.no_grad():
-                all_x = tensor_delta.to(device)
+                all_x = tensor_disp_vec.to(device)
                 _, all_act = model(all_x)
                 all_act_np = all_act.cpu().numpy()
 
@@ -154,7 +140,7 @@ def train_sae(
 
 def save_sae_results(
     model: SparseAutoencoder,
-    delta: np.ndarray,
+    disp_vec: np.ndarray,
     loss_history: list,
     output_dir: Path,
 ) -> dict:
@@ -163,7 +149,7 @@ def save_sae_results(
     Parameters
     ----------
     model       : trained SparseAutoencoder
-    delta       : (N, embed_dim) displacement vectors (for final activation extraction)
+    disp_vec       : (N, embed_dim) displacement vectors (for final activation extraction)
     loss_history: per-epoch mean loss
     output_dir  : directory to write outputs
 
@@ -193,8 +179,8 @@ def save_sae_results(
     # --- Activations on full dataset ---
     model.eval()
     with torch.no_grad():
-        tensor_delta = torch.tensor(delta, dtype=torch.float32)
-        _, activations = model(tensor_delta.to(next(model.parameters()).device))
+        tensor_disp_vec = torch.tensor(disp_vec, dtype=torch.float32)
+        _, activations = model(tensor_disp_vec.to(next(model.parameters()).device))
         act_np = activations.cpu().numpy()
     act_path = output_dir / "sae_activations.npy"
     np.save(act_path, act_np)
@@ -215,7 +201,7 @@ def save_sae_results(
         "embed_dim": model.embed_dim,
         "n_features": model.n_features,
         "top_k": model.top_k,
-        "n_samples": delta.shape[0],
+        "n_samples": disp_vec.shape[0],
         "final_loss": loss_history[-1] if loss_history else None,
         "n_epochs": len(loss_history),
         "n_dead_features": int(((act_np != 0).sum(axis=0) == 0).sum()),

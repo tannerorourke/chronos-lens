@@ -2,6 +2,8 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from src.models.sequential_jepa import JEPA
+from src.models.jepa_stopgrad import JEPAStopGrad
 
 
 def load_embedding_vecs(emb_path: Path):
@@ -58,21 +60,22 @@ def save_embedding_vecs(
     return model_vecs, stat_log
 
 
-def save_checkpoint(
-    epoch: int, global_step: int, model, optimizer, scheduler, scaler,
-    loss_history, model_params, save_dir
+def save_checkpoint(model: JEPA | JEPAStopGrad, model_params: dict,
+                    optimizer, scheduler, scaler,
+                    epoch: int, global_step: int, loss_history: list,
+                    save_dir: Path
 ) -> None:
         save_dir.mkdir(parents=True, exist_ok=True)
         file = save_dir / f"checkpoint_{epoch}.pt"
         torch.save({
-            "epoch":        epoch,
-            "global_step":  global_step,
             "model":        model.state_dict(),
+            "model_params": model_params,
             "optimizer":    optimizer.state_dict(),
             "scheduler":    None if scheduler is None else scheduler.state_dict(),
             "scaler":       None if scaler is None else scaler.state_dict(),
+            "epoch":        epoch,
+            "global_step":  global_step,
             "loss_history": loss_history,
-            "model_params": model_params,
             "rng_states": {
                 "torch":    torch.random.get_rng_state(),
                 "numpy":    np.random.get_state(),
@@ -82,25 +85,28 @@ def save_checkpoint(
         print(f"   Checkpoint saved: {save_dir.name}/{file.name} (epoch {epoch})")
 
 
-def load_checkpoint(path, model, optimizer, scheduler, scaler, device, resume_optimizer = False, restore_rng = True):
+def build_model(model_params: dict, device: torch.device):
+    arch = model_params.get("architecture", "stopgrad") # ema, stopgrad
+    
+    if arch == "stopgrad":
+        from src.models.jepa_stopgrad import JEPAStopGrad
+        model = JEPAStopGrad(**model_params)
+    elif arch == "ema":
+        from src.models.sequential_jepa import JEPA
+        model = JEPA(**model_params)
+    else:
+        raise ValueError(f"Unknown architecture: {arch}")
+    
+    return model.to(device)
+
+
+def load_model_notrain(path, device, restore_rng = True):
+    """Load model model checkpoint for analysis/freezing, no training"""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     
-    # validate architecture matches
-    saved = checkpoint["model_params"]
-    for k in ["embed_dim", "num_heads", "num_layers", "ffn_dim"]:
-        cur = getattr(model, k, None)
-        if cur is not None and cur != saved[k]:
-            raise ValueError(f"Config Mismatch: {k}: config={cur}, checkpoint={saved[k]}")
-        
+    model_params = checkpoint["model_params"]
+    model = build_model(model_params, device)
     model.load_state_dict(checkpoint["model"])
-
-    if resume_optimizer:
-        if optimizer is not None and "optimizer" in checkpoint:
-            optimizer.load_state_dict(checkpoint["optimizer"])
-        if scheduler is not None and checkpoint.get("scheduler") is not None:
-            scheduler.load_state_dict(checkpoint["scheduler"])
-        if scaler is not None and checkpoint.get("scaler") is not None:
-            scaler.load_state_dict(checkpoint["scaler"])
             
     if restore_rng and "rng_states" in checkpoint:
         rng = checkpoint["rng_states"]
@@ -109,29 +115,15 @@ def load_checkpoint(path, model, optimizer, scheduler, scaler, device, resume_op
         if rng.get("cuda") is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state(rng["cuda"])
     
-    epoch = checkpoint.get("epoch", 0) + 1
-    global_step = checkpoint.get("global_step", 0)
-    loss_history = checkpoint.get("loss_history", [])
-        
-    return epoch, global_step, loss_history
+    model.eval()
+    return model, checkpoint
 
 
-def load_model_from_checkpoint(path: Path, device: torch.device, restore_rng = True):
-    import torch
-
+def load_model_checkpoint(path: Path, device: torch.device, restore_rng: bool = True):
     checkpoint = torch.load(path, map_location=device, weights_only=False)
-    params = {k: v for k, v in checkpoint["model_params"].items()
-              if k not in ("architecture",)}
-    arch = checkpoint["model_params"].get("architecture", "ema")
-
-    if arch == "stopgrad":
-        from src.models.jepa_stopgrad import JEPAStopGrad
-        params.pop("tau", None)
-        model = JEPAStopGrad(**params).to(device)
-    else:
-        from src.models.sequential_jepa import JEPA
-        model = JEPA(**params).to(device)
-
+    
+    model_params = checkpoint["model_params"]
+    model = build_model(model_params, device)
     model.load_state_dict(checkpoint["model"])
     
     if restore_rng and "rng_states" in checkpoint:
@@ -140,8 +132,10 @@ def load_model_from_checkpoint(path: Path, device: torch.device, restore_rng = T
         np.random.set_state(rng["numpy"])
         if rng.get("cuda") is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state(rng["cuda"])
-    
+            
+    epoch = checkpoint.get("epoch", 0) + 1
+    global_step = checkpoint.get("global_step", 0)
+    loss_hist = checkpoint.get("loss_history", [])
     
     model.eval()
-    
-    return model, checkpoint
+    return model, checkpoint, epoch, global_step, loss_hist

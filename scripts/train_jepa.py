@@ -28,16 +28,21 @@ def main():
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
-        # Enable TF32 only for float32 paths (i.e., when not using bfloat16).
-        # Avoids stacking two levels of reduced precision
-        use_bf16 = params.get('use_bfloat16', False)
-        torch.backends.cuda.matmul.allow_tf32 = not use_bf16
-        torch.backends.cudnn.allow_tf32 = not use_bf16
-        if not use_bf16:
-            torch.set_float32_matmul_precision('high')
         torch.backends.cudnn.benchmark = True
         
-    print(f"\nDevice: {device}")
+        use_bf16 = params.get('use_bfloat16', False)
+        if use_bf16:
+            # Disable tf32 matmul when using bfloat16 to avoid stacking two levels of reduced precision
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = True
+        else:
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+            torch.set_float32_matmul_precision('high')
+    
+    print(f"Device: {device}")
+    print(f"Running model '{args.model}'")
+    print(f"  tag: {params['meta'].get('tag', '')}: {params['meta']['description']}")
     
     app_main(params, run_dir, device)
     

@@ -1,6 +1,6 @@
 model:
     embed_dim: 64
-    num_heads: 2
+    num_heads: 8
     num_layers: 2
     ffn_dim: 256
     max_seq_len: 128
@@ -9,10 +9,10 @@ model:
     use_bfloat16: True
 
 optimization:
-    epochs: 50
-    base_lr: 1e-4
-    schedule: "linear_decay"
-    min_lr_ratio: 0.1
+    epochs: 100
+    base_lr: 3e-4
+    schedule: "warmup_cosine"
+    warmup_epochs: 0.1
     sim_weight: 1.0
     var_weight: 1.0
     cov_weight: 0.04
@@ -24,9 +24,9 @@ data:
 
 artifacts:
     log_emb_vecs: True
-    checkpoint_every: 25
-    log_emb_vecs_every: 0
+    checkpoint_every: 10
+    log_emb_vecs_every: 10
 
 meta:
-    tag: "test_01"
-    description: "Testing successful training (stopgrad)"
+    tag: "sg_v01"
+    description: "First optimization run with Stopgrad JEPA"

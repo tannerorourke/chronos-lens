@@ -16,6 +16,7 @@ dependencies = [
     "pyarrow",
     "umap-learn",
     "pingouin",
+    "tensorboard",
 ]
 
 [tool.setuptools.packages.find]

@@ -52,6 +52,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     batch_size =    data_p['batch_size']
     n_patients =    data_p.get('n_patients', 0)
     pad_idx =       data_p.get('pad_idx', 0)
+    max_encounters = data_p.get('max_encounters', None)
+    max_tokens =    data_p.get('max_tokens', None)
     
     # --- artifact settings
     artifact_p =    params['artifacts']
@@ -65,7 +67,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     with open(run_dir / "vocab.json", "w", encoding="utf-8") as fh:
         json.dump(vocab, fh, indent=2)
         
-    dataset = JEPADataset(patients, vocab)
+    dataset = JEPADataset(patients, vocab, pad_idx,
+                          max_encounters=max_encounters, max_tokens=max_tokens)
     loader = DataLoader(
         dataset, batch_size,
         shuffle=True, collate_fn=collate_fn, drop_last=False)

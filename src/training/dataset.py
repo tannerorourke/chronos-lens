@@ -17,16 +17,21 @@ class JEPADataset(Dataset):
     Patients with fewer than 2 encounters are skipped.
     """
 
-    def __init__(self, patients: list[dict], vocab: dict[str, int], pad_idx: int = 0):
+    def __init__(self, patients: list[dict], vocab: dict[str, int], pad_idx: int = 0,
+                 max_encounters: int | None = None, max_tokens: int | None = None):
         self.samples: list[dict] = []
         self.pad_idx = pad_idx
         for p in patients:
             encs = p.get("encounters", [])
             if len(encs) < 2:
                 continue
+            if max_encounters is not None:
+                encs = encs[:max_encounters]
             label  = int(p.get("label", 0))
             sid    = str(p["subject_id"])
             tokens = [encode_encounter(e, vocab, self.pad_idx) for e in encs]
+            if max_tokens is not None:
+                tokens = [t[:max_tokens] for t in tokens]
             for mask_pos in range(len(encs)):
                 self.samples.append({
                     "context":    [tokens[i] for i in range(len(encs)) if i != mask_pos],

@@ -21,6 +21,8 @@ data:
     batch_size: 64
     n_patients: 1000
     pad_idx: 0
+    max_encounters: null    # max encounters per patient (null = no limit)
+    max_tokens: null         # max tokens per encounter (null = no limit)
 
 artifacts:
     log_emb_vecs: True

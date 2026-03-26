@@ -18,7 +18,7 @@ from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
 from sklearn.preprocessing import StandardScaler
 
 
-SEED = 42
+from src.utils.seed import SEED
 
 
 # =========================================================================

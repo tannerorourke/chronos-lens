@@ -40,8 +40,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from hdbscan import HDBSCAN
 
-SEED = 42
-rng  = np.random.default_rng(SEED)
+from src.utils.seed import SEED, get_rng
+rng  = get_rng()
 
 # =============================================================================
 # Drug class definitions  (extensible — add new classes or members as needed)

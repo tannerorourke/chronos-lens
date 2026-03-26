@@ -32,7 +32,7 @@ from src.models.sae import SparseAutoencoder
 from src.training.checkpoint import load_model_notrain
 
 
-SEED = 42
+from src.utils.seed import SEED
 
 
 # =========================================================================

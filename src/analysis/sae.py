@@ -22,7 +22,7 @@ from src.models.sae import SparseAutoencoder
 from src.utils.io import load_sequences_dict
 
 
-SEED = 42
+from src.utils.seed import SEED
 
 
 # =========================================================================

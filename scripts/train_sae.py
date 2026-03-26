@@ -14,6 +14,7 @@ import torch
 import yaml
 
 from src.utils.io import EXPERIMENTS_DIR
+from src.utils.seed import load_seed, set_global_seed
 from src.training.sae.train_sae import train_sae, save_sae_results
 
 
@@ -55,6 +56,9 @@ def main():
     model_dir = EXPERIMENTS_DIR / args.model
     if not model_dir.exists():
         raise FileNotFoundError(f"Model directory not found: {model_dir}")
+
+    # --- Seed from parent model config ---
+    set_global_seed(load_seed(model_dir))
 
     # --- Load SAE config ---
     cfg = load_sae_config(model_dir)

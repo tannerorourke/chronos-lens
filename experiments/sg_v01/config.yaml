@@ -30,5 +30,6 @@ artifacts:
     log_emb_vecs_every: 10
 
 meta:
+    seed: 42
     tag: "sg_v01"
     description: "First optimization run with Stopgrad JEPA"

@@ -19,7 +19,6 @@ environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from typing import Dict
 from pathlib import Path
 import json
-import random
 
 import numpy as np
 import torch
@@ -32,13 +31,6 @@ from src.training.optimizers import init_optimizers
 from src.training.logging import GradientMonitor, TrainingLogger
 from src.training.checkpoint import build_model, save_embedding_vecs, save_checkpoint, load_model_checkpoint
 from src.utils.io import load_sequences, build_vocab, EXPERIMENTS_DIR
-
-
-SEED = 42
-torch.manual_seed(SEED)
-torch.cuda.manual_seed_all(SEED)
-np.random.seed(SEED)
-random.seed(SEED)
 
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:

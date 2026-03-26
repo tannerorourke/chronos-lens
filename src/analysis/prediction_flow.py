@@ -20,6 +20,7 @@ from sklearn.decomposition import PCA
 
 from src.models.sae import SparseAutoencoder
 from src.analysis.plotting import show_or_savefig
+from src.utils.seed import SEED
 
 
 VECTOR_NAMES = ("delta", "pred_error", "observed_traj")
@@ -346,7 +347,7 @@ def select_interesting_patients(
     z_context: np.ndarray,
     labels: np.ndarray,
     n: int = 5,
-    seed: int = 42,
+    seed: int = SEED,
 ) -> list[int]:
     """Select patients worth visualising across different criteria.
 

@@ -2,6 +2,7 @@ import argparse
 import yaml
 import torch
 from src.utils.io import init_run_dir
+from src.utils.seed import set_global_seed
 from src.training.train import main as app_main
   
 
@@ -43,7 +44,8 @@ def main():
     print(f"Device: {device}")
     print(f"Running model '{args.model}'")
     print(f"  tag: {params['meta'].get('tag', '')}: {params['meta']['description']}")
-    
+
+    set_global_seed(params.get("meta", {}).get("seed"))
     app_main(params, run_dir, device)
     
 

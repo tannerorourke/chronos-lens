@@ -18,8 +18,8 @@ import phate as phate_module
 import pingouin as pg
 
 
-SEED = 42
-rng  = np.random.default_rng(SEED)
+from src.utils.seed import SEED, get_rng
+rng  = get_rng()
 
 
 # =============================================================================

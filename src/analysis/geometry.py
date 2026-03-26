@@ -14,6 +14,7 @@ from scipy import stats
 
 from sklearn.decomposition import PCA
 import umap as umap_module
+import phate as phate_module
 import pingouin as pg
 
 
@@ -38,10 +39,10 @@ def marchenko_pastur_upper(n: int, p: int, trace: float) -> float:
 
 # -----------------
 
-def fit_pca(delta: np.ndarray, k: int, seed: int = SEED) -> tuple[PCA, np.ndarray, np.ndarray]:
+def fit_pca(delta: np.ndarray, k: int) -> tuple[PCA, np.ndarray, np.ndarray]:
     """ Uses n_components=D_embed for PCA so the complete eigenvalue spectrum is available """
     _, D = delta.shape
-    pca  = PCA(n_components=D, random_state=seed, svd_solver="full")
+    pca  = PCA(n_components=D, random_state=SEED, svd_solver="full")
     pca.fit(delta)
     
     pca_projections = pca.transform(delta)
@@ -63,8 +64,6 @@ def get_pca_stats(pca: PCA, k: int, n_samples: int):
         Maximum number of principal components to compute
     n_samples : int
         Number of samples
-    seed : int
-        Random seed
 
     References
     ----------
@@ -104,39 +103,82 @@ def get_pca_stats(pca: PCA, k: int, n_samples: int):
 # UMAP
 # =============================================================================
 
-def fit_umap_2d(
-    delta:       np.ndarray,
+def fit_tform_umap_2d(
+    vec:       np.ndarray,
     n_neighbors: int = 15,
-    metric:      str = "cosine",
-    seed:        int = SEED,
+    metric:      str = "cosine"
 ) -> np.ndarray:
     """
-    Fit UMAP on the displacement field.
-
-    "Cosine metric (default) is consistent with the pairwise distance
-    measure used throughout the divergence and clustering analyses
-    and avoids the curse of dimensionality"
+    Fit transform UMAP on a latent representation vector.
 
     Parameters
     ----------
-    delta       : (N, D) displacement vectors
+    vec       : (N, D) displacement vectors
     n_neighbors : UMAP locality parameter (automatically clamped to N-1)
     metric      : distance metric — 'cosine' recommended; 'euclidean' also valid
-    seed        : random state for reproducibility
 
     Returns
     -------
     umap_embedding : (N, 2) UMAP embedding
     """
 
-    N = delta.shape[0]
+    N = vec.shape[0]
     reducer = umap_module.UMAP(
         n_components=2,
         n_neighbors=min(n_neighbors, N - 1),
         metric=metric,
-        random_state=seed,
+        random_state=SEED,
     )
-    return np.asarray(reducer.fit_transform(delta), dtype=np.float64)
+    return np.asarray(reducer.fit_transform(vec), dtype=np.float64)
+
+# =============================================================================
+# PHATE
+# =============================================================================
+
+def fit_tform_phate_2d(
+    vec:  np.ndarray,
+    knn:   int = 15,
+    t = "auto"
+) -> np.ndarray:
+    """
+    Fit transform PHATE on a latent representation vector.
+
+    Parameters
+    ----------
+    vec  : (N, D) input vectors
+    knn  : k-nearest-neighbors for the affinity graph (clamped to N-1)
+    t    : diffusion time scale ("auto" or int)
+
+    Returns
+    -------
+    phate_embedding : (N, 2) float64 PHATE embedding
+    """
+    N = vec.shape[0]
+    reducer = phate_module.PHATE(
+        n_components=2,
+        knn=min(knn, N - 1),
+        t=t,
+        random_state=SEED,
+        verbose=0,
+    )
+    return np.asarray(reducer.fit_transform(vec), dtype=np.float64)
+
+
+def fit_phate(
+    vec:  np.ndarray,
+    knn:   int = 15,
+    dims: int  = 2,
+    t = "auto"
+) -> phate_module.PHATE:
+    N = vec.shape[0]
+    reducer = phate_module.PHATE(
+        n_components=min(dims, 3), 
+        knn=min(knn, N - 1),
+        t=t, 
+        random_state=SEED, 
+        verbose=0
+    )
+    return reducer.fit(vec)
 
 # =============================================================================
 # Divergent pairs analysis

@@ -457,6 +457,49 @@ def plot_context_umap(
     show_or_savefig(fig, show, save_path)
 
 
+def plot_umap_phate_comparison(
+    umap_embedding: np.ndarray,
+    phate_embedding: np.ndarray,
+    labels: np.ndarray,
+    show: bool = True, save_path: Path | None = None,
+):
+    """Side-by-side UMAP vs PHATE, both coloured by readmission label."""
+    fig, (ax_u, ax_p) = plt.subplots(1, 2, figsize=(13, 5))
+
+    for ax, emb, title, ax_prefix in [
+        (ax_u, umap_embedding, "UMAP (euclidean)", "UMAP"),
+        (ax_p, phate_embedding, "PHATE", "PHATE"),
+    ]:
+        for lbl_val, col in [(0, "steelblue"), (1, "tomato")]:
+            mask = labels == lbl_val
+            tag = "readmitted" if lbl_val else "not readmitted"
+            ax.scatter(emb[mask, 0], emb[mask, 1],
+                       c=col, s=10, alpha=0.5, label=f"{tag} (n={mask.sum()})",
+                       rasterized=True)
+        ax.set_xlabel(f"{ax_prefix}-1")
+        ax.set_ylabel(f"{ax_prefix}-2")
+        ax.set_title(title)
+        ax.legend(fontsize=8)
+
+    fig.suptitle("Patient State Space (z_context)", fontsize=11)
+    fig.tight_layout()
+
+    show_or_savefig(fig, show, save_path)
+    
+    
+def plot_phate_eigen_decomp(
+    eigs: np.ndarray, phate_nn: int, n_eigs: int,
+    show: bool = True, save_path: Path | None = None,
+):
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(range(1, len(eigs) + 1), eigs, "o-", markersize=4, color="teal")
+    ax.set_xlabel("Component index")
+    ax.set_ylabel("Diffusion operator eigenvalue")
+    ax.set_title(f"PHATE diffusion operator spectrum (top {n_eigs}, knn={phate_nn})")
+    ax.axhline(0, color="gray", linestyle=":", linewidth=0.8)
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path)
+
 # =============================================================================
 # Plotting - Divergence
 # =============================================================================

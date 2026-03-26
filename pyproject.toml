@@ -15,6 +15,7 @@ dependencies = [
     "db-dtypes",
     "pyarrow",
     "umap-learn",
+    "phate",
     "pingouin",
     "tensorboard",
 ]

@@ -29,9 +29,10 @@ def gpu_timer(closure, log_timings=True):
 
 
 class TrainingLogger:
+    """ All-in-one csv, tensorboard, and console logger. """
     def __init__(
         self, 
-        run_dir: Path, 
+        logdir: Path, 
         epoch: int = 0,
         global_step: int = 0, 
         loss_history: list[float] = None, 
@@ -45,8 +46,8 @@ class TrainingLogger:
         self._epoch_losses: list[float] = []
         self._loss_history: list[float] = loss_history if loss_history is not None else []
 
-        self.run_dir = run_dir
-        self.log_dir = run_dir / "logs"
+        self.logdir = logdir
+        self.log_dir = logdir / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
         self._csv_path = self.log_dir / "epoch_metrics.csv"
@@ -54,18 +55,9 @@ class TrainingLogger:
         self._csv_writer = None  # initialized on first log_epoch (dynamic columns)
 
         # TensorBoard
-        self.writer = SummaryWriter(log_dir=str(run_dir / "tb_logs"))
+        self.writer = SummaryWriter(log_dir=str(logdir / "tb_logs"))
 
-        # Freeze config YAML and log to TensorBoard
-        config_path = run_dir / "config.yaml"
-        if config_path.exists():
-            config_text = config_path.read_text(encoding="utf-8")
-            self.writer.add_text("config", f"```yaml\n{config_text}```", 0)
-            config_path = Path(config_path).resolve()
-            config_path.chmod(0o444)
-            print(f"[TrainingLogger] Froze {config_path.name} (read-only)")
-
-        print(f"[TrainingLogger] Logging it up in {run_dir.parent.name}/{run_dir.name}")
+        print(f"[TrainingLogger] Logging it up in {logdir.parent.name}/{logdir.name}")
 
     def log_step(self, loss: float):
         self._epoch_losses.append(loss)

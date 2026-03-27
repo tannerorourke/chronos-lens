@@ -1,0 +1,41 @@
+model:
+    embed_dim: 64
+    num_heads: 2
+    num_layers: 2
+    ffn_dim: 256
+    max_seq_len: 128
+    predictor_hidden: 128
+    architecture: stopgrad # stopgrad | ema | transformer
+optimization:
+    epochs: 50
+    base_lr: 1e-4
+    schedule: "linear_decay"
+    min_lr_ratio: 0.1
+    sim_weight: 1.0
+    var_weight: 1.0
+    cov_weight: 0.04
+data:
+    batch_size: 64
+    n_patients: 1000
+    modality: "all" # all | icd_only | meds_only
+    eval: "90d_readmit" # 30d_readmit | 90d_readmit | next_icd_block
+    max_encounters: null # null = no limit
+    max_tokens: null
+    pin_mem: True
+    root_path: "/data/processed"
+sae_config:
+    n_features: 256
+    top_k: 12
+    epochs: 200
+    lr: 3e-4
+    batch_size: 8
+meta:
+    seed: 42
+    use_bfloat16: True
+    tag: "jepa_stopg_mini"
+    description: "Testing successful training (stopgrad) and pipeline"
+    resume_from: null # provide path to .pt checkpoint. tag must match.
+    log_vecs: True
+    log_vecs_every: 10 # null = once at end
+    checkpoint_every: 10
+    logdir: "experiments/sg_v01"

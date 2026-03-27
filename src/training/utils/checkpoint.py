@@ -17,6 +17,18 @@ from src.models.jepa_stopgrad import JEPAStopGrad
 from src.utils.seed import _restore_rng
 
 
+def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | JEPAStopGrad:
+    """Construct a model from a params dict, filtering non-constructor keys."""
+    arch = model_params.get("architecture", "")
+
+    if arch == "stopgrad":
+        return JEPAStopGrad(**model_params).to(device)
+    elif arch == "ema":
+        return JEPA_EMA(**model_params).to(device)
+    
+    raise ValueError(f"Unknown architecture: '{arch}'")
+
+
 def save_checkpoint(
     model: JEPA_EMA | JEPAStopGrad,
     model_params: dict,
@@ -53,21 +65,6 @@ def save_checkpoint(
     print(f"   Checkpoint saved: {save_dir.name}/{file.name} (epoch {epoch})")
 
 
-def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | JEPAStopGrad:
-    """Construct a model from a params dict, filtering non-constructor keys."""
-    arch = model_params.get("architecture", "stopgrad")
-    ctor_params = {k: v for k, v in model_params.items()}
-
-    if arch == "stopgrad":
-        model = JEPAStopGrad(**ctor_params)
-    elif arch == "ema":
-        model = JEPA_EMA(**ctor_params)
-    else:
-        raise ValueError(f"Unknown architecture: {arch}")
-
-    return model.to(device)
-
-
 def load_model_notrain(
     path: Path,
     device: torch.device,
@@ -88,23 +85,42 @@ def load_model_notrain(
 
 
 def load_model_checkpoint(
+    model,
+    optimizer,
+    scheduler,
+    scaler,
     path: Path,
     device: torch.device,
     restore_rng: bool = True,
-) -> tuple[JEPA_EMA | JEPAStopGrad, dict, int, int, list]:
+) -> tuple:
     """Load a model checkpoint for training resumption."""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
-
-    model_params = checkpoint["model_params"]
-    model = build_model(model_params, device)
-    model.load_state_dict(checkpoint["model"])
-
+    epoch = checkpoint["epoch"]
+    
+    model_dict = checkpoint["model"]
+    model.load_state_dict(model_dict)
+    print(f"loaded {model.architecture} model from epoch {epoch}")
+    
+    optimizer_dict = checkpoint["optimizer"]
+    optimizer.load_state_dict(optimizer_dict)
+    print(f"loaded optimizer from epoch {epoch}")
+    
+    scheduler_dict = checkpoint["scheduler"]
+    if scheduler is not None and scheduler_dict is not None:
+        scheduler.load_state_dict(checkpoint["scheduler"])
+        print(f"loaded scheduler from epoch {epoch}")
+    
+    scaler_dict = checkpoint["scaler"]
+    if scaler is not None and scaler_dict is not None:
+        scaler.load_state_dict(checkpoint["scaler"])
+        print(f"loaded scaler from epoch {epoch}")
+    
     if restore_rng:
         _restore_rng(checkpoint)
 
-    epoch = checkpoint.get("epoch", 0) + 1
-    global_step = checkpoint.get("global_step", 0)
+    model_params = checkpoint["model_params"]
+    global_step = checkpoint["global_step"]
     loss_hist = checkpoint.get("loss_history", [])
 
     model.eval()
-    return model, checkpoint, epoch, global_step, loss_hist
+    return model, model_params, optimizer, scheduler, scaler, epoch, global_step, loss_hist

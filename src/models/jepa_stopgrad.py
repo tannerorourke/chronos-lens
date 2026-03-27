@@ -34,9 +34,10 @@ class JEPAStopGrad(nn.Module):
         ffn_dim:          int = 256,
         predictor_hidden: int = 128,
         pad_idx:          int = 0,
+        architecture:     str = "stopgrad",
     ):
         super().__init__()
-        self.architecture     = "stopgrad"
+        self.architecture     = architecture
         self.vocab_size       = vocab_size
         self.embed_dim        = embed_dim
         self.num_heads        = num_heads

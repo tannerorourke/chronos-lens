@@ -29,7 +29,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from src.models.sae import SparseAutoencoder
-from training.utils.checkpoint import load_model_notrain
+from src.training.utils.checkpoint import load_model_notrain
 
 
 from src.utils.seed import SEED

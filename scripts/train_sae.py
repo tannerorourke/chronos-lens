@@ -15,7 +15,7 @@ import yaml
 
 from src.utils.io import EXPERIMENTS_DIR
 from src.utils.seed import load_seed, set_global_seed
-from src.training.sae.train_sae import train_sae, save_sae_results
+from training.train_sae import train_sae, save_sae_results
 
 
 TARGETS = ("delta", "pred_error", "observed_traj")

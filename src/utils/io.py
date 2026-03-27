@@ -17,35 +17,6 @@ EXPERIMENTS_DIR = ROOT / "experiments"
 
 
 # =============================================================================
-# config IO
-# =============================================================================
-
-def resolve_run_dir(prefix: str) -> Path:
-    existing = sorted(EXPERIMENTS_DIR.glob(f"{prefix}_v*"))
-    if not existing:
-        return EXPERIMENTS_DIR / f"{prefix}_v001"
-    last_num = int(existing[-1].name.split("_v")[-1])
-    return EXPERIMENTS_DIR / f"{prefix}_v{last_num + 1:03d}"
-
-
-def init_run_dir(model: str) -> Path:
-    base_dir = EXPERIMENTS_DIR / model
-    run_dir = base_dir
-
-    if not base_dir.exists() or not (base_dir / "config.yaml").is_file():
-        raise FileNotFoundError(f"[create_run] Expected config.yaml in experiments/{model}")
-
-    has_artifacts = any(
-        (base_dir / sub).exists() and any((base_dir / sub).iterdir())
-        for sub in ["checkpoints", "logs"]
-    )
-    if has_artifacts:
-        run_dir = resolve_run_dir(model)
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-    return run_dir
-
-# =============================================================================
 # Data IO
 # =============================================================================
 
@@ -81,9 +52,36 @@ def load_sequences(n=None) -> list[dict]:
         return sequences[:n]
     except Exception as e:
         raise FileNotFoundError(f"[load_sequences] Error loading .jsonl sequences from '{PROCESSED_DIR}/sequences.jsonl': {e}")
-    # pickle
-    # with open(path, "rb") as f:
-    #     sequences = pickle.load(f)
+    
+
+# =============================================================================
+# config IO
+# =============================================================================
+
+def resolve_run_dir(prefix: str) -> Path:
+    existing = sorted(EXPERIMENTS_DIR.glob(f"{prefix}_v*"))
+    if not existing:
+        return EXPERIMENTS_DIR / f"{prefix}_v001"
+    last_num = int(existing[-1].name.split("_v")[-1])
+    return EXPERIMENTS_DIR / f"{prefix}_v{last_num + 1:03d}"
+
+
+def init_run_dir(model: str) -> Path:
+    base_dir = EXPERIMENTS_DIR / model
+    run_dir = base_dir
+
+    if not base_dir.exists() or not (base_dir / "config.yaml").is_file():
+        raise FileNotFoundError(f"[create_run] Expected config.yaml in experiments/{model}")
+
+    has_artifacts = any(
+        (base_dir / sub).exists() and any((base_dir / sub).iterdir())
+        for sub in ["checkpoints", "logs"]
+    )
+    if has_artifacts:
+        run_dir = resolve_run_dir(model)
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+    return run_dir
     
     
 # =============================================================================

@@ -1,7 +1,7 @@
 """EMA-based JEPA orchestrator.
 
 Composes EncounterEncoder, Predictor, and an EMA target encoder.
-The training loop calls update_target_encoder() after each optimizer step.
+The training loop owns the momentum schedule and EMA parameter update.
 """
 
 import copy
@@ -37,10 +37,10 @@ class JEPA_EMA(nn.Module):
         ffn_dim:          int = 256,
         predictor_hidden: int = 128,
         pad_idx:          int = 0,
-        tau:              float = 0.996,
+        architecture:     str = "ema",
     ):
         super().__init__()
-        self.architecture     = "ema"
+        self.architecture     = architecture
         self.vocab_size       = vocab_size
         self.embed_dim        = embed_dim
         self.num_heads        = num_heads
@@ -48,8 +48,6 @@ class JEPA_EMA(nn.Module):
         self.ffn_dim          = ffn_dim
         self.max_seq_len      = max_seq_len
         self.predictor_hidden = predictor_hidden
-        self.momentum         = tau
-
         self.encoder = EncounterEncoder(
             vocab_size, embed_dim, num_heads, num_layers, max_seq_len, ffn_dim, pad_idx)
         self.predictor = Predictor(embed_dim, predictor_hidden, max_seq_len)
@@ -57,19 +55,6 @@ class JEPA_EMA(nn.Module):
         self.target_encoder = copy.deepcopy(self.encoder)
         for p in self.target_encoder.parameters():
             p.requires_grad_(False)
-
-    def set_momentum(self, m: float):
-        """Set the EMA momentum coefficient (called by the training loop scheduler)."""
-        self.momentum = m
-
-    @torch.no_grad()
-    def update_target_encoder(self):
-        """EMA update. Called from training loop after optimizer.step()."""
-        m = self.momentum
-        for p_online, p_target in zip(
-            self.encoder.parameters(), self.target_encoder.parameters()
-        ):
-            p_target.data.mul_(m).add_((1. - m) * p_online.detach().data)
 
     def forward(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """

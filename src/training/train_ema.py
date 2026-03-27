@@ -5,7 +5,7 @@ EMA JEPA training pipeline for longitudinal patient sequences.
 Architecture
 ------------
   encoder        : EncounterEncoder - online context path (with grads)
-  target_encoder : EMA copy of encoder (tau -> 1.0), no backprop
+  target_encoder : EMA copy of encoder (momentum -> 1.0), no backprop
   predictor      : MLP(z_context + pos_emb -> z_pred)
   loss           : smooth_l1(z_pred, z_target)  (iJEPA)
 """
@@ -22,112 +22,96 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from src.models.jepa_ema import JEPA_EMA
-from training.utils.dataset import MimicDataset, collate_fn
-from training.utils.optimizers import init_optimizers
-from training.utils.logging import GradientMonitor, TrainingLogger
-from training.utils.checkpoint import build_model, save_checkpoint, load_model_checkpoint
+from src.training.utils.dataset import MimicDataset, collate_fn
+from src.training.utils.optimizers import init_optimizers
+from src.training.utils.logging import GradientMonitor, TrainingLogger
+from src.training.utils.checkpoint import build_model, save_checkpoint, load_model_checkpoint
 from src.analysis.displacement import save_embedding_vecs
 from src.utils.io import load_sequences, build_vocab, EXPERIMENTS_DIR
 
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:
-    use_cuda = device.type == "cuda"
 
+    # --- most params are sent to resp. functions ------------------------------
     # --- optimization ---------------------------------------------------------
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
-    tau         = opt_params.get("tau", 0.996)
-    ema_start   = opt_params.get("ema_start", 0.996)
-    ema_end     = opt_params.get("ema_end", 1.0)
+    ema         = opt_params["ema"]
 
     # --- data -----------------------------------------------------------------
-    data_p          = params["data"]
-    batch_size      = data_p["batch_size"]
-    n_patients      = data_p["n_patients"]
-    max_encounters  = data_p.get("max_encounters")
-    max_tokens      = data_p.get("max_tokens")
-
-    # --- artifacts ------------------------------------------------------------
-    art_p               = params["artifacts"]
-    use_bfloat16        = art_p.get("use_bfloat16", False)
-    checkpoint_every    = art_p.get("checkpoint_every") or epochs
-    log_emb_vecs        = art_p.get("log_emb_vecs", True)
-    log_emb_vecs_every  = art_p.get("log_emb_vecs_every") or epochs
+    data_params     = params["data"]
+    batch_size      = data_params["batch_size"]
+    n_patients      = data_params["n_patients"]
+    pin_memory      = data_params.get("pin_mem", True) and device.type == "cuda"
 
     # --- meta -----------------------------------------------------------------
-    seed = params.get("meta", {}).get("seed")
+    meta_p          = params["meta"]
+    seed            = meta_p["seed"]
+    use_bfloat16    = meta_p["use_bfloat16"]
+    log_vecs        = meta_p["log_vecs"]
+    log_vecs_every  = meta_p["log_vecs_every"] or epochs
+    checkpoint_every = meta_p["checkpoint_every"] or epochs
 
-    # --- init sequences, vocab, dataset, loader -------------------------------
+    # --- build sequences, vocab, dataset, loader ------------------------------
     patients = load_sequences(n=n_patients)
     vocab = build_vocab(patients, pad_idx=0, dir=run_dir)
     with open(run_dir / "vocab.json", "w", encoding="utf-8") as fh:
         json.dump(vocab, fh, indent=2)
 
-    dataset = MimicDataset(patients, vocab, pad_idx=0,
-                          max_encounters=max_encounters, max_tokens=max_tokens)
+    dataset = MimicDataset(patients, vocab, data_params, pad_idx=0)
     loader = DataLoader(
         dataset, batch_size,
         shuffle=True, collate_fn=collate_fn, drop_last=False,
         num_workers=2, persistent_workers=True,
-        pin_memory=use_cuda)
+        pin_memory=pin_memory)
 
     ckpt_dir = run_dir / "checkpoints"
     emb_dir  = run_dir / "embeddings"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     emb_dir.mkdir(parents=True, exist_ok=True)
-
+    
     # --- model ----------------------------------------------------------------
-    start_epoch, global_step, loss_history = 1, 1, []
-    _ckpt = None
-
-    if params.get("resume_from"):
-        ckpt_path = EXPERIMENTS_DIR / params["resume_from"]
-        model, _ckpt, start_epoch, global_step, loss_history = \
-            load_model_checkpoint(ckpt_path, device, restore_rng=True)
-        model_params = _ckpt["model_params"]
-    else:
-        model_params = {
-            "architecture":     params["model"].get("architecture", "ema"),
-            "embed_dim":        params["model"]["embed_dim"],
-            "num_heads":        params["model"]["num_heads"],
-            "num_layers":       params["model"]["num_layers"],
-            "ffn_dim":          params["model"]["ffn_dim"],
-            "max_seq_len":      params["model"]["max_seq_len"],
-            "predictor_hidden": params["model"]["predictor_hidden"],
-            "tau":              tau,
-            "vocab_size":       len(vocab),
-        }
-        model = build_model(model_params, device)
+    model_params = params["model"]
+    model_params["vocab_size"] = len(vocab)
+    model = build_model(model_params, device)
     assert type(model) == JEPA_EMA
-
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total trainable params: {(n_params / 1e6):.2f}M")
-
+    
     # --- init optimizer / scheduler / scaler ----------------------------------
     optimizer, scheduler, scaler = init_optimizers(
         model, opt_params,
         ipe=len(loader),
         num_epochs=epochs,
         use_bfloat16=use_bfloat16)
+    
+    # --- momentum schedule---------------------------------------------
+    ipe = len(loader)
+    momentum_scheduler = (
+        ema[0] + i*(ema[1]-ema[0]) / ipe*epochs
+        for i in range(ipe*epochs + 1))
 
-    if _ckpt is not None:
-        if _ckpt.get("optimizer"):
-            optimizer.load_state_dict(_ckpt["optimizer"])
-        if scheduler is not None and _ckpt.get("scheduler") is not None:
-            scheduler.load_state_dict(_ckpt["scheduler"])
-        if scaler is not None and _ckpt.get("scaler") is not None:
-            scaler.load_state_dict(_ckpt["scaler"])
+
+    start_epoch, global_step, loss_history = 1, 1, []
+    # --- load checkpoint? ----------------------------------------------
+    if params.get("resume_from"):
+        ckpt_path = EXPERIMENTS_DIR / params["resume_from"]
+        model, model_params, optimizer, scheduler, scaler, start_epoch, global_step, loss_history = \
+            load_model_checkpoint(
+                model,
+                optimizer,
+                scheduler,
+                scaler,
+                ckpt_path,
+                device,
+                restore_rng=True)
+        for _ in range((start_epoch - 1) * ipe):
+            next(momentum_scheduler)
+    
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total trainable params: {(n_params / 1e6):.2f}M")
 
     logger   = TrainingLogger(run_dir, start_epoch, global_step, loss_history)
     grad_mon = GradientMonitor(model)
-
-    # --- momentum schedule---------------------------------------------
-    ipe = len(loader)
-    total_steps = ipe * epochs
-    momentum_scheduler = (
-        ema_start + i * (ema_end - ema_start) / total_steps
-        for i in range(total_steps + 1)
-    )
 
     # ------------------------------------------------------------------
     # --- TRAINING LOOP ------------------------------------------------
@@ -172,8 +156,11 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             if scheduler is not None:
                 scheduler.step()
 
-            model.set_momentum(next(momentum_scheduler))
-            model.update_target_encoder()
+            # -- EMA update of target encoder (matching iJEPA reference)
+            with torch.no_grad():
+                m = next(momentum_scheduler)
+                for param_q, param_k in zip(model.encoder.parameters(), model.target_encoder.parameters()):
+                    param_k.data.mul_(m).add_((1. - m) * param_q.detach().data)
 
             epoch_losses.append(loss.item())
             logger.log_step(loss.item())
@@ -189,7 +176,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                             ckpt_dir, seed=seed)
 
         stat_log = {}
-        if log_emb_vecs and (epoch % log_emb_vecs_every == 0 or epoch == epochs or epoch == 1):
+        if log_vecs and (epoch % log_vecs_every == 0 or epoch == epochs or epoch == 1):
             _, stat_log = save_embedding_vecs(model, loader, device, epoch, emb_dir)
 
         vicreg_log = {k: 0.0 for k in vicreg_keys}

@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset
-
+    
 
 def encode_encounter(enc: dict, vocab: dict[str, int], PAD_IDX: int) -> list[int]:
     """Return a list of token indices for one encounter dict."""
@@ -17,9 +17,15 @@ class MimicDataset(Dataset):
     Patients with fewer than 2 encounters are skipped.
     """
 
-    def __init__(self, patients: list[dict], vocab: dict[str, int], pad_idx: int = 0,
+    def __init__(self, patients: list[dict], vocab: dict[str, int], data_params: dict, 
+                 pad_idx: int = 0,
                  max_encounters: int | None = None, max_tokens: int | None = None,
                  label_key: str = "label"):
+        max_encounters = data_params["max_encounters"]
+        max_tokens     = data_params["max_tokens"]
+        modality       = data_params["modality"]
+        eval           = data_params["eval"]
+        
         self.samples: list[dict] = []
         self.pad_idx = pad_idx
         self.label_key = label_key

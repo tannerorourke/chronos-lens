@@ -32,7 +32,7 @@ def main():
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
         
-        use_bf16 = params.get("artifacts", {}).get("use_bfloat16", False)
+        use_bf16 = params.get("meta", {}).get("use_bfloat16", False)
         if use_bf16:
             # Disable tf32 matmul when using bfloat16 to avoid stacking two levels of reduced precision
             torch.backends.cuda.matmul.allow_tf32 = False

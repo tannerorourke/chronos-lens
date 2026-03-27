@@ -95,7 +95,7 @@ def load_tables(dataset: str, project_id: str = None) -> tuple:
                  dfs["diagnoses"], dfs["prescriptions"])
 
     return dfs["admissions"], dfs["patients"], dfs["diagnoses"], dfs["prescriptions"]
-
+    
 
 def clean_admissions(admissions: pd.DataFrame) -> pd.DataFrame:
     """ Filter to alive-at-discharge admissions and parse datetimes """
@@ -211,6 +211,31 @@ def build_admission_active_meds(
     return adm_meds
 
 
+def get_clean_encounters(
+    admissions: pd.DataFrame,
+    diagnoses: pd.DataFrame,
+    prescriptions: pd.DataFrame,
+    label_prefix: str
+):
+    print("Extracting sequences...\n")
+    
+    print("[1/5] Cleaning admissions")
+    adm_clean = clean_admissions(admissions)
+
+    print("[2/5] Building per-admission ICD codes")
+    adm_dx = build_admission_icd_codes(diagnoses, label_prefix)
+
+    print("[3/5] Building per-admission active medications")
+    adm_meds = build_admission_active_meds(prescriptions, adm_clean)
+
+    print("[4/5] Building encounters")
+    return (
+        adm_clean
+        .merge(adm_dx, on="hadm_id", how="left")
+        .merge(adm_meds, on="hadm_id", how="left")
+    )
+
+
 def _compute_readmission_label(rows: list[dict], readmission_days: int) -> int:
     """Check if any readmission within `readmission_days` has a mood-disorder dx.
 
@@ -236,13 +261,9 @@ def _compute_readmission_label(rows: list[dict], readmission_days: int) -> int:
 
 
 def build_patient_sequences(
-    admissions: pd.DataFrame,
-    patients: pd.DataFrame,
-    diagnoses: pd.DataFrame,
-    prescriptions: pd.DataFrame,
+    encounters: pd.DataFrame,
     min_encounters: int,
-    readm_window_days: int,
-    label_prefix: str
+    readm_window_days: int
 ) -> list[dict]:
     """
     Main extraction: builds patient sequences with readmission-based cohort
@@ -252,39 +273,8 @@ def build_patient_sequences(
     days of a prior discharge, plus >= [min_encounters] encounters total.
 
     Label: 1 if the readmission includes an F30-F39 diagnosis; 0 otherwise.
-
-    Args:
-        admissions:  MIMIC-IV admissions table
-        patients:    MIMIC-IV patients table (reserved for future demographics experiment)
-        diagnoses:   MIMIC-IV diagnoses_icd table
-        prescriptions: MIMIC-IV prescriptions table
-        min_encounters: minimum encounters per patient for inclusion
-        readm_window_days: window for readmission cohort inclusion and label computation
-        label_prefix: ICD-10 prefix for positive label (e.g. "F3" for F30-F39)
-
-    Returns:
-        List of dicts matching the target schema.
     """
-    print("=" * 60)
-    print("MIMIC-IV Patient Sequence Extraction Pipeline")
-    print("=" * 60)
-
-    print("\n[1/5] Cleaning admissions..")
-    adm_clean = clean_admissions(admissions)
-
-    print("\n[2/5] Building per-admission ICD codes..")
-    adm_dx = build_admission_icd_codes(diagnoses, label_prefix)
-
-    print("\n[3/5] Building per-admission active medications...")
-    adm_meds = build_admission_active_meds(prescriptions, adm_clean)
-
-    print("\n[4/5] Building encounters & applying cohort filters...")
-    # (subject_id, hadm_id, times) + dx + meds
-    encounters = (
-        adm_clean
-        .merge(adm_dx, on="hadm_id", how="left")
-        .merge(adm_meds, on="hadm_id", how="left")
-    )
+    print("      applying cohort filters")
 
     # Fill missing lists (admissions with no diagnoses or no active meds)
     encounters["icd_codes"] = encounters["icd_codes"].apply(
@@ -295,7 +285,7 @@ def build_patient_sequences(
 
     # Sort by patient and time
     encounters = encounters.sort_values(["subject_id", "admittime"]).reset_index(drop=True)
-    print(f"  Total encounters: {len(encounters):,}")
+    print(f"      Total encounters: {len(encounters):,}")
 
     # filter > minimum encounters per patient
     enc_per_patient = encounters.groupby("subject_id").size()
@@ -313,10 +303,10 @@ def build_patient_sequences(
             if rows[i + 1]["admittime"] <= window_end:
                 readm_patients.add(subject_id)
                 break
-    print(f"  Patients with readmission within {readm_window_days}d: {len(readm_patients):,}")
+    print(f"      Patients with readmission within {readm_window_days}d: {len(readm_patients):,}")
 
     encounters = encounters[encounters["subject_id"].isin(readm_patients)].copy()
-    print(f"  Final: {len(encounters):,} encounters, {encounters['subject_id'].nunique():,} patients")
+    print(f"      Final: {len(encounters):,} encounters, {encounters['subject_id'].nunique():,} patients")
 
     # --- Compute labels and assemble sequences ---
     print(f"\n[5/5] Computing readmission labels ({readm_window_days}-day and 30-day)...")

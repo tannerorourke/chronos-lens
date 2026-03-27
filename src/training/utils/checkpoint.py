@@ -14,10 +14,11 @@ import torch
 
 from src.models.jepa_ema import JEPA_EMA
 from src.models.jepa_stopgrad import JEPAStopGrad
+from src.models.supervised_transformer import SupervisedTransformer
 from src.utils.seed import _restore_rng
 
 
-def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | JEPAStopGrad:
+def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | JEPAStopGrad | SupervisedTransformer:
     """Construct a model from a params dict, filtering non-constructor keys."""
     arch = model_params.get("architecture", "")
 
@@ -25,12 +26,14 @@ def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | JEPAStop
         return JEPAStopGrad(**model_params).to(device)
     elif arch == "ema":
         return JEPA_EMA(**model_params).to(device)
-    
+    elif arch == "supervised":
+        return SupervisedTransformer(**model_params).to(device)
+
     raise ValueError(f"Unknown architecture: '{arch}'")
 
 
 def save_checkpoint(
-    model: JEPA_EMA | JEPAStopGrad,
+    model: JEPA_EMA | JEPAStopGrad | SupervisedTransformer,
     model_params: dict,
     optimizer,
     scheduler,
@@ -69,7 +72,7 @@ def load_model_notrain(
     path: Path,
     device: torch.device,
     restore_rng: bool = True,
-) -> tuple[JEPA_EMA | JEPAStopGrad, dict]:
+) -> tuple[JEPA_EMA | JEPAStopGrad | SupervisedTransformer, dict]:
     """Load a model checkpoint for analysis / freezing (no training)."""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
 

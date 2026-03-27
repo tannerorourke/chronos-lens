@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-EMA JEPA training pipeline for longitudinal patient sequences.
+Supervised Transformer training pipeline for longitudinal patient sequences.
 
 Architecture
 ------------
-  encoder        : EncounterEncoder - online context path (with grads)
-  target_encoder : EMA copy of encoder (momentum -> 1.0), no backprop
-  predictor      : MLP(z_context + pos_emb -> z_pred)
-  loss           : smooth_l1(z_pred, z_target)  (iJEPA)
+  encoder    : TransformerEncoder (same as JEPA context path)
+  classifier : Linear(embed_dim, 1)
+  loss       : BCEWithLogitsLoss on logits vs binary labels
 """
 from os import environ
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -18,25 +17,80 @@ import json
 
 import numpy as np
 import torch
-import torch.nn.functional as F
+import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from src.models.jepa_ema import JEPA_EMA
-from src.training.utils.datasets import MimicDataset, collate_fn
+from src.models.supervised_transformer import SupervisedTransformer
+from src.training.utils.datasets import SupervisedDataset, supervised_collate_fn
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import GradientMonitor, TrainingLogger
 from src.training.utils.checkpoint import build_model, save_checkpoint, load_model_checkpoint
-from src.analysis.displacement import save_embedding_vecs
 from src.utils.io import load_sequences, build_vocab, EXPERIMENTS_DIR
 
+# =============================================================================
+# Embedding extraction
+# =============================================================================
+
+@torch.no_grad()
+def save_supervised_embeddings(
+    model: SupervisedTransformer,
+    loader: DataLoader,
+    device: torch.device,
+    epoch: int,
+    save_dir: Path,
+) -> None:
+    """Extract z_context for all samples and save in JEPA .npz format.
+
+    JEPA-specific fields (z_pred, z_target, delta, pred_error,
+    observed_traj) are saved as zeros so analysis code that loads
+    the .npz can key on z_context + subject_ids + labels unchanged.
+    """
+    model.eval()
+    all_z:      list[np.ndarray] = []
+    all_sids:   list[str]        = []
+    all_labels: list[np.ndarray] = []
+
+    for batch in loader:
+        batch_dev = {
+            k: v.to(device) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+        }
+        z_context, _ = model(batch_dev)
+        all_z.append(z_context.cpu().numpy())
+        all_sids.extend(batch["subject_ids"])
+        all_labels.append(batch["labels"].numpy())
+
+    z_context   = np.concatenate(all_z)
+    subject_ids = np.array(all_sids)
+    labels      = np.concatenate(all_labels)
+    N, D        = z_context.shape
+    zeros       = np.zeros_like(z_context)
+
+    file = (save_dir / f"embeddings_{epoch}").with_suffix(".npz")
+    np.savez(
+        file,
+        z_context=z_context,
+        z_pred=zeros,
+        z_target=zeros,
+        delta=zeros,
+        pred_error=zeros,
+        observed_traj=zeros,
+        subject_ids=subject_ids,
+        mask_positions=np.full(N, -1, dtype=np.int64),
+        labels=labels,
+    )
+    print(f"   Embeddings saved: {save_dir.name}/{file.name} (epoch {epoch})")
+
+
+# =============================================================================
+# Training loop
+# =============================================================================
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
-    # --- most params are sent to resp. functions ------------------------------
     # --- optimization ---------------------------------------------------------
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
-    ema         = opt_params["ema"]
 
     # --- data -----------------------------------------------------------------
     data_params     = params["data"]
@@ -58,10 +112,10 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     with open(run_dir / "vocab.json", "w", encoding="utf-8") as fh:
         json.dump(vocab, fh, indent=2)
 
-    dataset = MimicDataset(patients, vocab, data_params, pad_idx=0)
+    dataset = SupervisedDataset(patients, vocab, data_params, pad_idx=0)
     loader = DataLoader(
         dataset, batch_size,
-        shuffle=True, collate_fn=collate_fn, drop_last=False,
+        shuffle=True, collate_fn=supervised_collate_fn, drop_last=False,
         num_workers=2, persistent_workers=True,
         pin_memory=pin_memory)
 
@@ -69,26 +123,19 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     emb_dir  = run_dir / "embeddings"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     emb_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # --- model ----------------------------------------------------------------
     model_params = params["model"]
     model_params["vocab_size"] = len(vocab)
     model = build_model(model_params, device)
-    assert type(model) == JEPA_EMA
-    
+    assert type(model) == SupervisedTransformer
+
     # --- init optimizer / scheduler / scaler ----------------------------------
     optimizer, scheduler, scaler = init_optimizers(
         model, opt_params,
         ipe=len(loader),
         num_epochs=epochs,
         use_bfloat16=use_bfloat16)
-    
-    # --- momentum schedule---------------------------------------------
-    ipe = len(loader)
-    momentum_scheduler = (
-        ema[0] + i*(ema[1]-ema[0]) / ipe*epochs
-        for i in range(ipe*epochs + 1))
-
 
     start_epoch, global_step, loss_history = 1, 1, []
     # --- load checkpoint? ----------------------------------------------
@@ -103,9 +150,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 ckpt_path,
                 device,
                 restore_rng=True)
-        for _ in range((start_epoch - 1) * ipe):
-            next(momentum_scheduler)
-    
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total trainable params: {(n_params / 1e6):.2f}M")
@@ -113,17 +157,17 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     logger   = TrainingLogger(run_dir, start_epoch, global_step, loss_history)
     grad_mon = GradientMonitor(model)
 
+    criterion = nn.BCEWithLogitsLoss()
+
     # ------------------------------------------------------------------
     # --- TRAINING LOOP ------------------------------------------------
     # ------------------------------------------------------------------
-    print(f"Training for {ipe} batches (size: {batch_size}) for {epochs} epochs")
+    print(f"Training for {len(loader)} batches (size: {batch_size}) for {epochs} epochs")
     print(f"Description: {params['meta']['tag']}: {params['meta']['description']}")
 
-    vicreg_keys = ("sim", "var_pred", "var_ctx", "cov_pred", "cov_ctx")
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         epoch_losses: list[float] = []
-        n_batches = 0
 
         for batch in loader:
             batch_dev = {
@@ -133,8 +177,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
             if use_bfloat16 and scaler is not None:
                 with torch.amp.autocast("cuda", dtype=torch.bfloat16):  # type: ignore
-                    z_context, z_pred, z_target = model(batch_dev)
-                    loss = F.smooth_l1_loss(z_pred, z_target)
+                    _, logits = model(batch_dev)
+                    loss = criterion(logits, batch_dev["labels"].float())
 
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
@@ -144,8 +188,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 scaler.update()
 
             else:
-                z_context, z_pred, z_target = model(batch_dev)
-                loss = F.smooth_l1_loss(z_pred, z_target)
+                _, logits = model(batch_dev)
+                loss = criterion(logits, batch_dev["labels"].float())
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 grad_mon.capture()
@@ -156,15 +200,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             if scheduler is not None:
                 scheduler.step()
 
-            # -- EMA update of target encoder (matching iJEPA reference)
-            with torch.no_grad():
-                m = next(momentum_scheduler)
-                for param_q, param_k in zip(model.encoder.parameters(), model.target_encoder.parameters()):
-                    param_k.data.mul_(m).add_((1. - m) * param_q.detach().data)
-
             epoch_losses.append(loss.item())
             logger.log_step(loss.item())
-            n_batches += 1
 
         # -- end of epoch --------------------------------------------------
         model.eval()
@@ -175,15 +212,13 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                             epoch, logger.global_step, logger._loss_history,
                             ckpt_dir, seed=seed)
 
-        stat_log = {}
         if log_vecs and (epoch % log_vecs_every == 0 or epoch == epochs or epoch == 1):
-            _, stat_log = save_embedding_vecs(model, loader, device, epoch, emb_dir)
+            save_supervised_embeddings(model, loader, device, epoch, emb_dir)
 
-        vicreg_log = {k: 0.0 for k in vicreg_keys}
         logger.log_epoch(
             loss=float(np.mean(epoch_losses)),
             lr=optimizer.param_groups[0]["lr"],
-            **vicreg_log, **stat_log, **grad_mon.get_metrics(),
+            **grad_mon.get_metrics(),
         )
         grad_mon.reset()
 

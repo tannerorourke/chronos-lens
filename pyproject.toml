@@ -18,6 +18,8 @@ dependencies = [
     "phate",
     "pingouin",
     "tensorboard",
+    "xgboost",
+    "hdbscan",
 ]
 
 [tool.setuptools.packages.find]

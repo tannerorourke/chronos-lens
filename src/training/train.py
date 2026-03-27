@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 
 from src.models.jepa_stopgrad import JEPAStopGrad
 from src.training.utils.losses import jepa_stopgrad_loss
-from src.training.utils.dataset import MimicDataset, collate_fn
+from src.training.utils.datasets import MimicDataset, collate_fn
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import GradientMonitor, TrainingLogger
 from src.training.utils.checkpoint import build_model, save_checkpoint, load_model_checkpoint

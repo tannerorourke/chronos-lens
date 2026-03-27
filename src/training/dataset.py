@@ -9,7 +9,7 @@ def encode_encounter(enc: dict, vocab: dict[str, int], PAD_IDX: int) -> list[int
     return ids if ids else [PAD_IDX]   # at least one token
 
 
-class JEPADataset(Dataset):
+class MimicDataset(Dataset):
     """One sample per (patient, masked-encounter-index).
 
     For a patient with N encounters, N samples are created.  Each sample
@@ -18,16 +18,18 @@ class JEPADataset(Dataset):
     """
 
     def __init__(self, patients: list[dict], vocab: dict[str, int], pad_idx: int = 0,
-                 max_encounters: int | None = None, max_tokens: int | None = None):
+                 max_encounters: int | None = None, max_tokens: int | None = None,
+                 label_key: str = "label"):
         self.samples: list[dict] = []
         self.pad_idx = pad_idx
+        self.label_key = label_key
         for p in patients:
             encs = p.get("encounters", [])
             if len(encs) < 2:
                 continue
             if max_encounters is not None:
                 encs = encs[:max_encounters]
-            label  = int(p.get("label", 0))
+            label  = int(p.get(label_key, 0))
             sid    = str(p["subject_id"])
             tokens = [encode_encounter(e, vocab, self.pad_idx) for e in encs]
             if max_tokens is not None:
@@ -40,7 +42,7 @@ class JEPADataset(Dataset):
                     "subject_id": sid,
                     "label":      label,
                 })
-        assert len(self.samples) > 0, "[JEPADataset] No training samples produced"
+        assert len(self.samples) > 0, "[MimicDataset] No training samples produced"
 
     def __len__(self):
         return len(self.samples)

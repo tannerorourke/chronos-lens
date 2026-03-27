@@ -6,7 +6,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 
-def flatten_sequences(sequences: list[dict]) -> tuple[pd.DataFrame, pd.Series]:
+def flatten_sequences(sequences: list[dict], label_key: str = "label") -> tuple[pd.DataFrame, pd.Series]:
     """
     Flatten patient sequences into a feature matrix for baseline evaluation.
 
@@ -56,7 +56,7 @@ def flatten_sequences(sequences: list[dict]) -> tuple[pd.DataFrame, pd.Series]:
 
         rec = {
             "subject_id": seq["subject_id"],
-            "label": seq["label"],
+            "label": seq.get(label_key, 0),
             "n_encounters": n_enc,
             "n_unique_icd": len(unique_icd),
             "n_unique_meds": len(unique_meds),

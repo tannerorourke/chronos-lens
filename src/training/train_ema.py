@@ -22,10 +22,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from src.models.jepa_ema import JEPA_EMA
-from src.training.dataset import MimicDataset, collate_fn
-from src.training.optimizers import init_optimizers
-from src.training.logging import GradientMonitor, TrainingLogger
-from src.training.checkpoint import build_model, save_checkpoint, load_model_checkpoint
+from training.utils.dataset import MimicDataset, collate_fn
+from training.utils.optimizers import init_optimizers
+from training.utils.logging import GradientMonitor, TrainingLogger
+from training.utils.checkpoint import build_model, save_checkpoint, load_model_checkpoint
 from src.analysis.displacement import save_embedding_vecs
 from src.utils.io import load_sequences, build_vocab, EXPERIMENTS_DIR
 

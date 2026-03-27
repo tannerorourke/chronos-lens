@@ -1,36 +1,28 @@
 """
-Reproducibility — single source of truth for the global random seed.
+Reproducibility: Everything seeds to
 
-Training scripts:
-    from src.utils.seed import set_global_seed
-    set_global_seed(params.get("meta", {}).get("seed"))
+global seed
 
-Analysis modules:
-    from src.utils.seed import SEED, get_rng
-    pca = PCA(random_state=SEED)
-    rng = get_rng()
-
-Notebooks (after setting exp_dir):
-    from src.utils.seed import load_seed, set_global_seed
-    set_global_seed(load_seed(exp_dir))
+- Training scripts
+- Analysis modules/functions
+- Notebooks
 """
 
 from pathlib import Path
 import random
+import torch
 
 import numpy as np
 import yaml
 
 DEFAULT_SEED: int = 42
 
-# Module-level seed, updated by set_global_seed()
 SEED: int = DEFAULT_SEED
 
 
 def set_global_seed(seed: int | None = None) -> int:
     """Set torch/numpy/stdlib seeds globally. Updates module-level SEED. Returns seed used."""
-    import torch
-
+    
     global SEED
     SEED = seed if seed is not None else DEFAULT_SEED
 
@@ -39,6 +31,21 @@ def set_global_seed(seed: int | None = None) -> int:
     np.random.seed(SEED)
     random.seed(SEED)
     return SEED
+
+
+def _restore_rng(checkpoint: dict) -> None:
+    """Restore RNG states from a checkpoint dict."""
+    if "rng_states" not in checkpoint:
+        raise ValueError("Checkpoint has no RNG states. Activating agresssive angry sounds.")
+    
+    rng = checkpoint["rng_states"]
+    torch.random.set_rng_state(rng["torch"])
+    random.setstate(rng["python"])
+    np.random.set_state(rng["numpy"])
+    if rng.get("cuda") is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state(rng["cuda"])
+        
+    return rng
 
 
 def load_seed(exp_dir: Path) -> int:

@@ -38,17 +38,16 @@ def vicreg_regularization(
         return var_weight * zero, cov_weight * zero, zero
 
     # --- Variance term ---------------------------------------------------
-    # Per-dimension std across the batch.  The epsilon inside the sqrt
-    # prevents grad blow-up when variance is near zero.
+    # Per-dimension std across the batch.
     std = torch.sqrt(z.var(dim=0) + 1e-4)          # (D,)
     # Hinge: penalise dimensions whose std drops below 1
     var_loss = F.relu(1.0 - std).mean()
 
     # --- Covariance term -------------------------------------------------
-    # Center, then compute (D, D) covariance matrix
+    # Center -> compute (D, D) covariance matrix
     z_centered = z - z.mean(dim=0)
     cov = (z_centered.T @ z_centered) / (B - 1)    # (D, D)
-    # Mean of squared off-diagonal elements (dimension-invariant)
+    # Mean of squared off-diagonal elements
     off_diag_mask = ~torch.eye(D, dtype=torch.bool, device=z.device)
     cov_loss = (cov[off_diag_mask] ** 2).mean()
 
@@ -82,7 +81,7 @@ def jepa_stopgrad_loss(
     sim_loss = F.mse_loss(z_pred, z_target)
 
     # --- VICReg regularization on z_pred and z_context -------------------
-    # NOT applied to z_target — it carries no gradient.
+    # NOT applied to z_target because it carries no gradient.
     var_pred, cov_pred, _ = vicreg_regularization(z_pred,    var_weight, cov_weight)
     var_ctx,  cov_ctx,  _ = vicreg_regularization(z_context, var_weight, cov_weight)
 

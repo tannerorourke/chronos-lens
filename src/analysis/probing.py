@@ -46,8 +46,8 @@ def extract_layer_representations(
         "n_layers"      : int
     """
     model.eval()
-    encoder = model.context_encoder
-    n_layers = len(encoder.layers)
+    layers = model.transformer_layers
+    n_layers = len(layers)
 
     # Storage for hook captures (per-batch, per-layer)
     hook_outputs: dict[int, list] = {i: [] for i in range(n_layers)}
@@ -60,7 +60,7 @@ def extract_layer_representations(
         return hook_fn
 
     # Register hooks
-    for i, layer in enumerate(encoder.layers):
+    for i, layer in enumerate(layers):
         h = layer.register_forward_hook(_make_hook(i))
         hooks.append(h)
 

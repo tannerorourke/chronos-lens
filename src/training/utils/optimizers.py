@@ -90,7 +90,8 @@ def init_optimizers(
     model, opt_params,
     ipe: int,
     num_epochs: int,
-    use_bfloat16=False
+    use_bfloat16=False,
+    checkpoint=None
 ):
     base_lr = float(opt_params.get("base_lr", 0.0))
     optimizer = torch.optim.Adam(model.parameters(), lr=base_lr)

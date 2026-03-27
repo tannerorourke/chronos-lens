@@ -16,7 +16,8 @@ Schema per patient:
       "meds": ["sertraline", ...]
     }, ...
   ],
-  "label": int  # 1 if readmission within window has F30-F39 diagnosis; 0 otherwise
+  "label": int,     # 1 if 90-day readmission has F30-F39 diagnosis; 0 otherwise
+  "label_30d": int   # 1 if 30-day readmission has F30-F39 diagnosis; 0 otherwise
 }
 
 Cohort filters:
@@ -210,6 +211,30 @@ def build_admission_active_meds(
     return adm_meds
 
 
+def _compute_readmission_label(rows: list[dict], readmission_days: int) -> int:
+    """Check if any readmission within `readmission_days` has a mood-disorder dx.
+
+    Parameters
+    ----------
+    rows : sorted (by admittime) list of encounter dicts with 'dischtime',
+           'admittime', and 'has_label_dx' keys.
+    readmission_days : window in days after discharge.
+
+    Returns
+    -------
+    1 if a positive readmission exists within the window, 0 otherwise.
+    """
+    n = len(rows)
+    for i in range(n - 1):
+        window_end = rows[i]["dischtime"] + timedelta(days=readmission_days)
+        for j in range(i + 1, n):
+            if rows[j]["admittime"] > window_end:
+                break
+            if rows[j]["has_label_dx"]:
+                return 1
+    return 0
+
+
 def build_patient_sequences(
     admissions: pd.DataFrame,
     patients: pd.DataFrame,
@@ -294,51 +319,40 @@ def build_patient_sequences(
     print(f"  Final: {len(encounters):,} encounters, {encounters['subject_id'].nunique():,} patients")
 
     # --- Compute labels and assemble sequences ---
-    print(f"\n[5/5] Computing {readm_window_days}-day readmission labels...")
+    print(f"\n[5/5] Computing readmission labels ({readm_window_days}-day and 30-day)...")
 
     sequences = []
     for subject_id, group in encounters.groupby("subject_id"):
         rows = group.sort_values("admittime").to_dict("records")
-        n = len(rows)
-        patient_label = 0
 
-        enc_list = []
-        for i, row in enumerate(rows):
-            enc_list.append({
-                "hadm_id": int(row["hadm_id"]),
-                "admittime": row["admittime"],
-                "dischtime": row["dischtime"],
-                "icd_codes": row["icd_codes"],
-                "meds": row["meds"],
-            })
-
-            # Check for readmission w/mood-disorder dx within window
-            if patient_label == 0 and i < n - 1:
-                window_end = row["dischtime"] + timedelta(days=readm_window_days)
-                for j in range(i + 1, n):
-                    if rows[j]["admittime"] > window_end:
-                        break
-                    if rows[j]["has_label_dx"]:
-                        patient_label = 1
-                        break
+        enc_list = [{
+            "hadm_id": int(row["hadm_id"]),
+            "admittime": row["admittime"],
+            "dischtime": row["dischtime"],
+            "icd_codes": row["icd_codes"],
+            "meds": row["meds"],
+        } for row in rows]
 
         sequences.append({
             "subject_id": str(subject_id),
             "encounters": enc_list,
-            "label": patient_label,
+            "label":      _compute_readmission_label(rows, readm_window_days),
+            "label_30d":  _compute_readmission_label(rows, 30),
         })
 
     # --- Summary ---
     n_pos = sum(1 for s in sequences if s["label"] == 1)
     n_neg = len(sequences) - n_pos
+    n_pos_30 = sum(1 for s in sequences if s["label_30d"] == 1)
     enc_counts = [len(s["encounters"]) for s in sequences]
 
     print(f"\n{'=' * 60}")
-    print(f"Sequences Summary: {readm_window_days}-day readmission")
-    print(f"  Patients:        {len(sequences):,}")
-    print(f"  Label=1 (mood):  {n_pos:,} ({100 * n_pos / len(sequences):.1f}%)")
-    print(f"  Label=0:         {n_neg:,} ({100 * n_neg / len(sequences):.1f}%)")
-    print(f"  Encounters/pt:   mean={np.mean(enc_counts):.1f}, "
+    print(f"Sequences Summary")
+    print(f"  Patients:              {len(sequences):,}")
+    print(f"  Label=1 ({readm_window_days}d mood):  {n_pos:,} ({100 * n_pos / len(sequences):.1f}%)")
+    print(f"  Label=1 (30d mood):    {n_pos_30:,} ({100 * n_pos_30 / len(sequences):.1f}%)")
+    print(f"  Label=0 ({readm_window_days}d):       {n_neg:,} ({100 * n_neg / len(sequences):.1f}%)")
+    print(f"  Encounters/pt:         mean={np.mean(enc_counts):.1f}, "
           f"median={np.median(enc_counts):.0f}, "
           f"min={min(enc_counts)}, max={max(enc_counts)}")
     print(f"{'=' * 60}")

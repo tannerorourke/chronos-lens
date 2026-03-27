@@ -3,7 +3,29 @@ import time
 import csv
 from pathlib import Path
 from datetime import datetime
+import torch
 from torch.utils.tensorboard import SummaryWriter
+
+
+def gpu_timer(closure, log_timings=True):
+    """ Helper to time gpu-time to execute closure() """
+    log_timings = log_timings and torch.cuda.is_available()
+
+    elapsed_time = -1.
+    if log_timings:
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+
+    result = closure()
+
+    if log_timings:
+        end.record()
+        torch.cuda.synchronize()
+        elapsed_time = start.elapsed_time(end)
+
+    return result, elapsed_time
+
 
 
 class TrainingLogger:

@@ -1,9 +1,10 @@
 import argparse
+
 import yaml
 import torch
+
 from src.utils.io import init_run_dir
 from src.utils.seed import set_global_seed
-from src.training.train import main as app_main
   
 
 parser = argparse.ArgumentParser(
@@ -31,7 +32,7 @@ def main():
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
         
-        use_bf16 = params.get('use_bfloat16', False)
+        use_bf16 = params.get("artifacts", {}).get("use_bfloat16", False)
         if use_bf16:
             # Disable tf32 matmul when using bfloat16 to avoid stacking two levels of reduced precision
             torch.backends.cuda.matmul.allow_tf32 = False
@@ -46,7 +47,13 @@ def main():
     print(f"  tag: {params['meta'].get('tag', '')}: {params['meta']['description']}")
 
     set_global_seed(params.get("meta", {}).get("seed"))
-    app_main(params, run_dir, device)
+
+    arch = params.get("model", {}).get("architecture", "stopgrad")
+    if arch == "ema":
+        from src.training.train_ema import main as train_main
+    else:
+        from src.training.train import main as train_main
+    train_main(params, run_dir, device)
     
 
 if __name__ == "__main__":

@@ -4,7 +4,8 @@ model:
     num_layers: 2
     ffn_dim: 256
     max_seq_len: 128
-    predictor_hidden: 128
+    predictor_embed_dim: 32
+    predictor_depth: 2
     architecture: stopgrad # stopgrad | ema | transformer
 optimization:
     epochs: 50
@@ -16,13 +17,11 @@ optimization:
     cov_weight: 0.04
 data:
     batch_size: 64
-    n_patients: 1000
-    modality: "all" # all | icd_only | meds_only
+    n_patients: 1000 # 0=all
     eval: "90d_readmit" # 30d_readmit | 90d_readmit | next_icd_block
     max_encounters: null # null = no limit
     max_tokens: null
     pin_mem: True
-    root_path: "/data/processed"
 sae_config:
     n_features: 256
     top_k: 12
@@ -38,4 +37,3 @@ meta:
     log_vecs: True
     log_vecs_every: 10 # null = once at end
     checkpoint_every: 10
-    logdir: "experiments/sg_v01"

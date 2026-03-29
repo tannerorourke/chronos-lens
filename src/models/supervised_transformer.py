@@ -1,9 +1,8 @@
 """Supervised Transformer baseline.
 
-Same encoder architecture as the JEPA variants but trained with
-explicit label supervision (BCEWithLogitsLoss) instead of
-self-supervised prediction.  Provides a representation-quality
-baseline for comparing JEPA embeddings.
+Same encoder architecture as the JEPA variants, but trained with explicit 
+label supervision (BCEWithLogitsLoss) instead of self-supervised prediction.
+Provides a representation-quality baseline for comparing JEPA embeddings.
 """
 
 import torch
@@ -17,9 +16,9 @@ class SupervisedTransformer(nn.Module):
 
     Components
     ----------
-    token_embedding : nn.Embedding — shared token table
-    encoder         : TransformerEncoder — same architecture as JEPA
-    classifier      : nn.Linear(embed_dim, 1) — binary logit head
+    token_embedding : nn.Embedding - shared token table
+    encoder         : TransformerEncoder - same architecture as JEPA
+    classifier      : nn.Linear(embed_dim, 1) - binary logit head
     """
 
     def __init__(
@@ -47,31 +46,20 @@ class SupervisedTransformer(nn.Module):
         self.classifier = nn.Linear(embed_dim, 1)
 
     def forward(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode the full encounter sequence and classify.
+        """Mean pool and encode the full encounter sequence and classify."""
+        tokens   = batch["ctx_tokens"]
+        tok_mask = batch["ctx_tok_mask"]
+        pad_mask = batch["ctx_pad_mask"]
 
-        Parameters
-        ----------
-        batch : dict with ctx_tokens (B, E, T_tok), ctx_tok_mask (B, E, T_tok),
-                ctx_pad_mask (B, E)
-
-        Returns
-        -------
-        z_context : (B, D) mean-pooled encoder output
-        logits    : (B,)   classifier logits
-        """
-        tokens   = batch["ctx_tokens"]      # (B, E, T_tok)
-        tok_mask = batch["ctx_tok_mask"]     # (B, E, T_tok)
-        pad_mask = batch["ctx_pad_mask"]     # (B, E)
-
-        # embed_and_pool: (B, E, T_tok) -> (B, E, D)
-        enc_repr = embed_and_pool(self.token_embedding, tokens, tok_mask)
+        # embed and pool (B, E, T_tok) to (B, E, D)
+        enc_repr = embed_and_pool(self.token_embedding, tokens, tok_mask) 
         if enc_repr.dim() == 2:
-            enc_repr = enc_repr.unsqueeze(1)  # (B, D) -> (B, 1, D)
+            enc_repr = enc_repr.unsqueeze(1)
 
-        # TransformerEncoder: (B, E, D) -> (B, D)
-        z_context = self.encoder(enc_repr, key_padding_mask=pad_mask)
+        # run transformer encoder (B, E, D) to (B, D)
+        z_context = self.encoder(enc_repr, key_padding_mask=pad_mask) 
 
-        logits = self.classifier(z_context).squeeze(-1)  # (B,)
+        logits = self.classifier(z_context).squeeze(-1)
         return z_context, logits
 
     @property

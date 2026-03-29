@@ -46,9 +46,9 @@ def save_supervised_embeddings(
     the .npz can key on z_context + subject_ids + labels unchanged.
     """
     model.eval()
-    all_z:      list[np.ndarray] = []
-    all_sids:   list[str]        = []
-    all_labels: list[np.ndarray] = []
+    z_contexts:      list[np.ndarray] = []
+    ep_sids:   list[str]        = []
+    ep_labels: list[np.ndarray] = []
 
     for batch in loader:
         batch_dev = {
@@ -56,13 +56,13 @@ def save_supervised_embeddings(
             for k, v in batch.items()
         }
         z_context, _ = model(batch_dev)
-        all_z.append(z_context.cpu().numpy())
-        all_sids.extend(batch["subject_ids"])
-        all_labels.append(batch["labels"].numpy())
+        z_contexts.append(z_context.cpu().numpy())
+        ep_sids.extend(batch["subject_ids"])
+        ep_labels.append(batch["labels"].numpy())
 
-    z_context   = np.concatenate(all_z)
-    subject_ids = np.array(all_sids)
-    labels      = np.concatenate(all_labels)
+    z_context   = np.concatenate(z_contexts)
+    subject_ids = np.array(ep_sids)
+    labels      = np.concatenate(ep_labels)
     N, D        = z_context.shape
     zeros       = np.zeros_like(z_context)
 
@@ -168,17 +168,27 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         epoch_losses: list[float] = []
+        z_c, sids, labels = [], [], []
 
         for batch in loader:
             batch_dev = {
                 k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
             }
+            
+            def forward_unto_dawn():
+                z_context, logits = model(batch_dev)
+                
+                z_c.append(z_context.cpu().numpy())
+                sids.extend(batch["subject_ids"])
+                labels.append(batch["labels"].numpy())
+                
+                loss = criterion(logits, batch_dev["labels"].float())
+                return loss
 
             if use_bfloat16 and scaler is not None:
                 with torch.amp.autocast("cuda", dtype=torch.bfloat16):  # type: ignore
-                    _, logits = model(batch_dev)
-                    loss = criterion(logits, batch_dev["labels"].float())
+                    loss = forward_unto_dawn()
 
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
@@ -188,8 +198,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 scaler.update()
 
             else:
-                _, logits = model(batch_dev)
-                loss = criterion(logits, batch_dev["labels"].float())
+                loss = forward_unto_dawn()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 grad_mon.capture()

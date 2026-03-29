@@ -1,6 +1,5 @@
 from pathlib import Path
 import json
-# import pickle
 
 import numpy as np
 import pandas as pd
@@ -17,11 +16,10 @@ EXPERIMENTS_DIR = ROOT / "experiments"
 
 
 # =============================================================================
-# Data IO
+# Dataset IO
 # =============================================================================
 
 def load_sequences_dict(path: Path) -> dict:
-    """Load sequences from JSONL into dict of dicts"""
     patients = {}
     with open(path, encoding="utf-8") as fh:
         for line in fh:
@@ -34,7 +32,6 @@ def load_sequences_dict(path: Path) -> dict:
     
 
 def load_sequences(n=None) -> list[dict]:
-    """Load sequences from JSONL into list of dicts, parse ISO datetime strings back to datetime objects"""
     sequences = []
     try:
         with open(PROCESSED_DIR / "sequences.jsonl") as f:
@@ -89,19 +86,6 @@ def init_run_dir(model: str) -> Path:
 # =============================================================================
 
 def load_metadata(path: Path = None) -> tuple:
-    """Load pre-extracted metadata features and feature names.
-
-    Parameters
-    ----------
-    path : directory containing metadata_features.npy, metadata_feature_names.json,
-           and patient_ids.json.  Defaults to PROCESSED_DIR.
-
-    Returns
-    -------
-    metadata       : (n_patients, n_features) float64
-    feature_names  : list[str]
-    patient_ids    : (n_patients,) str array
-    """
     d = Path(path) if path else PROCESSED_DIR
     metadata = np.load(d / "metadata_features.npy")
     with open(d / "metadata_feature_names.json") as f:
@@ -117,15 +101,6 @@ def save_metadata(
     patient_ids: np.ndarray,
     path: Path = None,
 ) -> None:
-    """Persist metadata features, names, and patient IDs to disk.
-
-    Parameters
-    ----------
-    metadata       : (n_patients, n_features) float64
-    feature_names  : list[str]
-    patient_ids    : (n_patients,) str array
-    path           : output directory (defaults to PROCESSED_DIR)
-    """
     d = Path(path) if path else PROCESSED_DIR
     d.mkdir(parents=True, exist_ok=True)
     np.save(d / "metadata_features.npy", metadata)
@@ -140,9 +115,11 @@ def save_metadata(
 # Vocab
 # =============================================================================
 
-def build_vocab(patients: list[dict], pad_idx: int, dir: Path) -> dict[str, int]:
-    """Map every unique ICD code and med name to a positive integer index.
-    """
+def build_vocab(
+    patients: list[dict], 
+    pad_idx: int, 
+    dir: Path,
+) -> dict[str, int]:
     print(f"[build_vocab] building vocab ([PAD]: {pad_idx})...")
     tokens: set[str] = set()
     for p in patients:
@@ -152,10 +129,10 @@ def build_vocab(patients: list[dict], pad_idx: int, dir: Path) -> dict[str, int]
     vocab: dict[str, int] = {"[PAD]": pad_idx}
     for i, tok in enumerate(sorted(tokens), start=1):
         vocab[tok] = i
-        
+
     with open(dir / "vocab.json", "w", encoding="utf-8") as fh:
         json.dump(vocab, fh, indent=2)
-        
+
     print(f"   len: {len(vocab)}")
     return vocab
     

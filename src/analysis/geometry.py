@@ -29,9 +29,8 @@ rng  = get_rng()
 # --- Utilities ---
 def marchenko_pastur_upper(n: int, p: int, trace: float) -> float:
     """
-    upper bound of the null hypothesis that the eigenvalues of a covariance matrix 
-    are due to noise. The number of signal eigenvalues is the number of eigenvalues 
-    above this bound.
+    null hypothesis upper bound that the eigenvalues of a covariance matrix are due to noise. 
+    The number of signal eigenvalues is the number of eigenvalues above this bound.
     """
     sigma_sq = trace / p
     gamma    = p / n
@@ -39,13 +38,13 @@ def marchenko_pastur_upper(n: int, p: int, trace: float) -> float:
 
 # -----------------
 
-def fit_pca(delta: np.ndarray, k: int) -> tuple[PCA, np.ndarray, np.ndarray]:
-    """ Uses n_components=D_embed for PCA so the complete eigenvalue spectrum is available """
-    _, D = delta.shape
+def fit_pca(vec: np.ndarray, k: int) -> tuple[PCA, np.ndarray, np.ndarray]:
+    """ Uses n_components=D_vec for PCA so the complete eigenvalue spectrum is available """
+    _, D = vec.shape
     pca  = PCA(n_components=D, random_state=SEED, svd_solver="full")
-    pca.fit(delta)
+    pca.fit(vec)
     
-    pca_projections = pca.transform(delta)
+    pca_projections = pca.transform(vec)
     topk_projections = pca_projections[:, :k].astype(np.float64)
     
     return pca, pca_projections, topk_projections
@@ -55,15 +54,6 @@ def get_pca_stats(pca: PCA, k: int, n_samples: int):
     """
     Compute stats on the PCA decomposition of the displacement field. Uses 
     n_components=D_embed for PCA so the complete eigenvalue spectrum is available
-    
-    Parameters
-    ----------
-    delta : np.ndarray (N, D_embed)
-        Displacement field Δ = z_pred - z_context
-    top_k : int
-        Maximum number of principal components to compute
-    n_samples : int
-        Number of samples
 
     References
     ----------
@@ -108,20 +98,6 @@ def fit_tform_umap_2d(
     n_neighbors: int = 15,
     metric:      str = "cosine"
 ) -> np.ndarray:
-    """
-    Fit transform UMAP on a latent representation vector.
-
-    Parameters
-    ----------
-    vec       : (N, D) displacement vectors
-    n_neighbors : UMAP locality parameter (automatically clamped to N-1)
-    metric      : distance metric — 'cosine' recommended; 'euclidean' also valid
-
-    Returns
-    -------
-    umap_embedding : (N, 2) UMAP embedding
-    """
-
     N = vec.shape[0]
     reducer = umap_module.UMAP(
         n_components=2,
@@ -140,19 +116,6 @@ def fit_tform_phate_2d(
     knn:   int = 15,
     t = "auto"
 ) -> np.ndarray:
-    """
-    Fit transform PHATE on a latent representation vector.
-
-    Parameters
-    ----------
-    vec  : (N, D) input vectors
-    knn  : k-nearest-neighbors for the affinity graph (clamped to N-1)
-    t    : diffusion time scale ("auto" or int)
-
-    Returns
-    -------
-    phate_embedding : (N, 2) float64 PHATE embedding
-    """
     N = vec.shape[0]
     reducer = phate_module.PHATE(
         n_components=2,
@@ -246,11 +209,11 @@ def regress_divergence(
     Returns
     -------
     dict with keys:
-      slope, intercept, r, p, stderr — OLS statistics
-      residuals                       — (n_pairs,) signed residuals (y − ŷ)
-      ctx_sim_flat                    — (n_pairs,) upper-triangle context sims
-      pred_dist_flat                  — (n_pairs,) upper-triangle pred dists
-      n_pairs                         — number of unique pairs evaluated
+      slope, intercept, r, p, stderr - OLS statistics
+      residuals                       - (n_pairs,) signed residuals (y - ŷ)
+      ctx_sim_flat                    - (n_pairs,) upper-triangle context sims
+      pred_dist_flat                  - (n_pairs,) upper-triangle pred dists
+      n_pairs                         - number of unique pairs evaluated
     """
     N  = context_sims.shape[0]
     iu = np.triu_indices(N, k=1)
@@ -282,18 +245,7 @@ def project_pair_divergence_vectors(
 ) -> np.ndarray:
     """
     - Compute divergence vectors  d_ij = z_pred_i - z_pred_j
-    - project onto top-k PCA axes from the geometry step.
-
-    Parameters
-    ----------
-    z_pred         : (N, D) predicted embeddings
-    pair_indices   : (row_idx, col_idx) from find_divergent_pairs
-    pca_components : (k, D) from pca.components_[:k]
-
-    Returns
-    -------
-    projections : (n_pairs, k)  projection of each divergence vector onto PCs
-                  Returns shape (0, k) when pair_indices is empty.
+    - project onto top-k PCA axes
     """
     row_idx, col_idx = pair_indices
     k = pca_components.shape[0]
@@ -312,18 +264,7 @@ def divergence_variance_comparison(
     Per-PC projection variance of divergent pairs vs. a matched random baseline.
 
     If divergent-pair vectors are concentrated along a PC axis (high variance
-    ratio), that axis encodes the divergence structure — not noise.
-
-    Parameters
-    ----------
-    z_pred          : (N, D) predicted embeddings
-    pair_indices    : (row_idx, col_idx) divergent pair indices
-    pca_components  : (k, D) PCA components
-
-    Returns
-    -------
-    (div_pc_var, rand_pc_var) : each (k,) float arrays
-                                np.nan entries when pair_indices is empty.
+    ratio), that axis encodes the divergence structure - not noise.
     """
     row_idx, col_idx = pair_indices
     k     = pca_components.shape[0]
@@ -379,10 +320,10 @@ def compute_icc(
     Returns
     -------
     dict with keys:
-      icc_per_pc       : {"PC1": float|None, ...}
+      icc_per_pc       : {"PC1": float, ...}
       trait_pcs        : list of PC labels with ICC > trait_threshold
       state_pcs        : list of PC labels with ICC < state_threshold
-      eligible_patients: count of qualifying patients
+      eligible_patients: num qualifying patients
       trait_threshold  : TRAIT_THRESHOLD
       state_threshold  : STATE_THRESHOLD
     """

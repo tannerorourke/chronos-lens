@@ -15,6 +15,7 @@ BQ_PROJECT_NAME = "mimic-aihc"
 MIMIC_BQ_DATASET = "physionet-data.mimiciv_3_1_hosp"
 
 # Readmission window in days (cohort = any readmission within this window)
+# 30d readmission is auto-calculated.
 READM_WINDOW_DAYS = 90
 # ICD-10 prefix for positive label
 LABEL_ICD10_PREFIX = "F"
@@ -37,7 +38,7 @@ if __name__ == "__main__":
     parser.add_argument("--min-encounters",     default=MIN_ENCOUNTERS, type=int,
                         help=f"Minimum encounters per patient")
     parser.add_argument("--readm-window-days",  default=READM_WINDOW_DAYS, type=int,
-                        help=f"Readmission window in days")
+                        help=f"Readmission window (days)")
     parser.add_argument("--val-seq",            default=False, action="store_true")
     parser.add_argument("--baseline",           default=False, action="store_true")
     parser.add_argument("--dry-run",            default=False, action="store_true")
@@ -66,12 +67,15 @@ if __name__ == "__main__":
         # Extract and save metadata features alongside sequences
         print("\n[6/6] Extracting metadata features...")
         seq_path = PROCESSED_DIR / "sequences.jsonl"
-        metadata, feature_names, patient_ids = extract_metadata(seq_path, subject_ids=None)
-        save_metadata(metadata, feature_names, patient_ids)
+        metadata, feature_names, patient_ids = extract_metadata(seq_path, 
+                                                                subject_ids=None)
+        save_metadata(metadata, 
+                      feature_names, 
+                      patient_ids)
 
     if args.baseline:
-        metadata, feature_names, patient_ids = extract_metadata(
-            PROCESSED_DIR / "sequences.jsonl", subject_ids=None)
+        metadata, feature_names, patient_ids = extract_metadata(PROCESSED_DIR / "sequences.jsonl", 
+                                                                subject_ids=None)
         labels = metadata[:, feature_names.index("label")].astype(int)
         run_logistic(metadata, labels, feature_names)
         run_xgboost(metadata, labels, feature_names)

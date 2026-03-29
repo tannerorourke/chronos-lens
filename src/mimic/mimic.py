@@ -338,10 +338,10 @@ def build_patient_sequences(
 
     print(f"\n{'=' * 60}")
     print(f"Sequences Summary")
-    print(f"  Patients:              {len(sequences):,}")
-    print(f"  Label=1 ({readm_window_days}d mood):  {n_pos:,} ({100 * n_pos / len(sequences):.1f}%)")
+    print(f"  Patients: {len(sequences):,}")
+    print(f"  Label=1 ({readm_window_days}d mood): {n_pos:,} ({100 * n_pos / len(sequences):.1f}%)")
     print(f"  Label=1 (30d mood):    {n_pos_30:,} ({100 * n_pos_30 / len(sequences):.1f}%)")
-    print(f"  Label=0 ({readm_window_days}d):       {n_neg:,} ({100 * n_neg / len(sequences):.1f}%)")
+    print(f"  Label=0 ({readm_window_days}d):      {n_neg:,} ({100 * n_neg / len(sequences):.1f}%)")
     print(f"  Encounters/pt:         mean={np.mean(enc_counts):.1f}, "
           f"median={np.median(enc_counts):.0f}, "
           f"min={min(enc_counts)}, max={max(enc_counts)}")

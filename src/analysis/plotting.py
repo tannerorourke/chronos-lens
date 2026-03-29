@@ -131,7 +131,7 @@ def displacement_heatmap(
 def displacement_dim_profile(
     delta: np.ndarray, labels: np.ndarray,
     show: bool = True, save_path: Path | None = None,
-    vector_name: str = "Δ (P−C)",
+    vector_name: str = "Δ (P-C)",
 ):
     norms = np.linalg.norm(delta, axis=-1)
     safe_norms        = norms[:, np.newaxis].copy()
@@ -166,7 +166,7 @@ def displacement_dim_profile(
 def plot_pca_scree_v_mp_upper(
     eigenvalues: np.ndarray, mp_upper: float, n_signal: int, D: int, eff_dim: float,
     show: bool = True, save_path: Path | None = None,
-    vector_name: str = "Δ (P−C)",
+    vector_name: str = "Δ (P-C)",
 ):
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.semilogy(range(1, D + 1), eigenvalues, "o-", markersize=4, label="Eigenvalues")
@@ -230,7 +230,7 @@ def plot_pca1_vs_pca2(
 def plot_pca1_vs_pca2_disp_mag(
     pca_projection: np.ndarray, evr: np.ndarray, delta: np.ndarray,
     show: bool = True, save_path: Path | None = None,
-    vector_name: str = "Δ (P−C)",
+    vector_name: str = "Δ (P-C)",
 ):
     norms = np.linalg.norm(delta, axis=-1)
 
@@ -252,7 +252,7 @@ def plot_pca1_vs_pca2_disp_mag(
 def plot_umap_vs_pca(
     umap_emb: np.ndarray, pca_projection: np.ndarray, labels: np.ndarray,
     show: bool = True, save_path: Path | None = None,
-    vector_name: str = "Δ (P−C)",
+    vector_name: str = "Δ (P-C)",
 ):
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     for lbl, col in [(0, "steelblue"), (1, "tomato")]:
@@ -279,7 +279,7 @@ def plot_umap_vs_pca(
 def plot_umap_disp_mag(
     umap_emb: np.ndarray, delta: np.ndarray,
     show: bool = True, save_path: Path | None = None,
-    vector_name: str = "Δ (P−C)",
+    vector_name: str = "Δ (P-C)",
 ):
     norms = np.linalg.norm(delta, axis=-1)
 
@@ -299,14 +299,14 @@ def plot_umap_disp_mag(
 # =============================================================================
 
 _VEC_COLORS = {
-    "observed_traj": "#6B7280",   # gray  — T-C
-    "delta":         "#3B82F6",   # blue  — P-C
-    "pred_error":    "#EF4444",   # red   — P-T
+    "observed_traj": "#6B7280",   # gray  - T-C
+    "delta":         "#3B82F6",   # blue  - P-C
+    "pred_error":    "#EF4444",   # red   - P-T
 }
 _VEC_LABELS = {
-    "observed_traj": "T−C (observed)",
-    "delta":         "P−C (predicted)",
-    "pred_error":    "P−T (error)",
+    "observed_traj": "T-C (observed)",
+    "delta":         "P-C (predicted)",
+    "pred_error":    "P-T (error)",
 }
 
 
@@ -332,7 +332,7 @@ def plot_shared_basis_decomposition(
     vp = variances_pred_error[:k]
     evr = explained_variance_ratio[:k]
 
-    x = np.arange(k)
+    x = np.arange(0,k)
     w = 0.25
 
     fig, ax = plt.subplots(figsize=(max(8, k * 1.1), 5))
@@ -373,10 +373,7 @@ def plot_three_vector_norm_comparison(
     labels: np.ndarray,
     show: bool = True, save_path: Path | None = None,
 ):
-    """Overlaid histograms of L2 norms for all three vectors, faceted by label.
-
-    Two panels (label=0, label=1).  Distinct colours with alpha for each vector.
-    """
+    """histograms of L2 norms for all three vectors, faceted by label."""
     norms = {
         "delta":         np.linalg.norm(delta, axis=-1),
         "pred_error":    np.linalg.norm(pred_error, axis=-1),
@@ -406,11 +403,6 @@ def plot_context_umap(
     cluster_labels: np.ndarray | None = None,
     show: bool = True, save_path: Path | None = None,
 ):
-    """UMAP of z_context coloured by label, optionally also by cluster.
-
-    If cluster_labels provided: two side-by-side panels (label / cluster).
-    Otherwise: single panel coloured by readmission label.
-    """
     def _draw_label_panel(ax):
         for lbl_val, col in [(0, "steelblue"), (1, "tomato")]:
             mask = labels == lbl_val
@@ -595,8 +587,8 @@ def plot_variance_comparison(
     """
     Variance ratio (divergent / random) per PC.
 
-    Bars above 1.0 → divergent pairs concentrate more variance along that PC
-    than random pairs — indicating genuine geometric structure.
+    Bars above 1.0 -> divergent pairs concentrate more variance along that PC
+    than random pairs - indicating genuine geometric structure.
     """
     k     = len(div_pc_var)
     x_pos = np.arange(k)

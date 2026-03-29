@@ -1,6 +1,6 @@
 """
-SAE analysis utilities — activation extraction, open-ended feature
-inspection, and SAE–cluster cross-reference.
+SAE analysis utilities - activation extraction, open-ended feature
+inspection, and SAE-cluster cross-reference.
 
 Tier C of the three-tier partial labeling bridge (thesis §5.5).
 
@@ -44,23 +44,14 @@ def load_sae(checkpoint_path: Path, device: torch.device = torch.device("cpu")) 
 
 def extract_sae_activations(
     model: SparseAutoencoder,
-    delta: np.ndarray,
+    vec: np.ndarray,
 ) -> np.ndarray:
     """Run a trained SAE on displacement vectors and return sparse activations.
-
-    Parameters
-    ----------
-    model : trained SparseAutoencoder (eval mode)
-    delta : (N, embed_dim) displacement vectors
-
-    Returns
-    -------
-    activations : (N, n_features) sparse activation matrix
     """
     model.eval()
     device = next(model.parameters()).device
     with torch.no_grad():
-        x = torch.tensor(delta, dtype=torch.float32, device=device)
+        x = torch.tensor(vec, dtype=torch.float32, device=device)
         _, activations = model(x)
     return activations.cpu().numpy()
 
@@ -108,7 +99,7 @@ def inspect_sae_features(
 
     Returns
     -------
-    list of feature card dicts, one per inspected feature
+    list of feature card dicts, one per feature
     """
     N, n_features = sae_activations.shape
     patients = load_sequences_dict(sequences_path)
@@ -309,7 +300,7 @@ def inspect_sae_features(
 
 
 # =========================================================================
-# SAE–Cluster cross-reference
+# SAE-Cluster cross-reference
 # =========================================================================
 
 def sae_cluster_crossref(
@@ -438,3 +429,75 @@ def sae_cluster_crossref(
         "cluster_ids": [int(c) for c in cluster_ids],
         "summary": summary,
     }
+
+
+# =========================================================================
+# Validation of dictionary directions across seed (as done in Anthropic papers)
+# =========================================================================
+
+
+def sae_seed_stability(
+    checkpoint_paths: list[Path],
+    cosine_threshold: float = 0.85,
+    device: str = "cpu",
+) -> dict:
+    """Compare SAE dictionary directions across seeds via Hungarian matching.
+
+    Args:
+        checkpoint_paths: Paths to SAE checkpoint .pt files (one per seed).
+        cosine_threshold: Cosine similarity above which a matched pair is "stable".
+        device: Device for loading checkpoints.
+
+    Returns:
+        Dict with per-pair and aggregate stability metrics.
+    """
+    import torch
+    from scipy.optimize import linear_sum_assignment
+    from itertools import combinations
+
+    # Load decoder weights: each is (embed_dim, n_features), columns = dictionary directions
+    decoders = []
+    for p in checkpoint_paths:
+        ckpt = torch.load(p, map_location=device)
+        # Adjust key if your checkpoint wraps in a "model" dict
+        state = ckpt if isinstance(ckpt, dict) and "decoder.weight" in ckpt else ckpt.get("model", ckpt)
+        W = state["decoder.weight"]  # (embed_dim, n_features)
+        # L2-normalize columns (each dictionary direction)
+        W = W / W.norm(dim=0, keepdim=True).clamp(min=1e-8)
+        decoders.append(W.float().cpu())
+
+    pair_results = {}
+    for (i, Wi), (j, Wj) in combinations(enumerate(decoders), 2):
+        # Cosine similarity matrix: (n_features_i, n_features_j)
+        cos_sim = (Wi.T @ Wj).numpy()
+
+        # Hungarian on cost = 1 - cosine
+        row_idx, col_idx = linear_sum_assignment(1.0 - cos_sim)
+        matched_cosines = cos_sim[row_idx, col_idx]
+
+        stable_mask = matched_cosines > cosine_threshold
+        pair_results[f"seed_{i}_vs_{j}"] = {
+            "n_features": (Wi.shape[1], Wj.shape[1]),
+            "matched_cosines": matched_cosines.tolist(),
+            "mean_cosine": float(matched_cosines.mean()),
+            "median_cosine": float(np.median(matched_cosines)),
+            "frac_stable": float(stable_mask.mean()),
+            "n_stable": int(stable_mask.sum()),
+            "n_matched": len(matched_cosines),
+        }
+
+    # Aggregate across all pairs
+    all_cosines = np.concatenate([
+        r["matched_cosines"] for r in pair_results.values()
+    ])
+    summary = {
+        "pairs": pair_results,
+        "aggregate": {
+            "mean_cosine": float(all_cosines.mean()),
+            "median_cosine": float(np.median(all_cosines)),
+            "frac_stable": float((all_cosines > cosine_threshold).mean()),
+            "cosine_threshold": cosine_threshold,
+            "n_checkpoints": len(checkpoint_paths),
+        },
+    }
+    return summary

@@ -1,7 +1,8 @@
 """Displacement field extraction, embedding statistics, and embedding I/O.
 
-Contains the core embedding extraction pipeline (calc_embedding_vecs),
-sanity checks (run_embedding_stat_check), and save/load helpers used
+- Core embedding extraction pipeline (calc_embedding_vecs),
+- sanity checks (run_embedding_stat_check)
+save/load helpers used
 by the training loop's checkpoint cycle.
 """
 
@@ -21,18 +22,18 @@ rng = np.random.default_rng(42)
 @torch.no_grad()
 def calc_embedding_vecs(model: torch.nn.Module, loader: DataLoader, device: torch.device) -> dict:
     """ Calculate context, predicted, and target embeddings for all masked tokens in the dataset.
-        This is run ona checkpoint cycle during training.
-
+    
         Returns:
-            z_context:      (N, D) context embeddings
-            z_pred:         (N, D) predicted embeddings
-            z_target:       (N, D) target embeddings
-            delta:          (N, D) displacement vectors (pred - ctx)
-            pred_error:     (N, D) prediction error vectors (pred - target)
-            observed_traj:  (N, D) observed trajectory vectors (target - ctx)
-            subject_ids:    (N,) arr of subject IDs
-            mask_positions: (N,) arr of masked positions in sequence
-            labels:         (N,) arr of true tokens at masked positions
+        
+            - z_context:      (N, D) context embeddings
+            - z_pred:         (N, D) predicted embeddings
+            - z_target:       (N, D) target embeddings
+            - delta:          (N, D) displacement vectors (pred - ctx)
+            - pred_error:     (N, D) prediction error vectors (pred - target)
+            - observed_traj:  (N, D) observed trajectory vectors (target - ctx)
+            - subject_ids:    (N,) arr of subject IDs
+            - mask_positions: (N,) arr of masked positions in sequence
+            - labels:         (N,) arr of true tokens at masked positions
     """
     model.eval()
     all_z_ctx:  list[np.ndarray] = []

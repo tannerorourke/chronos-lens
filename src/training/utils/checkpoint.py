@@ -19,7 +19,6 @@ from src.utils.seed import _restore_rng
 
 
 def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | JEPAStopGrad | SupervisedTransformer:
-    """Construct a model from a params dict, filtering non-constructor keys."""
     arch = model_params.get("architecture", "")
 
     if arch == "stopgrad":
@@ -44,7 +43,6 @@ def save_checkpoint(
     save_dir: Path,
     seed: int | None = None,
 ) -> None:
-    """Save a training checkpoint to disk."""
     save_dir.mkdir(parents=True, exist_ok=True)
     file = save_dir / f"checkpoint_{epoch}.pt"
 
@@ -73,7 +71,6 @@ def load_model_notrain(
     device: torch.device,
     restore_rng: bool = True,
 ) -> tuple[JEPA_EMA | JEPAStopGrad | SupervisedTransformer, dict]:
-    """Load a model checkpoint for analysis / freezing (no training)."""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
 
     model_params = checkpoint["model_params"]
@@ -96,7 +93,6 @@ def load_model_checkpoint(
     device: torch.device,
     restore_rng: bool = True,
 ) -> tuple:
-    """Load a model checkpoint for training resumption."""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     epoch = checkpoint["epoch"]
     

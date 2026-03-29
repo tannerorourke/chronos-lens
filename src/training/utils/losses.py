@@ -3,7 +3,7 @@ Loss functions for JEPA stop-gradient training.
 
 VICReg regularization follows Bardes et al., 2022
 ("VICReg: Variance-Invariance-Covariance Regularization for Self-Supervised Learning").
-Only the variance and covariance terms are used here — the invariance role is
+Only the variance and covariance terms are used here - the invariance role is
 filled by the JEPA prediction loss (MSE between z_pred and z_target).
 """
 
@@ -66,16 +66,16 @@ def jepa_stopgrad_loss(
 
     Parameters
     ----------
-    z_pred    : (B, D) predictor output          (has grad)
+    z_pred    : (B, D) predictor output (has grad)
     z_target  : (B, D) stop-grad target encoding (detached)
-    z_context : (B, D) context representation    (has grad)
-    sim_weight : multiplier for the MSE prediction term
-    var_weight : multiplier for the variance terms
-    cov_weight : multiplier for the covariance terms
+    z_context : (B, D) context representation (has grad)
+    sim_weight : multiplier for MSE prediction term
+    var_weight : multiplier for variance terms
+    cov_weight : multiplier for covariance terms
 
     Returns
     -------
-    dict with keys: loss, sim, var_pred, var_ctx, cov_pred, cov_ctx
+    dict with: loss, sim, var_pred, var_ctx, cov_pred, cov_ctx
     """
     # --- Similarity (prediction) loss ------------------------------------
     sim_loss = F.mse_loss(z_pred, z_target)

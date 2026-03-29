@@ -1,13 +1,3 @@
-"""
-Reproducibility: Everything seeds to
-
-global seed
-
-- Training scripts
-- Analysis modules/functions
-- Notebooks
-"""
-
 from pathlib import Path
 import random
 import torch
@@ -17,6 +7,9 @@ import yaml
 
 DEFAULT_SEED: int = 42
 
+"""
+Training loop, analyses, functions, etc. all use same global.
+"""
 SEED: int = DEFAULT_SEED
 
 

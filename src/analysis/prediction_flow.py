@@ -27,9 +27,9 @@ VECTOR_NAMES = ("delta", "pred_error", "observed_traj")
 
 # Consistent palette across all figures
 COLORS = {
-    "delta":         "#3B82F6",   # blue  — model prediction direction
-    "pred_error":    "#EF4444",   # red   — prediction error
-    "observed_traj": "#6B7280",   # gray  — ground truth trajectory
+    "delta":         "#3B82F6",   # blue  - model prediction direction
+    "pred_error":    "#EF4444",   # red   - prediction error
+    "observed_traj": "#6B7280",   # gray  - ground truth trajectory
 }
 ARROW_LABELS = {
     "delta":         r"$C \to P$ (predicted)",
@@ -56,8 +56,8 @@ def decompose_patient(
     ----------
     patient_idx : row index into the (N, D) arrays
     vectors_dict : {"delta": (N,D), "pred_error": (N,D), "observed_traj": (N,D)}
-    sae_models_dict : {"delta": SparseAutoencoder, ...}  — trained, eval-mode
-    feature_cards_dict : {"delta": [card, ...], ...}  — from inspect_sae_features
+    sae_models_dict : {"delta": SparseAutoencoder, ...}  - trained, eval-mode
+    feature_cards_dict : {"delta": [card, ...], ...}  - from inspect_sae_features
     top_k : max active features to return per vector
 
     Returns
@@ -187,7 +187,7 @@ def build_patient_profile_figure(
         )
 
     fig.suptitle(
-        f"Patient {patient_idx}  —  prediction flow decomposition",
+        f"Patient {patient_idx}  -  prediction flow decomposition",
         fontsize=11, fontweight="bold", y=0.98,
     )
 
@@ -349,26 +349,7 @@ def select_interesting_patients(
     n: int = 5,
     seed: int = SEED,
 ) -> list[int]:
-    """Select patients worth visualising across different criteria.
-
-    Returns indices for:
-      - n largest ||P-T||  (biggest model failures)
-      - n smallest ||P-T|| (best predictions)
-      - n largest ||T-C||  (most dynamic patients)
-      - n random samples
-
-    Duplicates are removed; order preserved.
-
-    Parameters
-    ----------
-    z_pred, z_target, z_context : (N, D)
-    labels : (N,) — unused currently, reserved for stratified sampling
-    n : count per category
-    seed : random seed
-
-    Returns
-    -------
-    list of unique patient indices
+    """Select patient indices worth visualising across different criteria.
     """
     rng = np.random.default_rng(seed)
     N = z_pred.shape[0]

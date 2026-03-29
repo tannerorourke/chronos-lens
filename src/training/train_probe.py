@@ -1,5 +1,5 @@
 """
-Linear probing — train logistic regression probes on transformer
+Linear probing - train logistic regression probes on transformer
 layer representations to localize the readmission signal.
 
 Public API
@@ -165,7 +165,7 @@ def run_probing_sweep(
             f"Signal is already present at layer 0 (AUC={early_auc:.3f}) "
             f"and does not improve substantially through the encoder "
             f"(final AUC={final_auc:.3f}). The token embedding table "
-            f"already separates the classes — transformer attention "
+            f"already separates the classes - transformer attention "
             f"primarily organizes geometric structure."
         )
     elif delta < 0.05:

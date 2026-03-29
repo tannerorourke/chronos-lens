@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-import pickle
 
 import numpy as np
 import pandas as pd
@@ -41,11 +40,6 @@ def save_dataset(
                     for enc in seq["encounters"]
                 ],
             }) + "\n")
-
-    # --- pickle (backup) ---
-    pkl_path = out_dir / "sequences.pkl"
-    with open(pkl_path, "wb") as f:
-        pickle.dump(sequences, f)
 
     # --- data is so meta ---
     enc_counts = [len(s["encounters"]) for s in sequences]
@@ -93,8 +87,7 @@ def save_dataset(
         json.dump(metadata, f, indent=2)
 
     print(f"\nDataset saved to {out_dir}/")
-    print(f"  {jsonl_path.name:20s} {jsonl_path.stat().st_size / 1024:.0f} KB  (primary — for JEPA dataloader)")
-    print(f"  {pkl_path.name:20s} {pkl_path.stat().st_size / 1024:.0f} KB  (backup — preserves datetime)")
+    print(f"  {jsonl_path.name:20s} {jsonl_path.stat().st_size / 1024:.0f} KB  (primary - for JEPA dataloader)")
     print(f"  {meta_path.name:20s} {meta_path.stat().st_size / 1024:.0f} KB  (cohort stats & schema)")
 
 

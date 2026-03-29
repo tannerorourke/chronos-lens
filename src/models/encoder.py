@@ -1,4 +1,5 @@
-"""Shared encoder components for all JEPA variants.
+"""
+Shared encoder, used by all JEPA variants and supervised transformer.
 
 Token embedding, transformer encoder, and EncounterEncoder that wraps
 them into a single module suitable for deepcopy.
@@ -11,25 +12,23 @@ import torch.nn.functional as F
 
 def embed_and_pool(
     embedding: nn.Embedding,
-    tokens: torch.Tensor,       # (..., max_tok)  LongTensor
-    tok_mask: torch.Tensor,     # (..., max_tok)  BoolTensor  True=real
+    tokens: torch.Tensor,       # (..., max_tok)
+    tok_mask: torch.Tensor,     # True=real
 ) -> torch.Tensor:              # (..., embed_dim)
     """Embed tokens then mean-pool over the token dimension, ignoring padding."""
-    emb  = embedding(tokens)                # (..., max_tok, D)
-    mask = tok_mask.float().unsqueeze(-1)   # (..., max_tok, 1)
+    emb  = embedding(tokens)
+    mask = tok_mask.float().unsqueeze(-1)
     return (emb * mask).sum(dim=-2) / mask.sum(dim=-2).clamp(min=1.0)
 
 
 class MultiHeadSelfAttention(nn.Module):
-    """Scaled dot-product multi-head self-attention.
+    """Scaled dot-product multi-head self-attention."""
 
-    Parameters
-    ----------
-    embed_dim : total model dimension (must be divisible by num_heads)
-    num_heads : number of attention heads
-    """
-
-    def __init__(self, embed_dim: int, num_heads: int):
+    def __init__(
+        self, 
+        embed_dim: int, 
+        num_heads: int
+    ):
         super().__init__()
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
         self.num_heads = num_heads
@@ -41,7 +40,11 @@ class MultiHeadSelfAttention(nn.Module):
         self.v = nn.Linear(embed_dim, embed_dim, bias=False)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
 
-    def forward(self, x: torch.Tensor, key_padding_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        key_padding_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         B, T, D = x.shape
         H, Dh   = self.num_heads, self.head_dim
 
@@ -52,24 +55,31 @@ class MultiHeadSelfAttention(nn.Module):
 
         if key_padding_mask is not None:
             attn = attn.masked_fill(
-                key_padding_mask.unsqueeze(1).unsqueeze(2),  # (B,1,1,T)
+                key_padding_mask.unsqueeze(1).unsqueeze(2), # (B,1,1,T)
                 float("-inf")
             )
 
         attn = F.softmax(attn, dim=-1)
-        attn = torch.nan_to_num(attn, nan=0.0)      # guard fully-padded rows
+        
+        # -- guard fully-padded rows
+        attn = torch.nan_to_num(attn, nan=0.0)
 
-        out = torch.matmul(attn, V)                 # (B, H, T, Dh)
+        out = torch.matmul(attn, V) # (B, H, T, Dh)
         out = out.transpose(1, 2).contiguous().view(B, T, D)
         return self.out_proj(out)
 
 
 class TransformerEncoderLayer(nn.Module):
     """Pre-norm transformer encoder layer:
-      x -> LN -> MHSA -> residual -> LN -> FFN (GELU) -> residual
+       x -> LN -> MHSA -> residual -> LN -> FFN (GELU) -> residual
     """
 
-    def __init__(self, embed_dim: int, num_heads: int, ffn_dim: int):
+    def __init__(
+        self, 
+        embed_dim: int, 
+        num_heads: int, 
+        ffn_dim: int
+    ):
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
         self.attn  = MultiHeadSelfAttention(embed_dim, num_heads)
@@ -80,9 +90,11 @@ class TransformerEncoderLayer(nn.Module):
             nn.Linear(ffn_dim, embed_dim),
         )
 
-    def forward(self,
-                x: torch.Tensor,
-                key_padding_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        key_padding_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         x = x + self.attn(self.norm1(x), key_padding_mask)
         x = x + self.ffn(self.norm2(x))
         return x
@@ -109,13 +121,13 @@ class TransformerEncoder(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,                              # (B, T, D)
-        key_padding_mask: torch.Tensor | None = None,  # (B, T) True=padding
-    ) -> torch.Tensor:                                 # (B, D)
-        """Mean-pool over valid positions to a single sequence-level vector."""
+        x: torch.Tensor,    # (B, T, D)
+        key_padding_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:      # (B, D)
+        # -- Flatten batch to sequence vector (1, T)
         B, T, _ = x.shape
         max_pos = self.pos_embedding.num_embeddings - 1
-        positions = torch.arange(T, device=x.device).clamp(max=max_pos).unsqueeze(0)  # (1, T)
+        positions = torch.arange(T, device=x.device).clamp(max=max_pos).unsqueeze(0)
         x = x + self.pos_embedding(positions)
 
         for layer in self.layers:
@@ -123,35 +135,30 @@ class TransformerEncoder(nn.Module):
 
         x = self.norm(x)
 
+        # -- Mean-pool over valid positions
         if key_padding_mask is not None:
-            valid = (~key_padding_mask).float().unsqueeze(-1)   # (B, T, 1)
+            valid = (~key_padding_mask).float().unsqueeze(-1)
             z = (x * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1.0)
         else:
             z = x.mean(dim=1)
 
-        return z                                                 # (B, D)
+        return z
 
 
 class EncounterEncoder(nn.Module):
-    """Token embedding + TransformerEncoder.
-
-    Maps raw encounter tokens to z in R^d.  Wraps both the embedding table
-    and the transformer so that deepcopy copies everything together.
-
-    Parameters
-    ----------
-    vocab_size  : token vocabulary size (including padding)
-    embed_dim   : model dimension
-    num_heads   : attention heads
-    num_layers  : transformer layers
-    max_seq_len : maximum encounter sequence length
-    ffn_dim     : feed-forward hidden dimension
-    pad_idx     : padding token index
+    """Maps raw encounter tokens to z in R^d.  Wraps both the embedding table
+       and the transformer so deepcopy copies everything together.
     """
-
-    def __init__(self, vocab_size: int, embed_dim: int, num_heads: int,
-                 num_layers: int, max_seq_len: int, ffn_dim: int,
-                 pad_idx: int = 0):
+    def __init__(
+        self, 
+        vocab_size: int, 
+        embed_dim: int, 
+        num_heads: int,
+        num_layers: int, 
+        max_seq_len: int, 
+        ffn_dim: int,
+        pad_idx: int = 0
+    ):
         super().__init__()
         self.embed_dim = embed_dim
         self.token_embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=pad_idx)
@@ -159,10 +166,10 @@ class EncounterEncoder(nn.Module):
 
     def forward(
         self,
-        tokens: torch.Tensor,                        # (..., T_tok)
-        tok_mask: torch.Tensor,                       # (..., T_tok)
-        pad_mask: torch.Tensor | None = None,         # (B, C) or None
-    ) -> torch.Tensor:                                # (B, D)
+        tokens: torch.Tensor,   # (..., T_tok)
+        tok_mask: torch.Tensor,
+        pad_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:          # (B, D)
         """
         Parameters
         ----------

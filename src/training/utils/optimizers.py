@@ -1,6 +1,6 @@
 import math
 import torch
-from torch.amp import GradScaler # type: ignore (Pylance outdated)
+from torch.amp import GradScaler
 
 
 def LinearDecay(
@@ -18,18 +18,7 @@ def LinearDecay(
 
 
 class WarmupCosineAnnealing:
-    """ Linear warmup from min_lr to base_lr, then cosine decay back to min_lr.
-
-    Warmup (step 0 -> warmup_steps):
-        lr = min_lr + (base_lr - min_lr) * (step / warmup_steps)
-
-    Cosine (warmup_steps -> total_steps):
-        t  = step - warmup_steps
-        T  = total_steps - warmup_steps
-        lr = min_lr + 0.5 * (base_lr - min_lr) * (1 + math.cos(math.pi * t / T))
-
-    Both phases meet at base_lr when step == warmup_steps.
-    """
+    """ Linear warmup from min_lr to base_lr, then cosine decay back to min_lr."""
     def __init__(self, optimizer, warmup_steps: int, total_steps: int, min_lr: float = 1e-6, log=False):
         self.optimizer    = optimizer
         self.warmup_steps = max(0, warmup_steps)

@@ -3,33 +3,11 @@ import time
 import csv
 from pathlib import Path
 from datetime import datetime
-import torch
 from torch.utils.tensorboard import SummaryWriter
 
 
-def gpu_timer(closure, log_timings=True):
-    """ Helper to time gpu-time to execute closure() """
-    log_timings = log_timings and torch.cuda.is_available()
-
-    elapsed_time = -1.
-    if log_timings:
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-
-    result = closure()
-
-    if log_timings:
-        end.record()
-        torch.cuda.synchronize()
-        elapsed_time = start.elapsed_time(end)
-
-    return result, elapsed_time
-
-
-
 class TrainingLogger:
-    """ All-in-one csv, tensorboard, and console logger. """
+    """ All-in-one CSV, TensorBoard, and cli logger."""
     def __init__(
         self, 
         logdir: Path, 
@@ -50,33 +28,28 @@ class TrainingLogger:
         self.log_dir = logdir / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
+        # initialized on first log_epoch
+        self._csv_writer = None
         self._csv_path = self.log_dir / "epoch_metrics.csv"
         self._csv_file = open(self._csv_path, "w", newline="")
-        self._csv_writer = None  # initialized on first log_epoch (dynamic columns)
 
         # TensorBoard
         self.writer = SummaryWriter(log_dir=str(logdir / "tb_logs"))
 
         print(f"[TrainingLogger] Logging it up in {logdir.parent.name}/{logdir.name}")
-
-    def log_step(self, loss: float):
-        self._epoch_losses.append(loss)
-        self.global_step += 1
-        self.writer.add_scalar("step/loss", loss, self.global_step)
-
+        
     @property
     def epoch_train_loss(self) -> float:
         if not self._epoch_losses:
             return float("nan")
         return sum(self._epoch_losses) / len(self._epoch_losses)
 
-    def log_epoch(self, loss: float, lr: float | None = None, **metrics):
-        """
-        Call once per epoch with whatever metrics you want.
+    def log_step(self, loss: float):
+        self._epoch_losses.append(loss)
+        self.global_step += 1
+        self.writer.add_scalar("step/loss", loss, self.global_step)
 
-        Common keys: train_loss, val_loss, val_auc, val_f1, lr, ema_decay, etc.
-        Columns are auto-detected from the first call; new keys in later calls are silently ignored.
-        """
+    def log_epoch(self, loss: float, lr: float | None = None, **metrics):
         self.epoch += 1
         wall_time = time.time() - self.run_start
 
@@ -105,11 +78,9 @@ class TrainingLogger:
             self._csv_file.flush()
         self._epoch_losses.clear()
 
-        # TensorBoard — all metrics
+        # TensorBoard metrics
         for key, value in row.items():
-            if key in ("epoch", "wall_sec", "steps"):
-                continue
-            if value == "":
+            if key in ("epoch", "wall_sec", "steps") or value in (None, ""):
                 continue
             v = int(value) if isinstance(value, bool) else float(value)
             self.writer.add_scalar(f"epoch/{key}", v, self.epoch)
@@ -124,7 +95,6 @@ class TrainingLogger:
         print(" | ".join(parts))
 
     def finalize(self):
-        """ Writes summary.json and closes files."""
         total_time = time.time() - self.run_start
 
         self._write_json("run_summary.json", {
@@ -141,7 +111,7 @@ class TrainingLogger:
         self._closed = True
         print(f"\n[TrainingLogger] Run complete in {self._pp_time(total_time)}")
 
-    # ----- Utility -----
+    # -- Utility
 
     def _write_json(self, filename: str, data):
         with open(self.log_dir / filename, "w") as f:
@@ -169,30 +139,27 @@ class TrainingLogger:
             self.writer.close()
     
 
-# ---------------------------------------------------------------------------
-# 2. EMA Tracker — bolt onto EMA update loop
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 2. EMA Tracker
+# ===========================================================================
 
 class EMATracker:
     """
-    Tracks EMA encoder divergence from context encoder.
+    Track encoder divergence from context encoder.
 
     Usage:
-        ema_tracker = EMATracker()
-
-        # Inside your EMA update:
-        ema_tracker.update(context_encoder, ema_encoder)
-
-        # At epoch end:
-        logger.log_epoch(..., **ema_tracker.get_metrics())
-        ema_tracker.reset()
+        Inside EMA update:
+            ema_tracker.update(context_encoder, ema_encoder)
+        At epoch end:
+            logger.log_epoch(..., **ema_tracker.get_metrics())
+            ema_tracker.reset()
     """
 
     def __init__(self):
         self._param_diffs: list[float] = []
 
     def update(self, online_model, ema_model):
-        """Call after each EMA step. Cheaply computes mean absolute param divergence."""
+        # -- Cheap computes mean absolute param divergence.
         total_diff = 0.0
         total_params = 0
         for p_online, p_ema in zip(online_model.parameters(), ema_model.parameters()):
@@ -211,33 +178,14 @@ class EMATracker:
         self._param_diffs.clear()
 
 
-# ---------------------------------------------------------------------------
-# 3. Gradient Health Monitor — bolt onto backward pass
-# ---------------------------------------------------------------------------
-
 class GradientMonitor:
-    """
-    Lightweight gradient statistics per epoch.
-
-    Usage:
-        grad_mon = GradientMonitor(model)
-
-        for batch in loader:
-            loss.backward()
-            grad_mon.capture()  # call after backward, before optimizer.step()
-            optimizer.step()
-
-        logger.log_epoch(..., **grad_mon.get_metrics())
-        grad_mon.reset()
-    """
+    """Lightweight grad monitor.."""
 
     def __init__(self, model):
         self.model = model
         self._grad_norms: list[float] = []
 
     def capture(self):
-        """Capture total gradient norm for this step."""
-        import torch
         total_norm = 0.0
         for p in self.model.parameters():
             if p.grad is not None:
@@ -258,58 +206,3 @@ class GradientMonitor:
 
     def reset(self):
         self._grad_norms.clear()
-
-
-# ---------------------------------------------------------------------------
-# 4. Embedding Health — bolt onto embedding extraction
-# ---------------------------------------------------------------------------
-
-def embedding_health(z_context, z_pred, z_target=None) -> dict:
-    """
-    Quick diagnostics on embedding tensors. Call at end of epoch or periodically.
-
-    Args:
-        z_context: (N, D) tensor — context encoder outputs
-        z_pred:    (N, D) tensor — predictor outputs
-        z_target:  (N, D) tensor — EMA target outputs (optional)
-
-    Returns:
-        Dict of metrics safe to pass into logger.log_epoch(**embedding_health(...))
-    """
-    import torch
-    metrics = {}
-
-    # Displacement field basics
-    delta = z_pred - z_context
-    metrics["delta_norm_mean"] = delta.norm(dim=1).mean().item()
-    metrics["delta_norm_std"] = delta.norm(dim=1).std().item()
-
-    # Cosine similarity distributions
-    cos = torch.nn.functional.cosine_similarity
-    metrics["cos_ctx_pred_mean"] = cos(z_context, z_pred, dim=1).mean().item()
-
-    if z_target is not None:
-        metrics["cos_pred_target_mean"] = cos(z_pred, z_target, dim=1).mean().item()
-        metrics["cos_ctx_target_mean"] = cos(z_context, z_target, dim=1).mean().item()
-
-    # Collapse detection: effective rank via singular values
-    # Only compute on a sample if N is large
-    sample = z_pred[:2048] if z_pred.shape[0] > 2048 else z_pred
-    try:
-        s = torch.linalg.svdvals(sample.float())
-        p = s / s.sum()
-        metrics["z_pred_effective_rank"] = torch.exp(-(p * p.log()).sum()).item()
-    except Exception:
-        pass  # skip if SVD fails on small batches
-
-    # Check for representation collapse
-    mean_pairwise_cos = cos(
-        z_pred[:256].unsqueeze(1),
-        z_pred[:256].unsqueeze(0),
-        dim=2
-    ).triu(diagonal=1)
-    nonzero = mean_pairwise_cos[mean_pairwise_cos != 0]
-    if nonzero.numel() > 0:
-        metrics["z_pred_pairwise_cos_mean"] = nonzero.mean().item()
-
-    return metrics

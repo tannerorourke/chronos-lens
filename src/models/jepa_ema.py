@@ -1,4 +1,5 @@
-"""EMA-based JEPA orchestrator.
+"""
+Classic EMA-based JEPA variant.
 
 Composes EncounterEncoder, Predictor, and an EMA target encoder.
 The training loop owns the momentum schedule and EMA parameter update.
@@ -65,22 +66,22 @@ class JEPA_EMA(nn.Module):
         z_target  : (B, D) EMA target encoding    (no grad)
         """
         ctx_tokens   = batch["ctx_tokens"]    # (B, C, T_tok)
-        ctx_tok_mask = batch["ctx_tok_mask"]   # (B, C, T_tok)
-        ctx_pad_mask = batch["ctx_pad_mask"]   # (B, C)
-        tgt_tokens   = batch["tgt_tokens"]     # (B, T_tok)
-        tgt_tok_mask = batch["tgt_tok_mask"]   # (B, T_tok)
-        mask_pos     = batch["mask_pos"]       # (B,)
+        ctx_tok_mask = batch["ctx_tok_mask"]  # (B, C, T_tok)
+        ctx_pad_mask = batch["ctx_pad_mask"]  # (B, C)
+        tgt_tokens   = batch["tgt_tokens"]    # (B, T_tok)
+        tgt_tok_mask = batch["tgt_tok_mask"]  # (B, T_tok)
+        mask_pos     = batch["mask_pos"]      # (B,)
 
-        # -- Context path (with grads) ----------------------------------------
-        z_context = self.encoder(ctx_tokens, ctx_tok_mask, ctx_pad_mask)  # (B, D)
+        # -- Context encoder (grads)
+        z_context = self.encoder(ctx_tokens, ctx_tok_mask, ctx_pad_mask) #(B, D)
 
-        # -- Target path (no grads — EMA encoder) -----------------------------
+        # -- Target path (no grads)
         with torch.no_grad():
-            z_target = self.target_encoder(tgt_tokens, tgt_tok_mask)      # (B, D)
+            z_target = self.target_encoder(tgt_tokens, tgt_tok_mask) #(B, D)
             z_target = F.layer_norm(z_target, (z_target.size(-1),))
 
-        # -- Predictor ---------------------------------------------------------
-        z_pred = self.predictor(z_context, mask_pos)                      # (B, D)
+        # -- Predictor
+        z_pred = self.predictor(z_context, mask_pos) #(B, D)
 
         return z_context, z_pred, z_target
 

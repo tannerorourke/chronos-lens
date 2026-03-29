@@ -1,8 +1,6 @@
 """
-Baseline classifiers for readmission prediction.
-
-Provides logistic regression and XGBoost baselines that operate on the
-precomputed 4-tier metadata feature matrix (from src.mimic.features).
+Logistic Regression and XGBoost baselines predicting readmission on 
+the precomputed metadata features (from src.mimic.features).
 Falls back to flatten_sequences() if metadata files don't exist yet.
 """
 
@@ -22,16 +20,8 @@ from xgboost import XGBClassifier
 from src.utils.io import PROCESSED_DIR, load_metadata
 
 
-# =============================================================================
-# Fallback featurization (if precomputed metadata not available)
-# =============================================================================
 
 def flatten_sequences(sequences: list[dict], label_key: str = "label") -> tuple:
-    """Flatten patient sequences into a simple feature matrix.
-
-    Returns (feature_matrix, labels, feature_names) as numpy arrays.
-    Used as fallback when precomputed metadata files don't exist.
-    """
     records = []
     labels = []
     for seq in sequences:
@@ -77,7 +67,6 @@ def _evaluate_folds(
     n_splits: int = 5,
     seed: int = 42,
 ) -> dict:
-    """Run stratified k-fold CV and collect metrics per fold."""
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
 
     fold_auroc, fold_auprc, fold_f1, fold_brier = [], [], [], []
@@ -128,7 +117,7 @@ def run_logistic(
     n_splits: int = 5,
     seed: int = 42,
 ) -> dict:
-    """Logistic regression baseline with stratified k-fold CV."""
+    """Logistic regression baseline with stratified k-fold CV"""
     print("\n" + "=" * 60)
     print("Logistic Regression Baseline")
     print("=" * 60)
@@ -212,7 +201,7 @@ def run_xgboost(
 
 
 # =============================================================================
-# CLI entry point
+# CLI
 # =============================================================================
 
 def _serializable(obj):

@@ -1,50 +1,43 @@
 """
-Linear probing utilities — layer-wise signal localization and
+Linear probing utilities - layer-wise signal localization and
 softmax-free vs. softmax comparison for the thesis MI techniques table.
 
 Purpose 1: Extract intermediate representations from each transformer
            encoder layer to probe WHERE the readmission signal emerges.
-
 Purpose 2: Compare linear separability of JEPA (no softmax) vs.
            supervised (softmax classification head) representations.
+Purpose 3: Probe all 6 JEPA latent objects against readmission labels
+           with patient-level pooling to prevent data leakage.
 
 Functions
 ---------
   extract_layer_representations : forward-hook extraction at every layer
   compare_softmax_baseline      : tabular comparison of probing results
+  probe_latent_objects          : probe all 6 latent vectors from .npz
+  probe_by_layer                : probe each encoder layer + final output
 """
+
+from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from src.models.supervised_transformer import SupervisedTransformer
+from src.models.jepa_stopgrad import JEPAStopGrad
+from src.models.jepa_ema import JEPA_EMA
+from src.analysis.eval_tasks import evaluate_readmission
+
+LATENT_OBJECTS = [
+    "z_context", "z_pred", "z_target",
+    "delta", "pred_error", "observed_traj",
+]
+
 def extract_layer_representations(
-    model: torch.nn.Module,
+    model: JEPA_EMA | JEPAStopGrad | SupervisedTransformer,
     loader: DataLoader,
     device: torch.device,
 ) -> dict:
-    """Extract mean-pooled representations at every encoder layer.
-
-    Uses forward hooks on each TransformerEncoderLayer in the context
-    encoder to capture intermediate outputs, then mean-pools over
-    non-padded positions (matching the encoder's own pooling logic).
-
-    Parameters
-    ----------
-    model  : JEPA model (eval mode, frozen)
-    loader : DataLoader yielding batch dicts with ctx_tokens, ctx_tok_mask,
-             ctx_pad_mask, labels, subject_ids
-    device : torch device
-
-    Returns
-    -------
-    dict with keys:
-        "layer_{i}"     : (N, embed_dim) ndarray for each encoder layer
-        "final"         : (N, embed_dim) ndarray — z_context (post-norm, pooled)
-        "labels"        : (N,) int ndarray
-        "subject_ids"   : (N,) str ndarray
-        "n_layers"      : int
-    """
     model.eval()
     layers = model.transformer_layers
     n_layers = len(layers)
@@ -55,7 +48,7 @@ def extract_layer_representations(
 
     def _make_hook(layer_idx):
         def hook_fn(module, input, output):
-            # output: (B, T, D) — post-residual sequence tensor
+            # output: (B, T, D) - post-residual sequence tensor
             hook_outputs[layer_idx].append(output.detach())
         return hook_fn
 
@@ -101,60 +94,86 @@ def extract_layer_representations(
     return result
 
 
+# =============================================================================
+# Patient-level pooling
+# =============================================================================
 
-def compare_softmax_baseline(
-    jepa_results: dict,
-    softmax_results: dict,
+def _pool_to_patients(
+    embeddings: np.ndarray,
+    subject_ids: np.ndarray,
+    labels: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    unique_ids, inverse = np.unique(subject_ids, return_inverse=True)
+    n_patients = len(unique_ids)
+    D = embeddings.shape[1]
+
+    patient_embs = np.zeros((n_patients, D), dtype=embeddings.dtype)
+    counts = np.zeros(n_patients, dtype=np.int64)
+    patient_labels = np.empty(n_patients, dtype=labels.dtype)
+
+    for i, inv in enumerate(inverse):
+        patient_embs[inv] += embeddings[i]
+        counts[inv] += 1
+        patient_labels[inv] = labels[i]
+
+    patient_embs /= counts[:, None]
+    return patient_embs, patient_labels
+
+
+# =============================================================================
+# Probe all 6 JEPA latent objects from .npz
+# =============================================================================
+
+def probe_latent_objects(
+    embeddings_path: Path | str,
+    n_splits: int = 5,
+    seed: int = 42,
 ) -> dict:
-    """Compare probing results from JEPA vs. softmax-trained model.
+    npz = np.load(embeddings_path, allow_pickle=True)
+    labels = npz["labels"]
+    subject_ids = npz["subject_ids"]
 
-    Parameters
-    ----------
-    jepa_results    : output from run_probing_sweep for JEPA model
-    softmax_results : output from run_probing_sweep for softmax model
+    z_context = npz["z_context"]
+    z_pred = npz["z_pred"]
+    z_target = npz["z_target"]
 
-    Returns
-    -------
-    dict with per-layer comparison and summary interpretation
-    """
-    layers = sorted(jepa_results["per_layer"].keys())
-    comparison = []
-
-    for layer_key in layers:
-        j = jepa_results["per_layer"][layer_key]
-        s = softmax_results["per_layer"][layer_key]
-        comparison.append({
-            "layer": layer_key,
-            "jepa_auc": j["mean_auc"],
-            "softmax_auc": s["mean_auc"],
-            "delta_auc": j["mean_auc"] - s["mean_auc"],
-            "jepa_f1": j["mean_f1"],
-            "softmax_f1": s["mean_f1"],
-        })
-
-    # Summary
-    jepa_final = jepa_results["per_layer"].get("final", {})
-    soft_final = softmax_results["per_layer"].get("final", {})
-    jepa_auc = jepa_final.get("mean_auc", 0)
-    soft_auc = soft_final.get("mean_auc", 0)
-
-    if jepa_auc >= soft_auc - 0.02:
-        interpretation = (
-            f"JEPA final-layer AUC ({jepa_auc:.3f}) matches or exceeds "
-            f"softmax ({soft_auc:.3f}). The latent space organizes for the "
-            f"task geometry naturally without softmax supervision, supporting "
-            f"the thesis claim that geometric analysis is meaningful."
-        )
-    else:
-        interpretation = (
-            f"Softmax final-layer AUC ({soft_auc:.3f}) exceeds JEPA "
-            f"({jepa_auc:.3f}). The geometric structure in the JEPA "
-            f"displacement field is genuinely different from supervised "
-            f"representations. SAE features may capture structure that "
-            f"softmax training would optimize away."
-        )
-
-    return {
-        "comparison": comparison,
-        "interpretation": interpretation,
+    vectors = {
+        "z_context":     z_context,
+        "z_pred":        z_pred,
+        "z_target":      z_target,
+        "delta":         npz["delta"] if "delta" in npz else z_pred - z_context,
+        "pred_error":    npz["pred_error"] if "pred_error" in npz else z_pred - z_target,
+        "observed_traj": npz["observed_traj"] if "observed_traj" in npz else z_target - z_context,
     }
+
+    results = {}
+    for name, emb in vectors.items():
+        if np.all(emb == 0):
+            continue
+        emb_pat, labels_pat = _pool_to_patients(emb, subject_ids, labels)
+        results[name] = evaluate_readmission(
+            emb_pat, labels_pat, n_splits=n_splits, seed=seed)
+
+    return results
+
+
+def probe_by_layer(
+    model: JEPA_EMA | JEPAStopGrad | SupervisedTransformer,
+    loader: DataLoader,
+    device: torch.device,
+    labels: np.ndarray,
+    n_splits: int = 5,
+    seed: int = 42,
+) -> dict:
+    reps = extract_layer_representations(model, loader, device)
+    subject_ids = reps["subject_ids"]
+    n_layers = reps["n_layers"]
+
+    results = {}
+    for key in [f"layer_{i}" for i in range(n_layers)] + ["final"]:
+        emb = reps[key]
+        emb_pat, labels_pat = _pool_to_patients(emb, subject_ids, labels)
+        results[key] = evaluate_readmission(
+            emb_pat, labels_pat, n_splits=n_splits, seed=seed)
+
+    return results

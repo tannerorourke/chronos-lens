@@ -1,26 +1,15 @@
 """
-Partial labeling bridge — Tiers A (LASSO) and B (UMAP + HDBSCAN cluster
-enrichment) for the geometric latent space analysis (thesis §5.5).
-
-Connects the model's geometric structure back to clinical concepts using
-a rich metadata vocabulary (~60-80 features across 4 tiers).  The richer
-the vocabulary, the stronger the "no clinical match" claim for
-unexplained geometric structure.
-
-Tier A (LASSO on PCA axes):
-    Linear bridge — regress metadata against PC scores.
-    Assumes geometry is organised along linear axes.
-    Unexplained variance = 1 − R².
-
-Tier B (UMAP + HDBSCAN cluster enrichment):
-    Nonlinear bridge — cluster UMAP embedding with HDBSCAN, compute
-    enrichment of metadata features per cluster.  Clusters with no
-    clear enrichment are the mislabeling problem made visible.
-
-Downstream consumers
---------------------
-  lasso/                          → Tier A results
-  clusters/                       → Tier B results
+Analysis functions for Connects the model's geometric structure back 
+to clinical concepts using:
+- LASSO on PCA axes
+   - regress metadata against PC scores, assuming geometry is organised 
+     along linear axes.
+   - Unexplained variance = 1 - R^2.
+- UMAP + HDBSCAN cluster "enrichment"
+    - cluster UMAP embedding with HDBSCAN, compute enrichment of metadata 
+      features per cluster.
+    - Clusters with no clear enrichment are sections to analyze further 
+      (why did the model make this cluster?).
 """
 
 import warnings
@@ -33,6 +22,7 @@ from hdbscan import HDBSCAN
 from src.utils.seed import SEED, get_rng
 from src.mimic.features import extract_metadata, is_binary  # noqa: F401
 rng  = get_rng()
+
 
 def _lasso_stability_selection(
     X: np.ndarray,
@@ -118,36 +108,13 @@ def broadcast_to_samples(
 # Tier A: LASSO Bridge
 # =============================================================================
 
-def run_lasso_bridge(
+def run_lasso_enrichment(
     pc_projections: np.ndarray,
     metadata: np.ndarray,
     feature_names: list,
     top_k: int = 10,
     n_bootstrap: int = 100,
 ) -> dict:
-    """
-    Tier A — LASSO regression of clinical metadata against PC scores.
-
-    For each top-k PC, regresses PC score ~ metadata features with LassoCV.
-    Bootstrap stability selection identifies robustly selected features.
-
-    Both pc_projections and metadata should be at patient level
-    (use pool_to_patients() on sample-level PC projections first).
-
-    Parameters
-    ----------
-    pc_projections : (n_patients, k) patient-level PC scores
-    metadata       : (n_patients, n_features) patient-level metadata
-    feature_names  : list of n_features feature names
-    top_k          : number of PCs to regress (clamped to available)
-    n_bootstrap    : iterations for stability selection
-
-    Returns
-    -------
-    dict with r2_per_pc, mean_r2, unexplained_variance_fraction,
-    coeff_matrix, stability_matrix, ci_low, ci_high,
-    top_predictors_per_pc, feature_names, n_patients.
-    """
     n_patients, k_avail = pc_projections.shape
     n_features = metadata.shape[1]
     k = min(top_k, k_avail)
@@ -226,16 +193,11 @@ def run_lasso_bridge(
         "ci_high":                      ci_high_matrix,      # (n_features, k)
         "top_predictors_per_pc":        top_predictors,
         "n_bootstrap_iterations":       n_bootstrap,
-        "interpretation_note": (
-            "Unexplained variance fraction is a positive scientific finding: "
-            "the model has learned geometric structure that falls outside the "
-            "conceptual vocabulary captured by these metadata features."
-        ),
     }
 
 
 # =============================================================================
-# Step 5c — Tier B: UMAP + HDBSCAN Cluster Enrichment
+# UMAP + HDBSCAN Cluster Enrichment
 # =============================================================================
 
 def run_cluster_enrichment(
@@ -245,7 +207,7 @@ def run_cluster_enrichment(
     min_cluster_size: int = 10,
 ) -> dict:
     """
-    Tier B — UMAP + HDBSCAN cluster enrichment analysis.
+    Tier B - UMAP + HDBSCAN cluster enrichment analysis.
     https://hdbscan.readthedocs.io/en/latest/index.html
     
     Clusters the UMAP embedding with HDBSCAN, then computes enrichment of
@@ -269,7 +231,7 @@ def run_cluster_enrichment(
     """
     clusterer = HDBSCAN(
         min_cluster_size=min_cluster_size,
-        min_samples=None,                  # defaults to min_cluster_size
+        min_samples=None, # defaults to min_cluster_size
     )
     cluster_labels = clusterer.fit_predict(umap_embedding)
 
@@ -340,7 +302,7 @@ def run_cluster_enrichment(
             features.append(entry)
         cluster_profiles[int(cid)] = features
 
-    # Identify unlabeled clusters (max |z| < 1.0 — no strong enrichment)
+    # Identify unlabeled clusters (max |z| < 1.0 - no strong enrichment)
     max_z_per_cluster = np.abs(enrichment_matrix).max(axis=1)
     unlabeled_clusters = [
         int(cluster_ids[i]) for i in range(n_clusters)

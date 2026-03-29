@@ -30,7 +30,7 @@ from src.utils.io import PROCESSED_DIR, save_metadata
 
 DRUG_CLASSES = {
     # =========================================================================
-    # OVERDOSE REVERSAL — singular administration (atomic event)
+    # OVERDOSE REVERSAL - singular administration (atomic event)
     "reversal": [
         "naloxone",
         "flumazenil",
@@ -69,8 +69,8 @@ DRUG_CLASSES = {
         "nortriptyline",      # Pamelor
         "desipramine",        # Norpramin
         "imipramine",         # Tofranil
-        "doxepin",            # Sinequan — also used for sleep/itching
-        "clomipramine",       # Anafranil — OCD
+        "doxepin",            # Sinequan - also used for sleep/itching
+        "clomipramine",       # Anafranil - OCD
     ],
     # =========================================================================
     # ANTIDEPRESSANTS : MAOIs (rare but present)
@@ -104,14 +104,14 @@ DRUG_CLASSES = {
     # =========================================================================
     # ANTIPSYCHOTICS : 1st Generation (Typical)
     "antipsychotic_typical": [
-        "haloperidol",        # Haldol — extremely common in MIMIC (agitation, delirium)
+        "haloperidol",        # Haldol - extremely common in MIMIC (agitation, delirium)
         "chlorpromazine",     # Thorazine
         "fluphenazine",       # Prolixin
         "perphenazine",       # Trilafon
         "thiothixene",        # Navane
         "loxapine",           # Loxitane
-        "pimozide",           # Orap — rare
-        "prochlorperazine",   # Compazine — often used as antiemetic
+        "pimozide",           # Orap - rare
+        "prochlorperazine",   # Compazine - often used as antiemetic
     ],
     # =========================================================================
     # ANTIPSYCHOTICS : 2nd Generation (Atypical)
@@ -195,8 +195,8 @@ DRUG_CLASSES = {
         "suvorexant",         # Belsomra
         "ramelteon",          # Rozerem
         "melatonin",          # OTC but frequently appears
-        # trazodone also used for sleep — listed under antidepressant_other
-        # quetiapine low-dose for sleep — listed under antipsychotic_atypical
+        # trazodone also used for sleep - listed under antidepressant_other
+        # quetiapine low-dose for sleep - listed under antipsychotic_atypical
     ],
 }
 
@@ -409,7 +409,7 @@ def extract_metadata(
         row.append(1.0 if last_has_f else 0.0)
 
         # med_count_trend (linear slope of med count over encounters)
-        # manual OLS slope — avoids np.polyfit (LAPACK dependency issues)
+        # manual OLS slope - avoids np.polyfit (LAPACK dependency issues)
         mc = np.array(med_counts, dtype=float)
         if len(mc) >= 2 and mc.std() > 0:
             x = np.arange(len(mc), dtype=float)

@@ -32,21 +32,21 @@ from src.utils.io import load_sequences, build_vocab, EXPERIMENTS_DIR
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
-    # --- most params are sent to resp. functions ------------------------------
-    # --- optimization ---------------------------------------------------------
+    # --- most params are sent to respective functions ---
+    # --- optimization ---
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
     sim_weight  = opt_params.get("sim_weight", 1.0)
     var_weight  = opt_params.get("var_weight", 1.0)
     cov_weight  = opt_params.get("cov_weight", 0.04)
 
-    # --- data -----------------------------------------------------------------
+    # --- data ---
     data_params     = params["data"]
     batch_size      = data_params["batch_size"]
     n_patients      = data_params["n_patients"]
     pin_memory      = data_params.get("pin_mem", True) and device.type == "cuda"
 
-    # --- meta -----------------------------------------------------------------
+    # --- meta ---
     meta_p          = params["meta"]
     seed            = meta_p["seed"]
     use_bfloat16    = meta_p["use_bfloat16"]
@@ -54,7 +54,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     log_vecs_every  = meta_p["log_vecs_every"] or epochs
     checkpoint_every = meta_p["checkpoint_every"] or epochs
 
-    # --- build sequences, vocab, dataset, loader ------------------------------
+    # --- build sequences, vocab, dataset, loader ---
     patients = load_sequences(n=n_patients)
     vocab = build_vocab(patients, pad_idx=0, dir=run_dir)
     with open(run_dir / "vocab.json", "w", encoding="utf-8") as fh:
@@ -72,13 +72,13 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     emb_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- model ----------------------------------------------------------------
+    # --- model ---
     model_params = params["model"]
     model_params["vocab_size"] = len(vocab)
     model = build_model(model_params, device)
     assert type(model) == JEPAStopGrad
     
-    # --- init optimizer / scheduler / scaler ----------------------------------
+    # --- init optimizer / scheduler / scaler ---
     optimizer, scheduler, scaler = init_optimizers(
         model, opt_params,
         ipe=len(loader),
@@ -87,7 +87,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     
     
     start_epoch, global_step, loss_history = 1, 1, []
-    # --- load checkpoint? ----------------------------------------------
+    # --- load checkpoint? ---
     if params.get("resume_from"):
         ckpt_path = EXPERIMENTS_DIR / params["resume_from"]
         model, model_params, optimizer, scheduler, scaler, start_epoch, global_step, loss_history = \
@@ -125,13 +125,17 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
             }
+            
+            def forward_unto_dawn():
+                z_context, z_pred, z_target = model(batch_dev)
+                loss_dict = jepa_stopgrad_loss(
+                    z_pred, z_target, z_context,
+                    sim_weight, var_weight, cov_weight)
+                return loss_dict
 
             if use_bfloat16 and scaler is not None:
                 with torch.amp.autocast("cuda", dtype=torch.bfloat16):  # type: ignore
-                    z_context, z_pred, z_target = model(batch_dev)
-                    loss_dict = jepa_stopgrad_loss(
-                        z_pred, z_target, z_context,
-                        sim_weight, var_weight, cov_weight)
+                    loss_dict = forward_unto_dawn()
                     loss = loss_dict["loss"]
 
                 scaler.scale(loss).backward()
@@ -142,10 +146,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 scaler.update()
 
             else:
-                z_context, z_pred, z_target = model(batch_dev)
-                loss_dict = jepa_stopgrad_loss(
-                    z_pred, z_target, z_context,
-                    sim_weight, var_weight, cov_weight)
+                loss_dict = forward_unto_dawn()
                 loss = loss_dict["loss"]
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -163,7 +164,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 vicreg_accum[k] += loss_dict[k].item()
             n_batches += 1
 
-        # -- end of epoch --------------------------------------------------
+        # --- EVAL --------------------------------------------------------------
         model.eval()
 
         if epoch % checkpoint_every == 0 or epoch == epochs:
@@ -185,7 +186,5 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         grad_mon.reset()
 
     # ------------------------------------------------------------------
-    # --- POST-TRAINING ------------------------------------------------
-    # ------------------------------------------------------------------
-
+    # --- DONE ---------------------------------------------------------
     logger.finalize()

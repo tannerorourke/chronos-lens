@@ -2,14 +2,14 @@
 Sparse Autoencoder for displacement field analysis.
 
 Learns a sparse dictionary of basis directions that reconstruct Δ.
-Each direction is a "feature" discovered from the geometry itself —
+Each direction is a "feature" discovered from the geometry itself -
 not from a human-chosen label set.  Sparsity enforced via TopK
 activation (keep top-k, zero the rest; no L1 penalty needed).
 
 Architecture
 ------------
   Encoder : Linear(embed_dim -> n_features) → top k activation
-  Decoder : Linear(n_features -> embed_dim)  — decoder rows ARE the dictionary
+  Decoder : Linear(n_features -> embed_dim)  - decoder rows ARE the dictionary
 
 Loss
 ----
@@ -40,7 +40,7 @@ class SparseAutoencoder(nn.Module):
         self.decoder = nn.Linear(n_features, embed_dim, bias=False)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Encode + TopK sparsity.  Returns (B, n_features) with ≤ k nonzeros."""
+        """Encode + TopK sparsity.  Returns (B, n_features) with <= k nonzeros."""
         h = self.encoder(x)                         # (B, n_features)
         topk_vals, topk_idx = h.topk(self.top_k, dim=-1)
         sparse = torch.zeros_like(h)

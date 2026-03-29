@@ -1,19 +1,5 @@
 """
-SAE training pipeline — trains a TopK sparse autoencoder on the JEPA
-displacement field Δ = z_pred − z_context.
-
-Tier C of the three-tier partial labeling bridge (thesis §5.5).
-
-Public API
-----------
-  freeze_jepa(checkpoint_path, device)
-      → loads a trained JEPA, sets eval + requires_grad_(False)
-
-  train_sae(disp_vec, n_features, top_k, epochs, lr, batch_size, device, seed)
-      → trained SparseAutoencoder, loss history
-
-  save_sae_results(model, disp_vec, loss_history, output_dir)
-      → persists checkpoint, dictionary, activations, loss curve
+Trains a TopK sparse autoencoder on a JEPA latent vector.
 """
 
 from pathlib import Path
@@ -49,24 +35,6 @@ def train_sae(
     device: torch.device = torch.device("cpu"),
     seed: int = SEED,
 ) -> tuple:
-    """Train a TopK sparse autoencoder on displacement vectors.
-
-    Parameters
-    ----------
-    disp_vec   : (N, embed_dim) displacement field
-    n_features : dictionary size (overcomplete, typically 4x embed_dim)
-    top_k      : active features per sample
-    epochs     : training epochs
-    lr         : learning rate
-    batch_size : mini-batch size
-    device     : torch device
-    seed       : random seed
-
-    Returns
-    -------
-    model        : trained SparseAutoencoder
-    loss_history : list[float] mean loss per epoch
-    """
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -144,19 +112,7 @@ def save_sae_results(
     loss_history: list,
     output_dir: Path,
 ) -> dict:
-    """Save SAE checkpoint, dictionary, activations, and loss curve.
-
-    Parameters
-    ----------
-    model       : trained SparseAutoencoder
-    disp_vec       : (N, embed_dim) displacement vectors (for final activation extraction)
-    loss_history: per-epoch mean loss
-    output_dir  : directory to write outputs
-
-    Returns
-    -------
-    dict with paths to saved files
-    """
+    """Save SAE checkpoint, dictionary, activations, and loss curve."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

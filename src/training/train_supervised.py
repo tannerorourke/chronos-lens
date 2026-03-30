@@ -21,11 +21,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from src.models.supervised_transformer import SupervisedTransformer
-from src.training.utils.datasets import SupervisedDataset, supervised_collate_fn
+from src.training.utils.datasets import SupervisedDataset, supervised_collate_fn, build_vocab
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import GradientMonitor, TrainingLogger
 from src.training.utils.checkpoint import build_model, save_checkpoint, load_model_checkpoint
-from src.utils.io import load_sequences, build_vocab, EXPERIMENTS_DIR
+from src.utils.io import load_sequences, EXPERIMENTS_DIR
 
 # =============================================================================
 # Embedding extraction
@@ -33,9 +33,9 @@ from src.utils.io import load_sequences, build_vocab, EXPERIMENTS_DIR
 
 @torch.no_grad()
 def save_supervised_embeddings(
-    model: SupervisedTransformer,
-    loader: DataLoader,
-    device: torch.device,
+    all_z_c: list[np.ndarray], 
+    all_sids: list[str], 
+    all_labels: list[np.ndarray],
     epoch: int,
     save_dir: Path,
 ) -> None:
@@ -45,36 +45,17 @@ def save_supervised_embeddings(
     observed_traj) are saved as zeros so analysis code that loads
     the .npz can key on z_context + subject_ids + labels unchanged.
     """
-    model.eval()
-    z_contexts:      list[np.ndarray] = []
-    ep_sids:   list[str]        = []
-    ep_labels: list[np.ndarray] = []
-
-    for batch in loader:
-        batch_dev = {
-            k: v.to(device) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
-        z_context, _ = model(batch_dev)
-        z_contexts.append(z_context.cpu().numpy())
-        ep_sids.extend(batch["subject_ids"])
-        ep_labels.append(batch["labels"].numpy())
-
-    z_context   = np.concatenate(z_contexts)
-    subject_ids = np.array(ep_sids)
-    labels      = np.concatenate(ep_labels)
+    z_context   = np.concatenate(all_z_c)
+    subject_ids = np.array(all_sids)
+    labels      = np.concatenate(all_labels)
     N, D        = z_context.shape
-    zeros       = np.zeros_like(z_context)
 
     file = (save_dir / f"embeddings_{epoch}").with_suffix(".npz")
     np.savez(
         file,
         z_context=z_context,
-        z_pred=zeros,
-        z_target=zeros,
-        delta=zeros,
-        pred_error=zeros,
-        observed_traj=zeros,
+        z_pred=np.zeros_like(z_context),
+        z_target=np.zeros_like(z_context),
         subject_ids=subject_ids,
         mask_positions=np.full(N, -1, dtype=np.int64),
         labels=labels,
@@ -178,7 +159,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             
             def forward_unto_dawn():
                 z_context, logits = model(batch_dev)
-                
                 z_c.append(z_context.cpu().numpy())
                 sids.extend(batch["subject_ids"])
                 labels.append(batch["labels"].numpy())
@@ -222,7 +202,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                             ckpt_dir, seed=seed)
 
         if log_vecs and (epoch % log_vecs_every == 0 or epoch == epochs or epoch == 1):
-            save_supervised_embeddings(model, loader, device, epoch, emb_dir)
+            save_supervised_embeddings(z_c, sids, labels, epoch, emb_dir)
 
         logger.log_epoch(
             loss=float(np.mean(epoch_losses)),

@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ EXPERIMENTS_DIR = ROOT / "experiments"
 
 
 # =============================================================================
-# Dataset IO
+# Data Loaders
 # =============================================================================
 
 def load_sequences_dict(path: Path) -> dict:
@@ -49,7 +50,76 @@ def load_sequences(n=None) -> list[dict]:
         return sequences[:n]
     except Exception as e:
         raise FileNotFoundError(f"[load_sequences] Error loading .jsonl sequences from '{PROCESSED_DIR}/sequences.jsonl': {e}")
+
+
+def load_metadata(path: Path = None) -> tuple:
+    d = Path(path) if path else PROCESSED_DIR
+    metadata = np.load(d / "metadata_features.npy")
+    with open(d / "metadata_feature_names.json") as f:
+        feature_names = json.load(f)
+    with open(d / "patient_ids.json") as f:
+        patient_ids = np.array(json.load(f), dtype=str)
+    return metadata, feature_names, patient_ids
+
+def load_npz_dict(path: Path) -> dict:
+    npz = np.load(path, allow_pickle=True)
+    return { k: npz[k] for k in npz }
+
+# =============================================================================
+# Data Savers
+# =============================================================================
+
+def save_metadata(
+    metadata: np.ndarray,
+    feature_names: list,
+    patient_ids: np.ndarray,
+    path: Path = None,
+) -> None:
+    d = Path(path) if path else PROCESSED_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    np.save(d / "metadata_features.npy", metadata)
+    with open(d / "metadata_feature_names.json", "w") as f:
+        json.dump(feature_names, f, indent=2)
+    with open(d / "patient_ids.json", "w") as f:
+        json.dump([str(pid) for pid in patient_ids], f, indent=2)
+    print(f"  Metadata saved -> {d}  ({metadata.shape[0]} patients x {metadata.shape[1]} features)")
     
+    
+def save_embedding_vecs(
+    model_records: defaultdict[str, list[np.ndarray]],
+    epoch: int | None = None,
+    save_dir: Path | None = None,
+) -> dict[str, np.ndarray]:
+    records = {}
+    for k, v in model_records.items():
+        if k == "subject_ids":
+            records[k] = np.array(v, dtype=str)
+        elif k in ("z_encs", "ctx_pad_masks"):
+            max_c = max(arr.shape[1] for arr in v)
+            padded = []
+            for arr in v:
+                pad_width = [(0,0)] * arr.ndim
+                pad_width[1] = (0, max_c - arr.shape[1])
+                padded.append(np.pad(arr, pad_width))
+            records[k] = np.concatenate(padded, axis=0)
+        else:
+            records[k] = np.concatenate(v, axis=0)
+    
+    if save_dir is not None:
+        ep_str = f"_{epoch}" if epoch is not None else ""
+        file = (save_dir / f"embeddings{ep_str}").with_suffix(".npz")
+        np.savez(
+            file,
+            z_encs      =records["z_encs"],
+            z_pred      =records["z_pred"],
+            z_target    =records["z_target"],
+            subject_ids =records["subject_ids"],
+            mask_pos    =records["mask_pos"],
+            labels      =records["labels"],
+        )
+        print(f"   Saved embeddings -> {file.name} (epoch {epoch})")
+
+    return records
 
 # =============================================================================
 # config IO
@@ -79,60 +149,3 @@ def init_run_dir(model: str) -> Path:
         run_dir.mkdir(parents=True, exist_ok=True)
 
     return run_dir
-    
-    
-# =============================================================================
-# Metadata IO
-# =============================================================================
-
-def load_metadata(path: Path = None) -> tuple:
-    d = Path(path) if path else PROCESSED_DIR
-    metadata = np.load(d / "metadata_features.npy")
-    with open(d / "metadata_feature_names.json") as f:
-        feature_names = json.load(f)
-    with open(d / "patient_ids.json") as f:
-        patient_ids = np.array(json.load(f), dtype=str)
-    return metadata, feature_names, patient_ids
-
-
-def save_metadata(
-    metadata: np.ndarray,
-    feature_names: list,
-    patient_ids: np.ndarray,
-    path: Path = None,
-) -> None:
-    d = Path(path) if path else PROCESSED_DIR
-    d.mkdir(parents=True, exist_ok=True)
-    np.save(d / "metadata_features.npy", metadata)
-    with open(d / "metadata_feature_names.json", "w") as f:
-        json.dump(feature_names, f, indent=2)
-    with open(d / "patient_ids.json", "w") as f:
-        json.dump([str(pid) for pid in patient_ids], f, indent=2)
-    print(f"  Metadata saved -> {d}  ({metadata.shape[0]} patients x {metadata.shape[1]} features)")
-
-
-# =============================================================================
-# Vocab
-# =============================================================================
-
-def build_vocab(
-    patients: list[dict], 
-    pad_idx: int, 
-    dir: Path,
-) -> dict[str, int]:
-    print(f"[build_vocab] building vocab ([PAD]: {pad_idx})...")
-    tokens: set[str] = set()
-    for p in patients:
-        for enc in p.get("encounters", []):
-            tokens.update(enc.get("icd_codes", []))
-            tokens.update(enc.get("meds", []))
-    vocab: dict[str, int] = {"[PAD]": pad_idx}
-    for i, tok in enumerate(sorted(tokens), start=1):
-        vocab[tok] = i
-
-    with open(dir / "vocab.json", "w", encoding="utf-8") as fh:
-        json.dump(vocab, fh, indent=2)
-
-    print(f"   len: {len(vocab)}")
-    return vocab
-    

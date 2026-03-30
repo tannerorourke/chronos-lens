@@ -6,7 +6,7 @@ Tier C of the three-tier partial labeling bridge (thesis §5.5).
 
 Functions
 ---------
-  extract_sae_activations : run a trained SAE on delta → sparse activations
+  extract_sae_activations : run a trained SAE on delta -> sparse activations
   load_sae                : reconstruct a SparseAutoencoder from checkpoint
   inspect_sae_features    : open-ended enrichment against raw ICD/med vocabulary
   sae_cluster_crossref    : cross-reference SAE features with HDBSCAN clusters

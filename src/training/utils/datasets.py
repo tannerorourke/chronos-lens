@@ -1,8 +1,35 @@
+from pathlib import Path
+import json
+
 import torch
 from torch.utils.data import Dataset
     
-    
-    
+# =============================================================================
+# Utilities
+# =============================================================================
+
+def build_vocab(
+    patients: list[dict], 
+    pad_idx: int, 
+    dir: Path,
+) -> dict[str, int]:
+    print(f"[build_vocab] building vocab ([PAD]: {pad_idx})...")
+    tokens: set[str] = set()
+    for p in patients:
+        for enc in p.get("encounters", []):
+            tokens.update(enc.get("icd_codes", []))
+            tokens.update(enc.get("meds", []))
+    vocab: dict[str, int] = {"[PAD]": pad_idx}
+    for i, tok in enumerate(sorted(tokens), start=1):
+        vocab[tok] = i
+
+    with open(dir / "vocab.json", "w", encoding="utf-8") as fh:
+        json.dump(vocab, fh, indent=2)
+
+    print(f"   len: {len(vocab)}")
+    return vocab
+
+
 def encode_encounter(enc: dict, vocab: dict[str, int], PAD_IDX: int,
                      modality: str = "all") -> list[int]:
     """Return a list of token indices for one encounter dict.

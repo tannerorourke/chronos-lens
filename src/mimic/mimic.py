@@ -265,15 +265,6 @@ def build_patient_sequences(
     min_encounters: int,
     readm_window_days: int
 ) -> list[dict]:
-    """
-    Main extraction: builds patient sequences with readmission-based cohort
-    and mood-disorder (F30-F39) labels.
-
-    Cohort: all patients with at least one readmission within [readm_window_days]
-    days of a prior discharge, plus >= [min_encounters] encounters total.
-
-    Label: 1 if the readmission includes an F30-F39 diagnosis; 0 otherwise.
-    """
     print("      applying cohort filters")
 
     # Fill missing lists (admissions with no diagnoses or no active meds)
@@ -293,24 +284,10 @@ def build_patient_sequences(
     print(f"  Patients with >= {min_encounters} encounters: {len(qualifying):,}")
     encounters = encounters[encounters["subject_id"].isin(qualifying)]
 
-    # filter > readmission-based cohort: patients >= 1 readmission pair 
-    # where next admittime <= prior dischtime + window
-    readm_patients = set()
-    for subject_id, group in encounters.groupby("subject_id"):
-        rows = group.sort_values("admittime").to_dict("records")
-        for i in range(len(rows) - 1):
-            window_end = rows[i]["dischtime"] + timedelta(days=readm_window_days)
-            if rows[i + 1]["admittime"] <= window_end:
-                readm_patients.add(subject_id)
-                break
-    print(f"      Patients with readmission within {readm_window_days}d: {len(readm_patients):,}")
-
-    encounters = encounters[encounters["subject_id"].isin(readm_patients)].copy()
     print(f"      Final: {len(encounters):,} encounters, {encounters['subject_id'].nunique():,} patients")
+    print(f"\n[5/5] Computing labels ({readm_window_days}-day and 30-day)...")
 
     # --- Compute labels and assemble sequences ---
-    print(f"\n[5/5] Computing readmission labels ({readm_window_days}-day and 30-day)...")
-
     sequences = []
     for subject_id, group in encounters.groupby("subject_id"):
         rows = group.sort_values("admittime").to_dict("records")

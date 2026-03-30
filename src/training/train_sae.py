@@ -167,7 +167,7 @@ def save_sae_results(
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
 
-    print(f"SAE results saved → {output_dir}")
+    print(f"SAE results saved -> {output_dir}")
     print(f"  checkpoint:   {ckpt_path.name}")
     print(f"  dictionary:   {dict_path.name}  shape={dictionary.shape}")
     print(f"  activations:  {act_path.name}  shape={act_np.shape}")

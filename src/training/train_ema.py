@@ -15,6 +15,7 @@ environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from pathlib import Path
 from typing import Dict
 import json
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -22,12 +23,11 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from src.models.jepa_ema import JEPA_EMA
-from src.training.utils.datasets import MimicDataset, collate_fn
+from src.training.utils.datasets import MimicDataset, collate_fn, build_vocab
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import GradientMonitor, TrainingLogger
 from src.training.utils.checkpoint import build_model, save_checkpoint, load_model_checkpoint
-from src.analysis.displacement import save_embedding_vecs
-from src.utils.io import load_sequences, build_vocab, EXPERIMENTS_DIR
+from src.utils.io import load_sequences, save_embedding_vecs, EXPERIMENTS_DIR
 
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:
@@ -112,17 +112,17 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
     logger   = TrainingLogger(run_dir, start_epoch, global_step, loss_history)
     grad_mon = GradientMonitor(model)
-
+    
     # ------------------------------------------------------------------
     # --- TRAINING LOOP ------------------------------------------------
     # ------------------------------------------------------------------
     print(f"Training for {ipe} batches (size: {batch_size}) for {epochs} epochs")
     print(f"Description: {params['meta']['tag']}: {params['meta']['description']}")
 
-    vicreg_keys = ("sim", "var_pred", "var_ctx", "cov_pred", "cov_ctx")
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         epoch_losses: list[float] = []
+        epoch_records: defaultdict[str, list[np.ndarray]] = defaultdict(list)
         n_batches = 0
 
         for batch in loader:
@@ -132,7 +132,13 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             }
             
             def forward_unto_dawn():
-                z_context, z_pred, z_target = model(batch_dev)
+                z_enc, z_pred, z_target = model(batch_dev)
+                for k, v in zip(
+                    ["z_encs", "z_pred", "z_target", "subject_ids", "mask_pos", "labels"], 
+                    [z_enc, z_pred, z_target, batch_dev["subject_ids"], batch_dev["mask_pos"], batch_dev["labels"]]
+                ):
+                    epoch_records[k].append(v.detach().cpu().numpy())
+                
                 loss = F.smooth_l1_loss(z_pred, z_target)
                 return loss
 
@@ -159,7 +165,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             if scheduler is not None:
                 scheduler.step()
 
-            # -- EMA update of target encoder (matching iJEPA reference)
+            # -- EMA update of target encoder --
             with torch.no_grad():
                 m = next(momentum_scheduler)
                 for param_q, param_k in zip(model.encoder.parameters(), model.target_encoder.parameters()):
@@ -180,13 +186,12 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
         stat_log = {}
         if log_vecs and (epoch % log_vecs_every == 0 or epoch == epochs or epoch == 1):
-            _, stat_log = save_embedding_vecs(model, loader, device, epoch, emb_dir)
-
-        vicreg_log = {k: 0.0 for k in vicreg_keys}
+            records = {k: np.concatenate(v, axis=0) for k, v in epoch_records.items()}
+            save_embedding_vecs(records, epoch, emb_dir)
         logger.log_epoch(
             loss=float(np.mean(epoch_losses)),
             lr=optimizer.param_groups[0]["lr"],
-            **vicreg_log, **stat_log, **grad_mon.get_metrics(),
+            **stat_log, **grad_mon.get_metrics(),
         )
         grad_mon.reset()
 

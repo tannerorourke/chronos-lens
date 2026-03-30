@@ -1,10 +1,3 @@
-"""
-Shared encoder, used by all JEPA variants and supervised transformer.
-
-Token embedding, transformer encoder, and EncounterEncoder that wraps
-them into a single module suitable for deepcopy.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -61,7 +54,7 @@ class MultiHeadSelfAttention(nn.Module):
 
         attn = F.softmax(attn, dim=-1)
         
-        # -- guard fully-padded rows
+        # -- guard fully-padded rows --
         attn = torch.nan_to_num(attn, nan=0.0)
 
         out = torch.matmul(attn, V) # (B, H, T, Dh)
@@ -121,11 +114,12 @@ class TransformerEncoder(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,    # (B, T, D)
+        x: torch.Tensor, # (B, T, D)
         key_padding_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:      # (B, D)
+        pool: bool = False,
+    ) -> torch.Tensor:   # (B, D) if pool=True, (B, T, D) if pool=False
         # -- Flatten batch to sequence vector (1, T)
-        B, T, _ = x.shape
+        _, T, _ = x.shape
         max_pos = self.pos_embedding.num_embeddings - 1
         positions = torch.arange(T, device=x.device).clamp(max=max_pos).unsqueeze(0)
         x = x + self.pos_embedding(positions)
@@ -135,7 +129,10 @@ class TransformerEncoder(nn.Module):
 
         x = self.norm(x)
 
-        # -- Mean-pool over valid positions
+        if not pool:
+            return x  # (B, T, D)
+
+        # -- Mean-pool over valid positions (if MLP predictor)
         if key_padding_mask is not None:
             valid = (~key_padding_mask).float().unsqueeze(-1)
             z = (x * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1.0)
@@ -169,19 +166,21 @@ class EncounterEncoder(nn.Module):
         tokens: torch.Tensor,   # (..., T_tok)
         tok_mask: torch.Tensor,
         pad_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:          # (B, D)
+        pool: bool = True,
+    ) -> torch.Tensor:          # (B, D) if pool=True, (B, C, D) if pool=False
         """
         Parameters
         ----------
-        tokens   : (..., T_tok) LongTensor — (B, C, T_tok) multi-encounter or (B, T_tok) single
+        tokens   : (..., T_tok) LongTensor - (B, C, T_tok) multi-encounter or (B, T_tok) single
         tok_mask : (..., T_tok) BoolTensor  True=real token
         pad_mask : (B, C) BoolTensor True=padding, or None for single encounter
+        pool     : if True (default) return (B, D); if False return (B, C, D) per-encounter
 
         Returns
         -------
-        z : (B, D) sequence-level representation
+        z : (B, D) if pool=True, (B, C, D) if pool=False
         """
         emb = embed_and_pool(self.token_embedding, tokens, tok_mask)
         if emb.dim() == 2:
             emb = emb.unsqueeze(1)   # (B, D) -> (B, 1, D) for single encounter
-        return self.encoder(emb, pad_mask)
+        return self.encoder(emb, pad_mask, pool=pool)

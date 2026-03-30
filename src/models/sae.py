@@ -1,19 +1,19 @@
 """
-Sparse Autoencoder for displacement field analysis.
+Sparse Autoencoder for JEPA vector analysis.
 
-Learns a sparse dictionary of basis directions that reconstruct Δ.
-Each direction is a "feature" discovered from the geometry itself -
-not from a human-chosen label set.  Sparsity enforced via TopK
-activation (keep top-k, zero the rest; no L1 penalty needed).
+Learns a sparse dictionary of basis directions that reconstruct the chosen 
+vector (z_pred, z_target, or z_enc). Each direction is a "feature" discovered 
+from the geometry itself - not from a human-chosen label set.  Sparsity 
+enforced via TopK activation (keep top-k, zero the rest; no L1 penalty needed).
 
 Architecture
 ------------
-  Encoder : Linear(embed_dim -> n_features) → top k activation
-  Decoder : Linear(n_features -> embed_dim)  - decoder rows ARE the dictionary
+Encoder : Linear(embed_dim -> n_features) -> top k activation
+Decoder : Linear(n_features -> embed_dim)  - decoder rows ARE the dictionary
 
 Loss
 ----
-  ||Delta - Delta_reconstructed||²   (reconstruction MSE)
+||Delta - Delta_reconstructed||^2 (reconstruction MSE)
 """
 
 import torch
@@ -30,7 +30,12 @@ class SparseAutoencoder(nn.Module):
     top_k      : number of active features per sample
     """
 
-    def __init__(self, embed_dim: int, n_features: int, top_k: int):
+    def __init__(
+        self, 
+        embed_dim: int, 
+        n_features: int, 
+        top_k: int
+    ):
         super().__init__()
         self.embed_dim = embed_dim
         self.n_features = n_features

@@ -55,9 +55,10 @@ def vicreg_regularization(
 
 
 def jepa_stopgrad_loss(
+    z_enc: torch.Tensor,
     z_pred: torch.Tensor,
     z_target: torch.Tensor,
-    z_context: torch.Tensor,
+    ctx_pad_mask: torch.Tensor,
     sim_weight: float,
     var_weight: float,
     cov_weight: float,
@@ -66,32 +67,36 @@ def jepa_stopgrad_loss(
 
     Parameters
     ----------
+    z_enc     : (B, D) per encounter representation (has grad)
     z_pred    : (B, D) predictor output (has grad)
     z_target  : (B, D) stop-grad target encoding (detached)
-    z_context : (B, D) context representation (has grad)
+    ctx_pad_mask : (B, C) True=padding
     sim_weight : multiplier for MSE prediction term
     var_weight : multiplier for variance terms
     cov_weight : multiplier for covariance terms
 
     Returns
     -------
-    dict with: loss, sim, var_pred, var_ctx, cov_pred, cov_ctx
+    dict with: loss, sim, var_pred, var_enc, cov_pred, cov_enc
     """
-    # --- Similarity (prediction) loss ------------------------------------
+    # --- Similarity (prediction) loss ---
     sim_loss = F.mse_loss(z_pred, z_target)
 
-    # --- VICReg regularization on z_pred and z_context -------------------
-    # NOT applied to z_target because it carries no gradient.
+    # --- VICReg regularization on z_pred ---
     var_pred, cov_pred, _ = vicreg_regularization(z_pred,    var_weight, cov_weight)
-    var_ctx,  cov_ctx,  _ = vicreg_regularization(z_context, var_weight, cov_weight)
+    
+    # --- VICReg on z_enc (flatten valid encounters) ----------------------
+    valid_mask = ~ctx_pad_mask                          # (B, C) True=real
+    z_enc_flat = z_enc[valid_mask]                      # (N_valid, D)
+    var_enc, cov_enc, _ = vicreg_regularization(z_enc_flat, var_weight, cov_weight)
 
-    total = sim_weight * sim_loss + var_pred + cov_pred + var_ctx + cov_ctx
+    total = sim_weight * sim_loss + var_pred + cov_pred + var_enc + cov_enc
 
     return {
         "loss":     total,
         "sim":      sim_loss.detach(),
         "var_pred": var_pred.detach(),
-        "var_ctx":  var_ctx.detach(),
+        "var_enc":  var_enc.detach(),
         "cov_pred": cov_pred.detach(),
-        "cov_ctx":  cov_ctx.detach(),
+        "cov_enc":  cov_enc.detach(),
     }

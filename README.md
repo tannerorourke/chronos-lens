@@ -1,54 +1,109 @@
 # chronos-lens
-Analysis of displacement and geometric latent space analysis of Joint Embedding Predictive Architectures (JEPA) for temporal mental health prediction to aid feature trajectory interpretability
 
-Displacement Representations In Feature Trajectories
+Interpretability analysis of Joint Embedding Predictive Architectures (JEPA) applied to longitudinal clinical encounter sequences from MIMIC-IV.
 
-Repository for preprint "Interpreting the Geometric Latent Space Analysis of JEPA for time-series feature extraction (UT Austin, 2026).
+Repository for "Interpreting JEPA Representations for Clinical Encounter Sequences" (O'Rourke, 2026).
 
-### Motivation
-Clinical ML models operating on temporal patient data demand interpretability, yet the representations they learn remain opaque. Standard mechanistic interpretability techniques, done on autoregressive transformers, assume prediction in token space - JEPAs break this by predicting in a learned latent space with no discrete vocabulary. Furthermore, these techniques assume a lossy translation layer to human words - that is: residual stream $\rightarrow$ logits $\rightarrow$ vocabulary $\rightarrow$ human vocabulary.
+## Motivation
 
-This project aims to utilize JEPA's prediction of it's latent embedding space as a medium of mechanistic interpretability (MI) analysis directly, rather than force human labels and discretize them out of the model. Instead of realigning labels to basis directions in an SAE, the core contribution of this work is to identify geometric clusters, basis directions, and bands, and then iterate the **entire** clinical concept space to extract features. In doing this, the hypothesis is the model may show a learned geometry that doesn't exist directly in our vocabulary.
+Standard mechanistic interpretability techniques, operating on autoregressive transformers, assume feature representations in token space. Furthermore, clinical ML models operating on temporal patient data demand interpretability, yet the representations they learn remain opaque. These techniques assume a lossy translation layer - that is: features depend on reconstructions of residual streams, losing valuable signal towards features in the process.
 
-The JEPA encodes patient encounter sequences (ICD codes, active medications) and predicts the embedding of a masked future encounter. A context encoder processes the sequence an EMA-updated target encoder providing training signal. The predictor maps context representations to target representations in latent space. Because $z_{pred}$, $z_{context}$, and $z_{target}$ live in the same embedding space by construction, three displacement vectors decompose the prediction geometry:
-- **$\Delta$ (P$-$C)**: the predicted displacement — what the model expects to change
-- **pred_error (P$-$T)**: the prediction error — what the model gets wrong
-- **observed_traj (T$-$C)**: the observed trajectory — what actually changed
+This project treats the JEPA's latent representations as first-class analytical objects, performing geometric analysis of the raw encoder, target, and predictor vectors, and cross-referencing with labels and clinical metadata. Specifically, the JEPA encodes patient encounter sequences (ICD codes, active medications) and predicts the embedding of a masked encounter given the remaining context. Three architectures are trained:
+- **EMA** variant: exponential moving average target encoder, smooth L1 loss (Assran, 2023)
+- **Stop-Gradient** variant: Shared encoder, blocked gradients on the target path, VICReg regularization
+- **Supervised transformer** baseline
 
-These are geometrically interpretable in ways that softmax'ed models are not. In doing this, we can question:
-- what of clinical importance in JEPA's latent space's geometric structure can be explained by clinical metadata via LASSO regression?
-- How does the predictor learn the *structure* of the embedding space?
-- Can we map latent space embedding predictions to untampered human labels?
-- where in the encoder do meaningful representations emerge?
-- do principal component axes correspond to stable patients traits vs. dynamic patient state changes?
-- how much of each axis of real patient change does the predictor capture vs. miss?
+The forward pass returns three objects:
+- **`z_enc`** `(B, C, D)`: per-encounter encoder representations - what the encoder learns about each clinical encounter
+- **`z_pred`** `(B, D)`: the predictor's output for the masked encounter - what the model expects to see
+- **`z_target`** `(B, D)`: the target encoder's representation of the masked encounter - what's actually there
 
-Simply, *can the latent space of a [JEPA] model explain its predictions?*
+**pred_error (pred $-$ target)** - what the model gets wrong - is also computed for analysis.
 
-### Analysis Pipeline
-1. **Displacement field construction**: Compute $\Delta_i$ = $z_{pred} - z_{context}$ per patient, decompose into magnitude (uncertainty/volatility) and direction.
-2. **PCA & UMAP decomposition**: Eigenvalue spectrum for intrinsic dimensionality, Tracy-Widom test to separate structure from noise, UMAP comparison to validate linearity.
-3. **Divergence analysis**: Identify patient pairs with similar histories but divergent predictions; test whether divergence vectors cluster along principal axes.
-4. **Stability analysis**: For each top-*k* PC axis of the divergence $\|\Delta\|_2 = \|\z_{pred} - z_{context}\|_2$, compute the ICC (Intraclass correlation coefficients) of per-patient PC projections across encounter windows to classify axes such as trait-like (high ICC) vs. state-like (low ICC).
-5. **Labeling bridge**: Connect the model’s geometric structure back to clinical concepts by running three progressively less constrained identification methods analyses on the PC axes:
-   - **LASSO regression** of clinical metadata against PC scores for various sets of relevant clinical concepts. Residual variance quantifies structure the model learned beyond the clinical concept space.
-   - **UMAP + HBDSCAN cluster enrichment**:
-   - **Comparitive test to Sparse AutoEncoder on $\Delta$**: Train a TopK sparse autoencoder on the displacement vectors to learn a dictionary of sparse basis directions that reconstruct $\Delta$. Each learned direction is a "feature" discovered from the geometry itself - not from a human-chosen label set.
+Interpretability is probe-based and SAE-focused: linear probes on `z_enc` and `z_pred` test what clinical information is preserved and predicted, while sparse autoencoders on encoder representations and prediction errors decompose the geometry into sparse features.
 
-Supporting MI techniques (linear probing, activation patching, CKA, and SAE encoding) provide additional context but are secondary to the aim of the project.
+Core questions:
+- What clinical information does the encoder preserve per encounter? (probe `z_enc`)
+- What does the predictor expect the masked encounter to contain? (probe `z_pred`)
+- Where do predictions diverge from reality, and do those errors have clinical structure? (SAE on `P−T`)
+- Do sparse autoencoder features on encoder representations correspond to clinically meaningful phenotypes? (SAE on `z_enc`)
+- Can we map latent space embedding predictions to untampered features?
 
-### Reproduce
+
+## Architecture
+
 ```
+Patient encounters: [enc_0, enc_1, ..., enc_N]
+        │
+        │  mask encounter at position k
+        ▼
+┌─────────────────┐
+│ Context Encoder  │  enc_{≠k} → token embed → mean-pool per encounter → transformer
+│ (EncounterEncoder)│  returns z_enc (B, C, D) per-encounter representations
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│    Predictor     │  transformer over z_enc + learnable mask token at position k
+│ (Transformer)    │  returns z_pred (B, D) — predicted representation of enc_k
+└─────────────────┘
+
+┌─────────────────┐
+│ Target Encoder   │  enc_k only → same architecture as context encoder
+│ (stop-grad or   │  returns z_target (B, D) — ground truth representation
+│  EMA copy)       │
+└─────────────────┘
+
+Loss: MSE(z_pred, z_target) + VICReg on z_enc, z_pred  (stop-grad)
+      smooth_L1(z_pred, z_target)                       (EMA)
+```
+
+## Usage
+
+### Setup
+```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu126
 pip install -e .
 ```
 
-This project uses MIMIC-IV via BigQuery. Reproducing requires:
-1. Physionet credentials, from https://physionet.org/content/mimiciv/
-2. Link your PhysioNet account to a GCP project: https://physionet.org/settings/cloud/
+Requires Python $\geq$ 3.12.
+
+### Data extraction
+
+Requires MIMIC-IV access via BigQuery:
+1. PhysioNet credentials: https://physionet.org/content/mimiciv/
+2. Link PhysioNet account to a GCP project: https://physionet.org/settings/cloud/
 3. Authenticate locally:
 ```bash
-   gcloud auth application-default login
-   gcloud config set project 
+gcloud auth application-default login
+gcloud config set project <your-project-id>
 ```
-1. Update `BQ_PROJECT_ID` in the config
+4. Update `BQ_PROJECT_ID` in `scripts/extract_mimic.py`
+5. Run extraction:
+```bash
+python -m scripts.extract_mimic
+```
+
+### Training
+```bash
+# Stop-gradient JEPA
+python -m scripts.train_jepa --model stopg_42_v01
+
+# EMA JEPA
+python -m scripts.train_jepa --model ema_42_v01
+
+# Supervised baseline
+python -m scripts.train_jepa --model supervised_v01
+```
+
+Runs are configured via `experiments/<model>/config.yaml`. If a run directory already has checkpoints/logs, a new versioned directory is created automatically (e.g., `stopg_42_v01` → `stopg_42_v01_v01-1`).
+
+### Evaluation
+```bash
+python -m scripts.evaluate --checkpoint experiments/stopg_42_v01/checkpoints/checkpoint_100.pt
+```
+
+### SAE training
+```bash
+python -m scripts.train_sae --model stopg_42_v01
+```

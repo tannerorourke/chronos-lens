@@ -134,8 +134,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             def forward_unto_dawn():
                 z_enc, z_pred, z_target = model(batch_dev)
                 for k, v in zip(
-                    ["z_encs", "z_pred", "z_target", "subject_ids", "mask_pos", "labels"], 
-                    [z_enc, z_pred, z_target, batch_dev["subject_ids"], batch_dev["mask_pos"], batch_dev["labels"]]
+                    ["z_encs", "z_pred", "z_target", "subject_ids", "mask_pos"], 
+                    [z_enc, z_pred, z_target, batch_dev["subject_ids"], batch_dev["mask_pos"]]
                 ):
                     epoch_records[k].append(v.detach().cpu().numpy())
                 
@@ -186,7 +186,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
         stat_log = {}
         if log_vecs and (epoch % log_vecs_every == 0 or epoch == epochs or epoch == 1):
-            records = {k: np.concatenate(v, axis=0) for k, v in epoch_records.items()}
+            records = {k: v for k, v in epoch_records.items()}
             save_embedding_vecs(records, epoch, emb_dir)
         logger.log_epoch(
             loss=float(np.mean(epoch_losses)),

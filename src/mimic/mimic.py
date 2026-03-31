@@ -34,7 +34,6 @@ BigQuery auth:
   gcloud config set project aihc-463505
 """
 
-from datetime import timedelta
 import numpy as np
 import pandas as pd
 import google.auth
@@ -158,15 +157,38 @@ def build_admission_icd_codes(diagnoses: pd.DataFrame, label_prefix: str) -> pd.
     # --- Label flag: F30-F39 (mood disorder) ---
     dx["has_label_dx"] = (dx["icd_version"] == 10) & dx["icd_clean"].str.startswith(label_prefix)
 
-    # deduplicate display codes per admission before grouping
-    dx = dx.drop_duplicates(subset=["hadm_id", "icd_display"])
+    # --- Full F-code display (dot-notation, not truncation) for label computation ---
+    dx["icd_display_full"] = dx["icd_display"]  # default: same as truncated (non-F codes)
+    is_fcode_long = is_fcode & (dx["icd_clean"].str.len() > 3)
+    dx.loc[is_fcode_long, "icd_display_full"] = (
+        dx.loc[is_fcode_long, "icd_clean"].str[:3]
+        + "."
+        + dx.loc[is_fcode_long, "icd_clean"].str[3:]
+    )
+    # Short F-codes (exactly 3 chars): use icd_clean directly (no dot)
+    is_fcode_short = is_fcode & (dx["icd_clean"].str.len() <= 3)
+    dx.loc[is_fcode_short, "icd_display_full"] = dx.loc[is_fcode_short, "icd_clean"]
 
+    # --- Build icd_codes (truncated F-codes) via deduplication on icd_display ---
+    dx_trunc = dx.drop_duplicates(subset=["hadm_id", "icd_display"])
     adm_dx = (
-        dx.groupby("hadm_id")
+        dx_trunc.groupby("hadm_id")
         .agg(
             icd_codes=("icd_display", list),
             has_label_dx=("has_label_dx", "any"),
         ).reset_index()
+    )
+
+    # --- Build icd_codes_full (full F-codes, for escalation label computation) ---
+    dx_f_full = dx[is_fcode].drop_duplicates(subset=["hadm_id", "icd_display_full"])
+    adm_f_full = (
+        dx_f_full.groupby("hadm_id")["icd_display_full"]
+        .apply(list).reset_index()
+        .rename(columns={"icd_display_full": "icd_codes_full"})
+    )
+    adm_dx = adm_dx.merge(adm_f_full, on="hadm_id", how="left")
+    adm_dx["icd_codes_full"] = adm_dx["icd_codes_full"].apply(
+        lambda x: x if isinstance(x, list) else []
     )
 
     print(f"  Admissions with diagnoses: {len(adm_dx):,}")
@@ -217,18 +239,18 @@ def get_clean_encounters(
     prescriptions: pd.DataFrame,
     label_prefix: str
 ):
-    print("Extracting sequences...\n")
+    print("\nExtracting sequences..")
     
-    print("[1/5] Cleaning admissions")
+    print("Cleaning admissions..")
     adm_clean = clean_admissions(admissions)
 
-    print("[2/5] Building per-admission ICD codes")
+    print("Building per-admission ICD codes..")
     adm_dx = build_admission_icd_codes(diagnoses, label_prefix)
 
-    print("[3/5] Building per-admission active medications")
+    print("Building per-admission active medications..")
     adm_meds = build_admission_active_meds(prescriptions, adm_clean)
 
-    print("[4/5] Building encounters")
+    print("Merging into encounters table..")
     return (
         adm_clean
         .merge(adm_dx, on="hadm_id", how="left")
@@ -236,36 +258,12 @@ def get_clean_encounters(
     )
 
 
-def _compute_readmission_label(rows: list[dict], readmission_days: int) -> int:
-    """Check if any readmission within `readmission_days` has a mood-disorder dx.
-
-    Parameters
-    ----------
-    rows : sorted (by admittime) list of encounter dicts with 'dischtime',
-           'admittime', and 'has_label_dx' keys.
-    readmission_days : window in days after discharge.
-
-    Returns
-    -------
-    1 if a positive readmission exists within the window, 0 otherwise.
-    """
-    n = len(rows)
-    for i in range(n - 1):
-        window_end = rows[i]["dischtime"] + timedelta(days=readmission_days)
-        for j in range(i + 1, n):
-            if rows[j]["admittime"] > window_end:
-                break
-            if rows[j]["has_label_dx"]:
-                return 1
-    return 0
-
-
 def build_patient_sequences(
     encounters: pd.DataFrame,
     min_encounters: int,
-    readm_window_days: int
 ) -> list[dict]:
-    print("      applying cohort filters")
+    print("Building final sequences\nApplying cohort filters...")
+    print("   Applying cohort filters...")
 
     # Fill missing lists (admissions with no diagnoses or no active meds)
     encounters["icd_codes"] = encounters["icd_codes"].apply(
@@ -273,53 +271,47 @@ def build_patient_sequences(
     encounters["meds"] = encounters["meds"].apply(
         lambda x: x if isinstance(x, list) else [])
     encounters["has_label_dx"] = encounters["has_label_dx"].fillna(False)
+    if "icd_codes_full" in encounters.columns:
+        encounters["icd_codes_full"] = encounters["icd_codes_full"].apply(
+            lambda x: x if isinstance(x, list) else [])
+    else:
+        encounters["icd_codes_full"] = [[] for _ in range(len(encounters))]
 
     # Sort by patient and time
     encounters = encounters.sort_values(["subject_id", "admittime"]).reset_index(drop=True)
     print(f"      Total encounters: {len(encounters):,}")
 
-    # filter > minimum encounters per patient
+    # Filter to minimum encounters per patient
     enc_per_patient = encounters.groupby("subject_id").size()
     qualifying = set(enc_per_patient[enc_per_patient >= min_encounters].index)
-    print(f"  Patients with >= {min_encounters} encounters: {len(qualifying):,}")
+    print(f"      Patients with >= {min_encounters} encounters: {len(qualifying):,}")
     encounters = encounters[encounters["subject_id"].isin(qualifying)]
-
     print(f"      Final: {len(encounters):,} encounters, {encounters['subject_id'].nunique():,} patients")
-    print(f"\n[5/5] Computing labels ({readm_window_days}-day and 30-day)...")
 
-    # --- Compute labels and assemble sequences ---
+    # --- Assemble sequences ---
     sequences = []
     for subject_id, group in encounters.groupby("subject_id"):
         rows = group.sort_values("admittime").to_dict("records")
 
         enc_list = [{
-            "hadm_id": int(row["hadm_id"]),
-            "admittime": row["admittime"],
-            "dischtime": row["dischtime"],
-            "icd_codes": row["icd_codes"],
-            "meds": row["meds"],
+            "hadm_id":       int(row["hadm_id"]),
+            "admittime":     row["admittime"],
+            "dischtime":     row["dischtime"],
+            "icd_codes":     row["icd_codes"],
+            "icd_codes_full": row["icd_codes_full"],
+            "meds":          row["meds"],
         } for row in rows]
 
         sequences.append({
             "subject_id": str(subject_id),
             "encounters": enc_list,
-            "label":      _compute_readmission_label(rows, readm_window_days),
-            "label_30d":  _compute_readmission_label(rows, 30),
         })
 
-    # --- Summary ---
-    n_pos = sum(1 for s in sequences if s["label"] == 1)
-    n_neg = len(sequences) - n_pos
-    n_pos_30 = sum(1 for s in sequences if s["label_30d"] == 1)
     enc_counts = [len(s["encounters"]) for s in sequences]
-
     print(f"\n{'=' * 60}")
-    print(f"Sequences Summary")
-    print(f"  Patients: {len(sequences):,}")
-    print(f"  Label=1 ({readm_window_days}d mood): {n_pos:,} ({100 * n_pos / len(sequences):.1f}%)")
-    print(f"  Label=1 (30d mood):    {n_pos_30:,} ({100 * n_pos_30 / len(sequences):.1f}%)")
-    print(f"  Label=0 ({readm_window_days}d):      {n_neg:,} ({100 * n_neg / len(sequences):.1f}%)")
-    print(f"  Encounters/pt:         mean={np.mean(enc_counts):.1f}, "
+    print(f"Sequences built:")
+    print(f"  Patients:      {len(sequences):,}")
+    print(f"  Encounters/pt: mean={np.mean(enc_counts):.1f}, "
           f"median={np.median(enc_counts):.0f}, "
           f"min={min(enc_counts)}, max={max(enc_counts)}")
     print(f"{'=' * 60}")

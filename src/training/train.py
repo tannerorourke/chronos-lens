@@ -131,8 +131,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             def forward_unto_dawn():
                 z_enc, z_pred, z_target = model(batch_dev)
                 for k, v in zip(
-                    ["z_encs", "z_pred", "z_target", "subject_ids", "mask_pos", "labels"], 
-                    [z_enc, z_pred, z_target, batch_dev["subject_ids"], batch_dev["mask_pos"], batch_dev["labels"]]
+                    ["z_encs", "z_pred", "z_target", "subject_ids", "mask_pos"], 
+                    [z_enc, z_pred, z_target, batch_dev["subject_ids"], batch_dev["mask_pos"]]
                 ):
                     epoch_records[k].append(v.detach().cpu().numpy())
                     
@@ -183,14 +183,14 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
         stat_log = {}
         if log_vecs and (epoch % log_vecs_every == 0 or epoch == epochs or epoch == 1):
-            save_embedding_vecs(epoch_records, epoch, emb_dir)
+            records = {k: v for k, v in epoch_records.items()}
+            save_embedding_vecs(records, epoch, emb_dir)
 
         vicreg_log = {k: vicreg_accum[k] / max(n_batches, 1) for k in vicreg_keys}
         logger.log_epoch(
             loss=float(np.mean(epoch_losses)),
             lr=optimizer.param_groups[0]["lr"],
-            **vicreg_log, **stat_log, **grad_mon.get_metrics(),
-        )
+            **vicreg_log, **stat_log, **grad_mon.get_metrics())
         grad_mon.reset()
 
     # ------------------------------------------------------------------

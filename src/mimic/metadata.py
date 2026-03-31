@@ -14,214 +14,22 @@ cluster enrichment, and SAE analysis without recomputation.
 """
 
 import argparse
-import json
-from pathlib import Path
 from collections import Counter
 from datetime import datetime
 
 import numpy as np
 
-from src.utils.io import PROCESSED_DIR, save_metadata
-
-
-# =============================================================================
-# Drug class definitions  (add new classes or members as needed)
-# =============================================================================
-
-DRUG_CLASSES = {
-    # =========================================================================
-    # OVERDOSE REVERSAL - singular administration (atomic event)
-    "reversal": [
-        "naloxone",
-        "flumazenil",
-    ],
-    "ssri": [
-        "sertraline",         # Zoloft
-        "escitalopram",       # Lexapro
-        "citalopram",         # Celexa
-        "fluoxetine",         # Prozac
-        "paroxetine",         # Paxil
-        "fluvoxamine",        # Luvox, used for OCD
-    ],
-    # =========================================================================
-    # ANTIDEPRESSANTS : SNRIs
-    "snri": [
-        "duloxetine",         # Cymbalta
-        "venlafaxine",        # Effexor
-        "desvenlafaxine",     # Pristiq, active metabolite of venlafaxine
-        "milnacipran",        # Savella, fibromyalgia
-        "levomilnacipran",    # Fetzima
-    ],
-    # =========================================================================
-    # ANTIDEPRESSANTS : Other mechanisms
-    "antidepressant_other": [
-        "bupropion",          # Wellbutrin
-        "mirtazapine",        # Remeron
-        "trazodone",          # Desyrel
-        "nefazodone",         # Serzone
-        "vilazodone",         # Viibryd
-        "vortioxetine",       # Trintellix
-    ],
-    # =========================================================================
-    # ANTIDEPRESSANTS : Tricyclics (TCAs), Common for pain, depression, neuropathy
-    "tca": [
-        "amitriptyline",      # Elavil
-        "nortriptyline",      # Pamelor
-        "desipramine",        # Norpramin
-        "imipramine",         # Tofranil
-        "doxepin",            # Sinequan - also used for sleep/itching
-        "clomipramine",       # Anafranil - OCD
-    ],
-    # =========================================================================
-    # ANTIDEPRESSANTS : MAOIs (rare but present)
-    "maoi": [
-        "phenelzine",         # Nardil
-        "tranylcypromine",    # Parnate
-        "selegiline",         # Emsam / Eldepryl, also used for Parkinsons
-    ],
-    # =========================================================================
-    # ANXIOLYTICS : Non-Benzodiazepine
-    "anxiolytic": [
-        "buspirone",          # Buspar
-        "hydroxyzine",        # Vistaril/Atarax, very common for anxiety/itch
-        "pregabalin",         # Lyrica, anxiety, nerve pain, fibromyalgia
-        "gabapentin",         # Neurontin, off-label anxiety
-    ],
-    # =========================================================================
-    # BENZODIAZEPINES
-    "benzodiazepine": [
-        "diazepam",           # Valium
-        "clonazepam",         # Klonopin
-        "lorazepam",          # Ativan
-        "midazolam",          # Versed, ICU sedation
-        "alprazolam",         # Xanax
-        "chlordiazepoxide",   # Librium, alcohol withdrawal
-        "oxazepam",           # Serax
-        "temazepam",          # Restoril, sleep
-        "triazolam",          # Halcion
-        "clorazepate",        # Tranxene
-    ],
-    # =========================================================================
-    # ANTIPSYCHOTICS : 1st Generation (Typical)
-    "antipsychotic_typical": [
-        "haloperidol",        # Haldol - extremely common in MIMIC (agitation, delirium)
-        "chlorpromazine",     # Thorazine
-        "fluphenazine",       # Prolixin
-        "perphenazine",       # Trilafon
-        "thiothixene",        # Navane
-        "loxapine",           # Loxitane
-        "pimozide",           # Orap - rare
-        "prochlorperazine",   # Compazine - often used as antiemetic
-    ],
-    # =========================================================================
-    # ANTIPSYCHOTICS : 2nd Generation (Atypical)
-    "antipsychotic_atypical": [
-        "quetiapine",         # Seroquel, most common (psychosis, sleep, bipolar)
-        "olanzapine",         # Zyprexa
-        "risperidone",        # Risperdal
-        "aripiprazole",       # Abilify
-        "ziprasidone",        # Geodon
-        "clozapine",          # Clozaril, treatment-resistant schizophrenia
-        "paliperidone",       # Invega
-        "lurasidone",         # Latuda
-        "brexpiprazole",      # Rexulti
-        "cariprazine",        # Vraylar
-        "asenapine",          # Saphris
-    ],
-    # =========================================================================
-    # MOOD STABILIZERS / ANTICONVULSANTS
-    "mood_stabilizer": [
-        "lithium",            # Lithobid, Eskalith, very common
-        "valproic acid",      # Depakote/Depakene, very common
-        "valproate",          # alternate naming in prescriptions
-        "divalproex",         # Depakote
-        "carbamazepine",      # Tegretol
-        "oxcarbazepine",      # Trileptal
-        "lamotrigine",        # Lamictal
-        "topiramate",         # Topamax, off-label mood, migraine
-    ],
-    # =========================================================================
-    # ADHD
-    "adhd": [
-        "methylphenidate",    # Ritalin, Concerta
-        "dexmethylphenidate", # Focalin
-        "amphetamine",        # Adderall (mixed amphetamine salts)
-        "dextroamphetamine",  # Dexedrine
-        "lisdexamfetamine",   # Vyvanse
-        "atomoxetine",        # Strattera, non-stimulant
-        "guanfacine",         # Intuniv, non-stimulant
-        "clonidine",          # Kapvay, also used for ADHD, very common
-    ],
-    # =========================================================================
-    "cognitive": [
-        "donepezil",          # Aricept
-        "memantine",          # Namenda
-        "rivastigmine",       # Exelon
-        "galantamine",        # Razadyne
-    ],
-    # =========================================================================
-    # MEDICATION ASSISTED TREATMENT (Alcohol, Opioid Dependence)
-    "mat": [
-        "buprenorphine",      # Suboxone (w/ naloxone), Subutex
-        "methadone",          # Methadone
-        "naltrexone",         # Vivitrol, ReVia
-    ],
-    # =========================================================================
-    "smoking_cessation": [
-        "nicotine",
-        "varenicline",        # Chantix
-    ],
-    # =========================================================================
-    # (pain / SUD risk tracking)
-    "opioid": [               
-        "hydrocodone",        # Vicodin, Norco
-        "oxycodone",          # OxyContin, Percocet
-        "codeine",            # Tylenol #3
-        "fentanyl",           # Duragesic patch, IV (very common in ICU)
-        "tramadol",           # Ultram
-        "morphine",           # MS Contin, IV, extremely common
-        "hydromorphone",      # Dilaudid, very common
-        "meperidine",         # Demerol
-        "methadone",          # NOTE: also in MAT; context determines category
-        "alfentanil",         # Anesthesia
-        "sufentanil",         # Anesthesia
-        "remifentanil",       # Anesthesia
-        "tapentadol",         # Nucynta
-    ],
-    # =========================================================================
-    "sleep": [
-        "zolpidem",           # Ambien
-        "eszopiclone",        # Lunesta
-        "suvorexant",         # Belsomra
-        "ramelteon",          # Rozerem
-        "melatonin",          # OTC but frequently appears
-        # trazodone also used for sleep - listed under antidepressant_other
-        # quetiapine low-dose for sleep - listed under antipsychotic_atypical
-    ],
-}
-
+from src.utils.io import PROCESSED_DIR, save_metadata, load_sequences
+from src.utils.constants import DRUG_CLASSES
 
 # =============================================================================
-# Private utilities
+# Utility
 # =============================================================================
 
 def _has_drug(meds: list, drug_list: list) -> bool:
     """Return True if any medication name contains a drug substring."""
     joined = " ".join(meds).lower()
     return any(d in joined for d in drug_list)
-
-
-def _load_sequences(path) -> dict:
-    """Load sequences.jsonl -> dict mapping subject_id (str) -> record."""
-    patients = {}
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            p = json.loads(line)
-            patients[str(p["subject_id"])] = p
-    return patients
 
 
 def _parse_admittime(t):
@@ -247,18 +55,17 @@ def is_binary(col: np.ndarray) -> bool:
 # =============================================================================
 
 def extract_metadata(
-    sequences_path,
+    sequences: list[dict],
     subject_ids: np.ndarray | None = None,
     top_n_f_codes: int = 20,
     top_n_meds: int = 25,
 ) -> tuple:
     """
-    Goal: Build a rich metadata matrix from the data, sequences.jsonl.
+    Build a rich metadata matrix from patient sequences.
 
     When subject_ids is provided, only patients present in that array are
-    included (and deduplicated).  
-    When None, ALL patients in the file are included - for use at data
-    creation time to build the full cohort.
+    included (and deduplicated).
+    When None, ALL patients are included.
 
     Tiers
     -----
@@ -269,10 +76,10 @@ def extract_metadata(
 
     Parameters
     ----------
-    sequences_path : path to sequences.jsonl
-    subject_ids    : (N,) array of subject IDs (may repeat), or None for all
-    top_n_f_codes  : number of most frequent F-codes for Tier 2
-    top_n_meds     : number of most frequent medications for Tier 3
+    sequences     : list[dict] of patient dicts (each with "subject_id" and "encounters")
+    subject_ids   : (N,) array of subject IDs (may repeat), or None for all
+    top_n_f_codes : number of most frequent F-codes for Tier 2
+    top_n_meds    : number of most frequent medications for Tier 3
 
     Returns
     -------
@@ -280,7 +87,9 @@ def extract_metadata(
     feature_names : list[str]
     patient_ids   : (n_patients,) str array of unique subject IDs (row order)
     """
-    patients = _load_sequences(sequences_path)
+    print("\nExtracting metadata features...")
+
+    patients = {str(s["subject_id"]): s for s in sequences}
 
     # Deduplicate subject_ids, preserve first-seen order, skip missing
     if subject_ids is not None:
@@ -312,8 +121,15 @@ def extract_metadata(
         for med in set(all_meds):
             med_counter[med] += 1
 
+        # Support old "label" key and new "label_{N}" format (e.g. "label_90")
+        _label = p.get("label")
+        if _label is None:
+            for _k in p:
+                if _k.startswith("label_") and _k.replace("label_", "").isdigit():
+                    _label = p[_k]
+                    break
         patient_raw[pid] = dict(
-            encs=encs, label=p.get("label", 0),
+            encs=encs, label=0 if _label is None else int(_label),
             all_icds=all_icds, all_meds=all_meds, f_codes=f_codes,
         )
 
@@ -451,8 +267,8 @@ if __name__ == "__main__":
     print("Metadata Feature Extraction")
     print("=" * 60)
 
-    metadata, feature_names, patient_ids = extract_metadata(
-        args.sequences, subject_ids=None)
+    sequences = load_sequences(path=args.sequences)
+    metadata, feature_names, patient_ids = extract_metadata(sequences, subject_ids=None)
 
     print(f"  Patients:  {len(patient_ids)}")
     print(f"  Features:  {len(feature_names)}")

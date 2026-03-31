@@ -20,7 +20,7 @@ from sklearn.preprocessing import StandardScaler
 from hdbscan import HDBSCAN
 
 from src.utils.seed import SEED, get_rng
-from src.mimic.features import extract_metadata, is_binary  # noqa: F401
+from src.mimic.metadata import is_binary  # noqa: F401
 rng  = get_rng()
 
 

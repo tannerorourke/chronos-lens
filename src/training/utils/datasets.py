@@ -147,11 +147,10 @@ def collate_fn(batch: list[dict]) -> dict:
     return {
         "ctx_tokens":    ctx_tokens,     # (B, max_ctx, max_tok)
         "ctx_tok_mask":  ctx_tok_mask,   # (B, max_ctx, max_tok)
-        "ctx_pad_mask":  ctx_pad_mask,   # (B, max_ctx)  True=padding slot
+        "ctx_pad_mask":  ctx_pad_mask,   # (B, max_ctx) True=padding slot
         "tgt_tokens":    tgt_tokens,     # (B, max_tok)
         "tgt_tok_mask":  tgt_tok_mask,   # (B, max_tok)
         "mask_pos":      mask_pos,       # (B,)
-        "labels":        labels,         # (B,)
         "subject_ids":   subject_ids,
     }
 

@@ -219,37 +219,34 @@ def _serializable(obj):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run logistic regression and XGBoost baselines")
+        description="Run baseline models (logistic regression and XGBoost)")
     parser.add_argument(
-        "--sequences", type=str,
-        default=str(PROCESSED_DIR / "sequences.jsonl"),
-        help="Path to sequences.jsonl (fallback featurization)")
-    parser.add_argument(
-        "--metadata-dir", type=str,
+        "--data-dir", type=str,
         default=str(PROCESSED_DIR),
-        help="Directory with precomputed metadata files")
+        help="Directory containing sequences.jsonl and precomputed metadata files")
     parser.add_argument(
         "--label-key", type=str, default="label",
         help="Label column name in metadata feature matrix")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--output", type=str, default=None,
-        help="Path to save results JSON (default: metadata-dir/baseline_results.json)")
+        help="Path to save results JSON (default: data-dir/baseline_results.json)")
     args = parser.parse_args()
+
+    data_dir = Path(args.data_dir)
 
     print("=" * 60)
     print("Baseline Evaluation")
     print("=" * 60)
 
     # Try loading precomputed metadata
-    meta_dir = Path(args.metadata_dir)
     try:
-        metadata, feature_names, patient_ids = load_metadata(meta_dir)
+        metadata, feature_names, patient_ids = load_metadata(data_dir)
         print(f"  Loaded precomputed metadata: {metadata.shape[0]} patients x {metadata.shape[1]} features")
     except FileNotFoundError:
         print("  Precomputed metadata not found, falling back to flatten_sequences()")
         from src.utils.io import load_sequences
-        sequences = load_sequences()
+        sequences = load_sequences(path=data_dir / "sequences.jsonl")
         metadata, labels_arr, feature_names = flatten_sequences(sequences, args.label_key)
         patient_ids = np.array([s["subject_id"] for s in sequences], dtype=str)
 
@@ -260,7 +257,7 @@ if __name__ == "__main__":
     else:
         # Fallback: load from sequences
         from src.utils.io import load_sequences_dict
-        seq_dict = load_sequences_dict(Path(args.sequences))
+        seq_dict = load_sequences_dict(data_dir / "sequences.jsonl")
         labels = np.array([
             int(seq_dict[pid].get(args.label_key, 0))
             for pid in patient_ids
@@ -270,7 +267,7 @@ if __name__ == "__main__":
     xgb_results = run_xgboost(metadata, labels, feature_names, seed=args.seed)
 
     # Save combined results
-    output_path = Path(args.output) if args.output else meta_dir / "baseline_results.json"
+    output_path = Path(args.output) if args.output else data_dir / "baseline_results.json"
     combined = {
         "logistic_regression": _serializable(lr_results),
         "xgboost": _serializable(xgb_results),

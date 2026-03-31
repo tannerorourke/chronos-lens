@@ -10,7 +10,6 @@ from src.utils.io import PARQUET_DIR
 def save_dataset(
     sequences: list[dict],
     out_dir: Path,
-    readm_window_days: int,
 ):
     """
     Save sequences and stats:
@@ -20,19 +19,17 @@ def save_dataset(
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    label_key = f"label_{readm_window_days}"
-
     # --- JSONL ---
     jsonl_path = out_dir / "sequences.jsonl"
     with open(jsonl_path, "w") as f:
         for seq in sequences:
             f.write(json.dumps({
                 "subject_id": seq["subject_id"],
-                label_key: seq.get(label_key),
                 "label_30d": seq.get("label_30d"),
                 "label_escalation": seq.get("label_escalation"),
                 "label_escalation_per_enc": seq.get("label_escalation_per_enc"),
                 "escalation_criteria_fired": seq.get("escalation_criteria_fired"),
+                "next_enc_icd_blocks": seq.get("next_enc_icd_blocks"),
                 "encounters": [
                     {
                         "hadm_id": enc["hadm_id"],
@@ -47,7 +44,7 @@ def save_dataset(
 
     # --- dataset_stats.json ---
     enc_counts = [len(s["encounters"]) for s in sequences]
-    n_pos = sum(1 for s in sequences if s.get(label_key) == 1)
+    n_pos = sum(1 for s in sequences if s.get("label_30d") == 1)
     all_icd = set()
     all_meds = set()
     for s in sequences:
@@ -57,9 +54,9 @@ def save_dataset(
 
     stats = {
         "n_patients": len(sequences),
-        "n_positive": n_pos,
-        "n_negative": len(sequences) - n_pos,
-        "positive_rate": round(n_pos / len(sequences), 4),
+        "n_positive_30d": n_pos,
+        "n_negative_30d": len(sequences) - n_pos,
+        "positive_rate_30d": round(n_pos / len(sequences), 4),
         "encounters_per_patient": {
             "mean": round(np.mean(enc_counts), 2),
             "median": int(np.median(enc_counts)),
@@ -70,11 +67,11 @@ def save_dataset(
         "vocab_size_meds": len(all_meds),
         "schema": {
             "subject_id": "str",
-            label_key: "int",
             "label_30d": "int",
             "label_escalation": "int",
             "label_escalation_per_enc": "list[int]",
             "escalation_criteria_fired": "list[str]",
+            "next_enc_icd_blocks": "list[list[str]]",
             "encounters[].hadm_id": "int",
             "encounters[].admittime": "ISO datetime string",
             "encounters[].dischtime": "ISO datetime string",

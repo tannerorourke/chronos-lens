@@ -18,11 +18,10 @@ MIMIC_BQ_DATASET = "physionet-data.mimiciv_3_1_hosp"
 
 # =============================================================================
 # Extraction Settings
-READM_WINDOW_DAYS = 90
 LABEL_ICD10_PREFIX = "F"
 MIN_ENCOUNTERS = 3
-COMPUTE_READM_LABELS = True
 COMPUTE_ESCALATION_LABELS = True
+COMPUTE_NEXT_ENC_LABELS = True
 # =============================================================================
 
 
@@ -37,8 +36,6 @@ parser.add_argument("--seq-path",           default=None, type=str,
                     help="Path to existing sequences.jsonl. Skips data extraction.")
 parser.add_argument("--min-encounters",     default=MIN_ENCOUNTERS, type=int,
                     help="Minimum encounters per patient")
-parser.add_argument("--readm-window-days",  default=READM_WINDOW_DAYS, type=int,
-                    help="Readmission window (days) for the primary label")
 parser.add_argument("--skip-labeling",      default=False, action="store_true",
                     help="Skip label computation (use existing labels in sequences.jsonl)")
 parser.add_argument("--dry-run",            default=False, action="store_true",
@@ -66,8 +63,7 @@ def main():
 
     # -- Compute all labels --
     if not args.skip_labeling:
-        sequences = compute_labels(sequences, LABEL_ICD10_PREFIX, COMPUTE_ESCALATION_LABELS,
-                                   COMPUTE_READM_LABELS, args.readm_window_days,)
+        sequences = compute_labels(sequences, LABEL_ICD10_PREFIX)
 
     # -- Always validate --
     validate_sequences(sequences)
@@ -77,7 +73,7 @@ def main():
 
     # -- Save --
     if not args.dry_run:
-        save_dataset(sequences, PROCESSED_DIR, args.readm_window_days)
+        save_dataset(sequences, PROCESSED_DIR)
         save_metadata(metadata, feature_names, patient_ids)
 
     # -- Baselines (optional), can be done thru src/mimic/baselines.py --

@@ -32,31 +32,7 @@ Core questions:
 
 ## Architecture
 
-```
-Patient encounters: [enc_0, enc_1, ..., enc_N]
-        │
-        │  mask encounter at position k
-        ▼
-┌─────────────────┐
-│ Context Encoder  │  enc_{≠k} → token embed → mean-pool per encounter → transformer
-│ (EncounterEncoder)│  returns z_enc (B, C, D) per-encounter representations
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│    Predictor     │  transformer over z_enc + learnable mask token at position k
-│ (Transformer)    │  returns z_pred (B, D) — predicted representation of enc_k
-└─────────────────┘
-
-┌─────────────────┐
-│ Target Encoder   │  enc_k only → same architecture as context encoder
-│ (stop-grad or   │  returns z_target (B, D) — ground truth representation
-│  EMA copy)       │
-└─────────────────┘
-
-Loss: MSE(z_pred, z_target) + VICReg on z_enc, z_pred  (stop-grad)
-      smooth_L1(z_pred, z_target)                       (EMA)
-```
+*add fig*
 
 ## Usage
 
@@ -96,7 +72,7 @@ python -m scripts.train_jepa --model ema_42_v01
 python -m scripts.train_jepa --model supervised_v01
 ```
 
-Runs are configured via `experiments/<model>/config.yaml`. If a run directory already has checkpoints/logs, a new versioned directory is created automatically (e.g., `stopg_42_v01` → `stopg_42_v01_v01-1`).
+Runs are configured via `experiments/<model>/config.yaml`. If a run directory already has checkpoints/logs, a new versioned directory is created automatically (e.g., `stopg_42_v01` -> `stopg_42_v01_v01-1`).
 
 ### Evaluation
 ```bash

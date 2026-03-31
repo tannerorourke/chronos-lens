@@ -7,12 +7,15 @@ while preserving "subject_id" and "encounters".
 
 Labels produced
 ---------------
-label_{readm_window_days}  : int   1 if any readmission within the window carries
+label_30d                  : int   1 if any readmission within 30 days carries
                                    an F-code (mood-disorder) diagnosis
-label_30d                  : int   same for the fixed 30-day window
 label_escalation           : int   1 if any clinical escalation event in the sequence
 label_escalation_per_enc   : list[int]  per-encounter flag (first encounter always 0)
 escalation_criteria_fired  : list[str]  which escalation criteria triggered
+next_enc_icd_blocks        : list[list[str]]  per-encounter ICD-10 chapter letters
+                                   (first char of each ICD-10 code) present in the
+                                   next encounter. Last encounter is always [].
+                                   ICD-9 codes (numeric prefix) are excluded.
 
 Escalation criteria
 -------------------
@@ -33,7 +36,6 @@ Does NOT fire for:
     - Remission codes: F30.3, F30.4, F31.7x, F32.4, F32.5, F33.40-F33.42
 """
 
-import re
 import numpy as np
 from collections import Counter
 from datetime import datetime, timedelta
@@ -194,12 +196,32 @@ def _update_state(
 # Public API
 # =============================================================================
 
+def _compute_next_enc_icd_blocks(encs: list[dict]) -> list[list[str]]:
+    """
+    For each encounter i, return sorted unique ICD-10 chapter letters present
+    in encounter i+1 (using icd_codes). Last encounter returns [].
+    ICD-9 codes (numeric first character) are excluded.
+    """
+    result: list[list[str]] = []
+    for i in range(len(encs)):
+        if i == len(encs) - 1:
+            result.append([])
+        else:
+            next_codes = encs[i + 1].get("icd_codes", [])
+            chapters = sorted({
+                c[0].upper()
+                for c in next_codes
+                if c and c[0].isalpha()
+            })
+            result.append(chapters)
+    return result
+
+
 def compute_labels(
     sequences: list[dict],
     label_prefix: str = "F",
     compute_escalation_labels: bool = True,
-    compute_readm_labels: bool = True,
-    readm_window_days: int = 90,
+    compute_next_enc_labels: bool = True,
 ) -> list[dict]:
     """
     Compute all clinical labels and attach them to each patient dict.
@@ -209,45 +231,38 @@ def compute_labels(
 
     Parameters
     ----------
-    sequences         : list of patient dicts, each with an "encounters" list.
-                        Encounters need "icd_codes", "admittime", "dischtime",
-                        "meds". Uses "icd_codes_full" for escalation if present.
-    readm_window_days : primary readmission window in days
-    label_prefix      : ICD-10 prefix for positive readmission (default "F")
+    sequences               : list of patient dicts, each with an "encounters" list.
+                              Encounters need "icd_codes", "admittime", "dischtime",
+                              "meds". Uses "icd_codes_full" for escalation if present.
+    label_prefix            : ICD-10 prefix for positive readmission (default "F")
+    compute_escalation_labels : compute escalation labels
+    compute_next_enc_labels : compute next_enc_icd_blocks
 
     Returns
     -------
     sequences : same list, mutated with label fields.
     """
     print("\nComputing labels...")
-    
-    label_key = f"label_{readm_window_days}"
-    # Matches label_90, label_60, etc. - NOT label_30d, label_escalation, etc.
-    _READM_LABEL_RE = re.compile(r'^label_\d+$')    
 
     criteria_counter: Counter = Counter()
     first_esc_positions: list[int] = []
-    n_pos_readm = 0
     n_pos_30d = 0
+    # for next-enc stats
+    chapter_counter: Counter = Counter()
+    chapters_per_enc: list[int] = []
 
     for patient in sequences:
         encs = patient["encounters"]
 
-        # Remove old generic "label" key (renamed to label_{N})
+        # Remove stale label keys from old pipeline runs
         patient.pop("label", None)
-        # Remove any stale readmission label keys (label_90, label_60, etc.)
-        for k in [k for k in patient if _READM_LABEL_RE.match(k)]:
+        for k in [k for k in list(patient) if k.startswith("label_") and k.replace("label_", "").isdigit()]:
             del patient[k]
 
-        # ---- Readmission labels -----------------------------------------------
-        if compute_readm_labels:
-            patient[label_key]    = _compute_readmission_label(encs, readm_window_days, label_prefix)
-            patient["label_30d"]  = _compute_readmission_label(encs, 30, label_prefix)
-
-            if patient[label_key]:
-                n_pos_readm += 1
-            if patient["label_30d"]:
-                n_pos_30d += 1
+        # ---- 30-day readmission label ----------------------------------------
+        patient["label_30d"] = _compute_readmission_label(encs, 30, label_prefix)
+        if patient["label_30d"]:
+            n_pos_30d += 1
 
         # ---- Escalation labels ------------------------------------------------
         if compute_escalation_labels:
@@ -294,25 +309,44 @@ def compute_labels(
                 for c in all_criteria:
                     criteria_counter[c] += 1
 
+        # ---- Next-encounter ICD block labels ----------------------------------
+        if compute_next_enc_labels:
+            blocks = _compute_next_enc_icd_blocks(encs)
+            patient["next_enc_icd_blocks"] = blocks
+            # Collect stats (exclude last encounter which is always [])
+            for blk in blocks[:-1]:
+                chapters_per_enc.append(len(blk))
+                for ch in blk:
+                    chapter_counter[ch] += 1
+
     # ---- Summary --------------------------------------------------------------
     n_total = len(sequences)
-    n_pos_esc = sum(1 for s in sequences if s["label_escalation"] == 1)
+    n_pos_esc = sum(1 for s in sequences if s.get("label_escalation") == 1)
 
     print(f"\n{'=' * 60}")
     print(f"Label Summary")
     print(f"  Patients: {n_total:,}")
-    print(f"  {label_key:<28s} {n_pos_readm:,} ({100 * n_pos_readm / n_total:.1f}%)")
     print(f"  {'label_30d':<28s} {n_pos_30d:,} ({100 * n_pos_30d / n_total:.1f}%)")
-    print(f"  {'label_escalation':<28s} {n_pos_esc:,} ({100 * n_pos_esc / n_total:.1f}%)")
-    if criteria_counter:
-        print(f"\n  Escalation criterion fire rates (patient-level, may overlap):")
-        for criterion, count in sorted(criteria_counter.items(), key=lambda x: -x[1]):
-            print(f"    {criterion:<30s} {count:,} ({100 * count / n_total:.1f}%)")
-    if first_esc_positions:
-        fep = np.array(first_esc_positions)
-        print(f"\n  First-escalation encounter index:")
-        print(f"    mean={fep.mean():.1f}, median={np.median(fep):.0f}, "
-              f"min={fep.min()}, max={fep.max()}")
+    if compute_escalation_labels:
+        print(f"  {'label_escalation':<28s} {n_pos_esc:,} ({100 * n_pos_esc / n_total:.1f}%)")
+        if criteria_counter:
+            print(f"\n  Escalation criterion fire rates (patient-level, may overlap):")
+            for criterion, count in sorted(criteria_counter.items(), key=lambda x: -x[1]):
+                print(f"    {criterion:<30s} {count:,} ({100 * count / n_total:.1f}%)")
+        if first_esc_positions:
+            fep = np.array(first_esc_positions)
+            print(f"\n  First-escalation encounter index:")
+            print(f"    mean={fep.mean():.1f}, median={np.median(fep):.0f}, "
+                  f"min={fep.min()}, max={fep.max()}")
+    if compute_next_enc_labels and chapters_per_enc:
+        cpe = np.array(chapters_per_enc)
+        print(f"\n  next_enc_icd_blocks (transitions only, last enc excluded):")
+        print(f"    unique chapters : {len(chapter_counter)}")
+        print(f"    chapters/enc    : mean={cpe.mean():.2f}, median={np.median(cpe):.0f}, "
+              f"min={cpe.min()}, max={cpe.max()}")
+        print(f"    top chapters    :", ", ".join(
+            f"{ch}={cnt:,}" for ch, cnt in chapter_counter.most_common(10)
+        ))
     print(f"{'=' * 60}")
 
     return sequences

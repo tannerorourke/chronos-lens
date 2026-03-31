@@ -16,14 +16,8 @@ Schema per patient:
       "meds": ["sertraline", ...]
     }, ...
   ],
-  "label": int,     # 1 if 90-day readmission has F30-F39 diagnosis; 0 otherwise
   "label_30d": int   # 1 if 30-day readmission has F30-F39 diagnosis; 0 otherwise
 }
-
-Cohort filters:
-  - All patients readmitted within [readm_window_days] of discharge (no diagnosis requirement)
-  - min 3 encounters per patient
-  - Exclude deceased during admission (hospital_expire_flag = 0, deathtime is null)
 
 ICD code processing:
   - F-codes truncated to 3-char block level (F32.1 -> F32)

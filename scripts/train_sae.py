@@ -21,7 +21,7 @@ from training.train_sae import train_sae, save_sae_results
 TARGETS = ("delta", "pred_error", "observed_traj")
 
 parser = argparse.ArgumentParser(
-    description="Train a TopK Sparse Autoencoder on a JEPA displacement vector")
+    description="Train a TopK Sparse Autoencoder on a latent vector of a JEPA model.")
 parser.add_argument(
     "--model", type=str, required=True,
     help="Experiment subdir under experiments/ (e.g. test_01)")

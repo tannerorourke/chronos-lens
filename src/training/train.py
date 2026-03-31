@@ -6,7 +6,7 @@ Architecture
 ------------
   encoder   : EncounterEncoder (shared by context & target paths)
   target    : stop-gradient (no EMA) - same weights, torch.no_grad() + detach()
-  predictor : MLP(z_context + pos_emb -> z_pred)
+  predictor : Transformer(z_enc context tokens + mask token -> z_pred)
   loss      : MSE(z_pred, z_target) + VICReg variance/covariance regularization
 """
 from os import environ
@@ -131,11 +131,12 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             def forward_unto_dawn():
                 z_enc, z_pred, z_target = model(batch_dev)
                 for k, v in zip(
-                    ["z_encs", "z_pred", "z_target", "subject_ids", "mask_pos"], 
-                    [z_enc, z_pred, z_target, batch_dev["subject_ids"], batch_dev["mask_pos"]]
+                    ["z_encs", "z_pred", "z_target", "mask_pos", "ctx_pad_mask"],
+                    [z_enc, z_pred, z_target, batch_dev["mask_pos"], batch_dev["ctx_pad_mask"]],
                 ):
                     epoch_records[k].append(v.detach().cpu().numpy())
-                    
+                epoch_records["subject_ids"].extend(batch["subject_ids"])
+                
                 loss_dict = jepa_stopgrad_loss(
                     z_enc, z_pred, z_target, batch_dev["ctx_pad_mask"],
                     sim_weight, var_weight, cov_weight)

@@ -33,32 +33,28 @@ from src.utils.io import load_sequences, EXPERIMENTS_DIR
 
 @torch.no_grad()
 def save_supervised_embeddings(
-    all_z_c: list[np.ndarray], 
-    all_sids: list[str], 
-    all_labels: list[np.ndarray],
+    all_z_c: list[np.ndarray],
+    all_sids: list[str],
     epoch: int,
     save_dir: Path,
 ) -> None:
-    """Extract z_context for all samples and save in JEPA .npz format.
+    """Save supervised encoder outputs in JEPA .npz format.
 
-    JEPA-specific fields (z_pred, z_target, delta, pred_error,
-    observed_traj) are saved as zeros so analysis code that loads
-    the .npz can key on z_context + subject_ids + labels unchanged.
+    z_context is saved as z_encs (N, 1, D) - the pooled context vector unsqueezed
+    to match the JEPA per-encounter layout. z_pred and z_target are zeros.
     """
-    z_context   = np.concatenate(all_z_c)
-    subject_ids = np.array(all_sids)
-    labels      = np.concatenate(all_labels)
-    N, D        = z_context.shape
+    z_context   = np.concatenate(all_z_c) # (N, D)
+    subject_ids = np.array(all_sids, dtype=str)
+    N           = z_context.shape[0]
 
     file = (save_dir / f"embeddings_{epoch}").with_suffix(".npz")
     np.savez(
         file,
-        z_context=z_context,
+        z_encs=z_context[:, np.newaxis, :], # (N, 1, D)
         z_pred=np.zeros_like(z_context),
         z_target=np.zeros_like(z_context),
         subject_ids=subject_ids,
-        mask_positions=np.full(N, -1, dtype=np.int64),
-        labels=labels,
+        mask_pos=np.full(N, -1, dtype=np.int64),
     )
     print(f"   Embeddings saved: {save_dir.name}/{file.name} (epoch {epoch})")
 
@@ -149,19 +145,18 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         epoch_losses: list[float] = []
-        z_c, sids, labels = [], [], []
+        z_c, sids = [], []
 
         for batch in loader:
             batch_dev = {
                 k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
             }
-            
+
             def forward_unto_dawn():
                 z_context, logits = model(batch_dev)
-                z_c.append(z_context.cpu().numpy())
+                z_c.append(z_context.detach().cpu().numpy())
                 sids.extend(batch["subject_ids"])
-                labels.append(batch["labels"].numpy())
                 
                 loss = criterion(logits, batch_dev["labels"].float())
                 return loss
@@ -202,7 +197,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                             ckpt_dir, seed=seed)
 
         if log_vecs and (epoch % log_vecs_every == 0 or epoch == epochs or epoch == 1):
-            save_supervised_embeddings(z_c, sids, labels, epoch, emb_dir)
+            save_supervised_embeddings(z_c, sids, epoch, emb_dir)
 
         logger.log_epoch(
             loss=float(np.mean(epoch_losses)),

@@ -6,7 +6,7 @@ Architecture
 ------------
   encoder        : EncounterEncoder - online context path (with grads)
   target_encoder : EMA copy of encoder (momentum -> 1.0), no backprop
-  predictor      : MLP(z_context + pos_emb -> z_pred)
+  predictor      : Transformer(z_enc context tokens + mask token -> z_pred)
   loss           : smooth_l1(z_pred, z_target)  (iJEPA)
 """
 from os import environ
@@ -134,10 +134,11 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             def forward_unto_dawn():
                 z_enc, z_pred, z_target = model(batch_dev)
                 for k, v in zip(
-                    ["z_encs", "z_pred", "z_target", "subject_ids", "mask_pos"], 
-                    [z_enc, z_pred, z_target, batch_dev["subject_ids"], batch_dev["mask_pos"]]
+                    ["z_encs", "z_pred", "z_target", "mask_pos", "ctx_pad_mask"],
+                    [z_enc, z_pred, z_target, batch_dev["mask_pos"], batch_dev["ctx_pad_mask"]],
                 ):
                     epoch_records[k].append(v.detach().cpu().numpy())
+                epoch_records["subject_ids"].extend(batch["subject_ids"])
                 
                 loss = F.smooth_l1_loss(z_pred, z_target)
                 return loss

@@ -46,8 +46,7 @@ def extract_sae_activations(
     model: SparseAutoencoder,
     vec: np.ndarray,
 ) -> np.ndarray:
-    """Run a trained SAE on displacement vectors and return sparse activations.
-    """
+    """Run a trained SAE on a latent vector and return sparse activations."""
     model.eval()
     device = next(model.parameters()).device
     with torch.no_grad():

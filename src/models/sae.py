@@ -1,15 +1,15 @@
 """
 Sparse Autoencoder for JEPA vector analysis.
 
-Learns a sparse dictionary of basis directions that reconstruct the chosen 
-vector (z_pred, z_target, or z_enc). Each direction is a "feature" discovered 
-from the geometry itself - not from a human-chosen label set.  Sparsity 
-enforced via TopK activation (keep top-k, zero the rest; no L1 penalty needed).
+Learns a sparse dictionary of basis directions that reconstruct the chosen
+latent vector (z_enc, z_pred, z_target, or derived). Each direction is a
+"feature" discovered from the geometry itself.  Sparsity enforced via 
+TopK activation (keep top-k, zero the rest; no L1 penalty needed).
 
 Architecture
 ------------
 Encoder : Linear(embed_dim -> n_features) -> top k activation
-Decoder : Linear(n_features -> embed_dim)  - decoder rows ARE the dictionary
+Decoder : Linear(n_features -> embed_dim) - decoder rows ARE the dictionary
 
 Loss
 ----
@@ -21,12 +21,12 @@ import torch.nn as nn
 
 
 class SparseAutoencoder(nn.Module):
-    """TopK sparse autoencoder on displacement vectors Δ.
+    """TopK sparse autoencoder.
 
     Parameters
     ----------
     embed_dim  : input dimension (= JEPA embed_dim)
-    n_features : dictionary size (overcomplete: typically 4x embed_dim)
+    n_features : dictionary size (overcomplete, ~4x embed_dim)
     top_k      : number of active features per sample
     """
 
@@ -46,23 +46,18 @@ class SparseAutoencoder(nn.Module):
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Encode + TopK sparsity.  Returns (B, n_features) with <= k nonzeros."""
-        h = self.encoder(x)                         # (B, n_features)
+        h = self.encoder(x) # (B, n_features)
         topk_vals, topk_idx = h.topk(self.top_k, dim=-1)
         sparse = torch.zeros_like(h)
         sparse.scatter_(-1, topk_idx, topk_vals)
         return sparse
 
     def decode(self, sparse: torch.Tensor) -> torch.Tensor:
-        """Decode from sparse activations.  Returns (B, embed_dim)."""
+        """Decode from sparse activations. Returns (B, embed_dim)."""
         return self.decoder(sparse)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Returns
-        -------
-        x_hat      : (B, embed_dim) reconstruction
-        activations: (B, n_features) sparse activation vector
-        """
+        """ Returns reconstruction x_hat (B, embed_dim) and sparse activations (B, n_features) """
         activations = self.encode(x)
         x_hat = self.decode(activations)
         return x_hat, activations

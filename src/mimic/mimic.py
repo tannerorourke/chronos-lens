@@ -1,10 +1,16 @@
 """
 MIMIC-IV Patient Sequence Feature Extraction Pipeline functions
 ===================================================
-Build patient-level temporal sequences from MIMIC-IV v3.1 (BigQuery)
-for mood-disorder readmission prediction.
+Build patient-level temporal sequences from MIMIC-IV v3.1 (BigQuery).
 
-Schema per patient:
+Cohort: 
+    - self-supervised
+    - all patients with >= min_encounters alive-at-discharge
+    - admissions are included regardless of diagnosis. 
+Labels (readmission, escalation, next-encounter ICD blocks) are 
+computed separately in labels.py.
+
+Schema per patient (pre-labeling):
 {
   "subject_id": str,
   "encounters": [
@@ -14,14 +20,15 @@ Schema per patient:
       "dischtime": datetime,
       "icd_codes": ["F32", "I10.1", ...],
       "meds": ["sertraline", ...]
-    }, ...
-  ],
-  "label_30d": int   # 1 if 30-day readmission has F30-F39 diagnosis; 0 otherwise
+    }, 
+    ...
+  ]
 }
 
 ICD code processing:
   - F-codes truncated to 3-char block level (F32.1 -> F32)
   - Non-F ICD-10 codes retain full dot notation (I10.1 stays I10.1)
+  - icd_codes_full: full dot-notation F-codes kept separately for escalation labels
 
 BigQuery auth:
   gcloud auth application-default login

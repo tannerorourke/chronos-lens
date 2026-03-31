@@ -111,14 +111,16 @@ def save_embedding_vecs(
     if save_dir is not None:
         ep_str = f"_{epoch}" if epoch is not None else ""
         file = (save_dir / f"embeddings{ep_str}").with_suffix(".npz")
-        np.savez(
-            file,
-            z_encs      = records["z_encs"],
-            z_pred      = records["z_pred"],
-            z_target    = records["z_target"],
-            subject_ids = records["subject_ids"],
-            mask_pos    = records["mask_pos"]
-        )
+        save_dict = {
+            "z_encs":      records["z_encs"],
+            "z_pred":      records["z_pred"],
+            "z_target":    records["z_target"],
+            "subject_ids": records["subject_ids"],
+            "mask_pos":    records["mask_pos"],
+        }
+        if "ctx_pad_masks" in records:
+            save_dict["ctx_pad_masks"] = records["ctx_pad_masks"]
+        np.savez(file, **save_dict)  # type: ignore[arg-type]
         print(f"   Saved embeddings -> {file.name} (epoch {epoch})")
 
     return records

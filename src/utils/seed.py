@@ -41,7 +41,7 @@ def _restore_rng(checkpoint: dict) -> None:
     return rng
 
 
-def load_seed(exp_dir: Path) -> int:
+def load_exp_seed(exp_dir: Path) -> int:
     """Read seed from an experiment's config.yaml (meta.seed), fallback to DEFAULT_SEED."""
     cfg_path = Path(exp_dir) / "config.yaml"
     with open(cfg_path) as f:

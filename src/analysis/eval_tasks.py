@@ -181,16 +181,15 @@ def probe_icd_blocks(
 # Readmission probing (binary)
 # =============================================================================
 
-def evaluate_readmission(
+def evaluate_binary_probe(
     embeddings: np.ndarray,
     labels: np.ndarray,
     n_splits: int = 5,
     seed: int = 42,
 ) -> dict:
-    """Probe for binary readmission prediction using:
-        - Logistic Regression
-        - Stratified k-fold CV with per-fold StandardScaler
-        - balanced class weights.
+    """Binary logistic-regression probe with stratified k-fold CV.
+
+    Uses per-fold StandardScaler and balanced class weights.
 
     Parameters
     ----------

@@ -13,7 +13,7 @@ def save_dataset(
 ):
     """
     Save sequences and stats:
-      PROCESSED_DIR/
+      DATA_DIR/
         sequences.jsonl    - one JSON object per patient
         dataset_stats.json - cohort stats, schema, label distribution
     """
@@ -85,8 +85,8 @@ def save_dataset(
         json.dump(stats, f, indent=2)
 
     print(f"\nDataset saved to {out_dir}/")
-    print(f"  {jsonl_path.name:20s} {jsonl_path.stat().st_size / 1024:.0f} KB  (primary - for JEPA dataloader)")
-    print(f"  {meta_path.name:20s} {meta_path.stat().st_size / 1024:.0f} KB  (cohort stats & schema)")
+    print(f"  {jsonl_path.name:20s} {jsonl_path.stat().st_size / 1024:.0f} KB")
+    print(f"  {meta_path.name:20s} {meta_path.stat().st_size / 1024:.0f} KB (stats & schema)")
 
 
 def save_parquets(admissions, patients, diagnoses, prescriptions) -> None:
@@ -132,7 +132,6 @@ def load_parquets(data_dir: Path) -> tuple:
 
 def validate_sequences(sequences: list[dict]):
     print("\nVALIDATING SEQUENCES..")
-    print("=" * 60)
 
     assert len(sequences) > 0, "FAIL: no sequences produced"
 
@@ -148,12 +147,19 @@ def validate_sequences(sequences: list[dict]):
     
     # all labels should be 0 or 1
     for label in label_cols:
-        labels = set(s[label] for s in sequences)
-        assert sequences[label].dtype in [int, np.int64, np.int32], f"FAIL: label column {label} has non-integer type {sequences[label].dtype}"
-        assert labels.issubset({0, 1}), f"FAIL: unexpected labels {labels}"
+        for s in sequences:
+            val = s[label]
+            if isinstance(val, list):
+                assert all(v in (0, 1) for v in val), \
+                    f"FAIL: {label} has non-binary values in patient {s['subject_id']}"
+            else:
+                assert val in (0, 1), \
+                    f"FAIL: {label} has unexpected value {val} in patient {s['subject_id']}"
 
     for seq in sequences:
-        assert isinstance(seq["subject_id"], str)
+        assert isinstance(seq["subject_id"], (str, int)), \
+            f"FAIL: subject_id must be str or int, got {type(seq['subject_id'])}"
+        seq["subject_id"] = str(seq["subject_id"])
         assert isinstance(seq["encounters"], list)
         for enc in seq["encounters"]:
             assert isinstance(enc["hadm_id"], int)

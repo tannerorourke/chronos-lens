@@ -1,9 +1,9 @@
 """
-Per-patient interpretability figures for the three-vector JEPA analysis.
+Per-patient interpretability figures for JEPA prediction analysis.
 
-Decomposes a single patient's prediction into sparse SAE features across
-delta (P-C), pred_error (P-T), and observed_traj (T-C), and visualises the
-geometric prediction triangle alongside the sparse decomposition.
+Decomposes a single patient's prediction into sparse SAE features and
+visualises the prediction-vs-target geometry alongside the sparse
+decomposition.
 
 Designed for thesis case-study figures (publication-ready at 300 dpi).
 """
@@ -23,20 +23,16 @@ from src.analysis.plotting import show_or_savefig
 from src.utils.seed import SEED
 
 
-VECTOR_NAMES = ("delta", "pred_error", "observed_traj")
-
 # Consistent palette across all figures
 COLORS = {
-    "delta":         "#3B82F6",   # blue  - model prediction direction
-    "pred_error":    "#EF4444",   # red   - prediction error
-    "observed_traj": "#6B7280",   # gray  - ground truth trajectory
+    "z_pred":     "#3B82F6",   # blue  - model prediction
+    "z_target":   "#10B981",   # green - ground truth
+    "pred_error": "#EF4444",   # red   - prediction error
 }
 ARROW_LABELS = {
-    "delta":         r"$C \to P$ (predicted)",
-    "pred_error":    r"$P \to T$ (error)",
-    "observed_traj": r"$C \to T$ (observed)",
+    "pred_error": r"$P \to T$ (error)",
 }
-LABEL_COLORS = {0: "#94A3B8", 1: "#F97316"}   # neg / pos readmission
+LABEL_COLORS = {0: "#94A3B8", 1: "#F97316"}   # neg / pos escalation
 
 
 # =========================================================================
@@ -50,15 +46,15 @@ def decompose_patient(
     feature_cards_dict: dict[str, list[dict]],
     top_k: int = 8,
 ) -> dict:
-    """Decompose one patient's three vectors through their respective SAEs.
+    """Decompose one patient's vectors through their respective SAEs.
 
     Parameters
     ----------
-    patient_idx : row index into the (N, D) arrays
-    vectors_dict : {"delta": (N,D), "pred_error": (N,D), "observed_traj": (N,D)}
-    sae_models_dict : {"delta": SparseAutoencoder, ...}  - trained, eval-mode
-    feature_cards_dict : {"delta": [card, ...], ...}  - from inspect_sae_features
-    top_k : max active features to return per vector
+    patient_idx    : row index into the (N, D) arrays
+    vectors_dict   : {name: (N, D)} arrays (e.g. pred_error, z_pred, z_target)
+    sae_models_dict    : {name: SparseAutoencoder} - trained, eval-mode
+    feature_cards_dict : {name: [card, ...]} - from inspect_sae_features
+    top_k          : max active features to return per vector
 
     Returns
     -------
@@ -66,7 +62,6 @@ def decompose_patient(
         {feature_idx, magnitude, label, decoder_direction}
     sorted descending by magnitude.
     """
-    # Build a lookup from feature_idx -> best clinical label per vector
     def _card_lookup(cards: list[dict]) -> dict[int, str | None]:
         lookup: dict[int, str | None] = {}
         for card in cards:
@@ -83,18 +78,17 @@ def decompose_patient(
         return lookup
 
     result = {}
-    for name in VECTOR_NAMES:
-        if name not in sae_models_dict:
+    for name, sae in sae_models_dict.items():
+        if name not in vectors_dict:
             continue
-        vec = vectors_dict[name][patient_idx]            # (D,)
-        sae = sae_models_dict[name]
+        vec = vectors_dict[name][patient_idx]
         cards = feature_cards_dict.get(name, [])
         card_lookup = _card_lookup(cards)
 
         device = next(sae.parameters()).device
         with torch.no_grad():
             x = torch.tensor(vec, dtype=torch.float32, device=device).unsqueeze(0)
-            activations = sae.encode(x).squeeze(0).cpu().numpy()   # (n_features,)
+            activations = sae.encode(x).squeeze(0).cpu().numpy()
 
         decoder_weight = sae.decoder.weight.detach().cpu().numpy()  # (embed_dim, n_features)
 
@@ -123,10 +117,8 @@ def decompose_patient(
 
 def build_patient_profile_figure(
     patient_idx: int,
-    z_context_all: np.ndarray,
     z_pred_all: np.ndarray,
     z_target_all: np.ndarray,
-    
     decomposition: dict,
     labels: np.ndarray,
     pca_basis: PCA,
@@ -136,13 +128,17 @@ def build_patient_profile_figure(
 ) -> Figure:
     """Create a multi-panel thesis figure for one patient.
 
+    Left panel shows z_pred vs z_target in shared PCA space with a P->T
+    error arrow.  Right panel shows SAE feature decomposition bars.
+
     Parameters
     ----------
-    patient_idx : index into the (N, D) arrays
-    z_context_all, z_pred_all, z_target_all : (N, D) embeddings for all patients
-    pca_basis : sklearn PCA fitted on observed_traj (T-C), the shared basis
-    decomposition : output of decompose_patient()
-    labels : (N,) binary label array (0/1)
+    patient_idx     : index into the (N, D) arrays
+    z_pred_all      : (N, D) predictor outputs
+    z_target_all    : (N, D) target encoder outputs
+    decomposition   : output of decompose_patient()
+    labels          : (N,) binary escalation labels (0/1)
+    pca_basis       : sklearn PCA fitted on z_target
     metadata_summary : optional text strip for bottom panel
     show / save_path : forwarded to show_or_savefig
 
@@ -162,19 +158,19 @@ def build_patient_profile_figure(
         hspace=0.25, wspace=0.35,
     )
 
-    # -- Left panel: trajectory map in shared PCA space ---------------
+    # -- Left panel: P vs T in shared PCA space -------------------------
     ax_traj = fig.add_subplot(gs[0, 0])
     _draw_trajectory_panel(
         ax_traj, patient_idx,
-        z_context_all, z_pred_all, z_target_all,
+        z_pred_all, z_target_all,
         pca_basis, labels,
     )
 
-    # -- Right panel: SAE decomposition bars --------------------------
+    # -- Right panel: SAE decomposition bars ----------------------------
     ax_bar = fig.add_subplot(gs[0, 1])
     _draw_decomposition_panel(ax_bar, decomposition)
 
-    # -- Bottom strip: metadata ---------------------------------------
+    # -- Bottom strip: metadata -----------------------------------------
     if has_metadata:
         ax_meta = fig.add_subplot(gs[1, :])
         ax_meta.axis("off")
@@ -199,66 +195,58 @@ def build_patient_profile_figure(
 
 def _draw_trajectory_panel(
     ax, patient_idx,
-    z_context_all, z_pred_all, z_target_all,
+    z_pred_all, z_target_all,
     pca_basis, labels,
 ):
-    """Project all patients onto top-2 PCA axes of T-C; draw prediction triangle."""
+    """Project all patients onto top-2 PCA axes of z_target; draw P->T error arrow."""
     mean = pca_basis.mean_
     comps = pca_basis.components_[:2]   # (2, D)
 
     def _proj(z):
         return (z - mean) @ comps.T     # (N, 2)
 
-    ctx_2d  = _proj(z_context_all)
     pred_2d = _proj(z_pred_all)
     tgt_2d  = _proj(z_target_all)
 
-    # Population scatter (context embeddings, faint)
+    # Population scatter (z_target, colored by escalation label)
     for lab_val, color in LABEL_COLORS.items():
         mask = labels == lab_val
-        lbl = "label 1 (positive)" if lab_val else "label 0 (negative)"
+        lbl = "escalation" if lab_val else "no escalation"
         ax.scatter(
-            ctx_2d[mask, 0], ctx_2d[mask, 1],
+            tgt_2d[mask, 0], tgt_2d[mask, 1],
             s=4, alpha=0.12, color=color, label=lbl, rasterized=True,
         )
 
-    # Patient triangle
-    c = ctx_2d[patient_idx]
+    # Patient: P and T points with error arrow
     p = pred_2d[patient_idx]
     t = tgt_2d[patient_idx]
 
-    # C -> T  (observed)
-    ax.annotate("", xy=t, xytext=c,
-                arrowprops=dict(arrowstyle="-|>", color=COLORS["observed_traj"],
-                                lw=2.0, mutation_scale=14))
-    # C -> P  (predicted)
-    ax.annotate("", xy=p, xytext=c,
-                arrowprops=dict(arrowstyle="-|>", color=COLORS["delta"],
-                                lw=2.0, mutation_scale=14))
-    # P -> T  (error)
+    # P -> T  (prediction error)
     ax.annotate("", xy=t, xytext=p,
                 arrowprops=dict(arrowstyle="-|>", color=COLORS["pred_error"],
                                 lw=2.0, linestyle="--", mutation_scale=14))
 
     # Vertex markers
-    for pt, marker, lbl in [(c, "o", "C"), (p, "s", "P"), (t, "^", "T")]:
-        ax.plot(pt[0], pt[1], marker, color="black", markersize=7, zorder=6)
+    for pt, marker, lbl, color in [
+        (p, "s", "P", COLORS["z_pred"]),
+        (t, "^", "T", COLORS["z_target"]),
+    ]:
+        ax.plot(pt[0], pt[1], marker, color=color, markersize=7, zorder=6)
         ax.annotate(lbl, pt, textcoords="offset points", xytext=(6, 6),
                     fontsize=8, fontweight="bold", zorder=7)
 
-    # Legend for arrows
+    # Legend
     from matplotlib.lines import Line2D
     legend_handles = [
-        Line2D([0], [0], color=COLORS["observed_traj"], lw=2, label=ARROW_LABELS["observed_traj"]),
-        Line2D([0], [0], color=COLORS["delta"],         lw=2, label=ARROW_LABELS["delta"]),
-        Line2D([0], [0], color=COLORS["pred_error"],    lw=2, ls="--", label=ARROW_LABELS["pred_error"]),
+        Line2D([0], [0], color=COLORS["pred_error"], lw=2, ls="--",
+               label=ARROW_LABELS["pred_error"]),
     ]
     ax.legend(handles=legend_handles, fontsize=7, loc="lower left",
               framealpha=0.85, edgecolor="#CBD5E1")
 
-    ax.set_xlabel("observed_traj PC1", fontsize=9)
-    ax.set_ylabel("observed_traj PC2", fontsize=9)
-    ax.set_title("Trajectory map (shared basis)", fontsize=10)
+    ax.set_xlabel("z_target PC1", fontsize=9)
+    ax.set_ylabel("z_target PC2", fontsize=9)
+    ax.set_title("Prediction vs target (shared PCA basis)", fontsize=10)
     ax.tick_params(labelsize=7)
 
 
@@ -266,9 +254,11 @@ def _draw_trajectory_panel(
 
 def _draw_decomposition_panel(ax, decomposition: dict):
     """Grouped horizontal bar chart of SAE feature magnitudes."""
+    vector_names = list(decomposition.keys())
+
     # Collect the union of all active feature indices across vectors
     all_features: dict[int, str | None] = {}
-    for name in VECTOR_NAMES:
+    for name in vector_names:
         for entry in decomposition.get(name, []):
             fi = entry["feature_idx"]
             if fi not in all_features or all_features[fi] is None:
@@ -283,7 +273,7 @@ def _draw_decomposition_panel(ax, decomposition: dict):
     # Sort features by total magnitude across vectors (most important first)
     def _total_mag(fi):
         total = 0.0
-        for name in VECTOR_NAMES:
+        for name in vector_names:
             for e in decomposition.get(name, []):
                 if e["feature_idx"] == fi:
                     total += abs(e["magnitude"])
@@ -292,22 +282,29 @@ def _draw_decomposition_panel(ax, decomposition: dict):
     sorted_features = sorted(all_features.keys(), key=_total_mag, reverse=True)
 
     n_feat = len(sorted_features)
-    n_vecs = len(VECTOR_NAMES)
+    n_vecs = len(vector_names)
     bar_height = 0.22
     y_positions = np.arange(n_feat)
 
     # Build magnitude lookup: (vector_name, feature_idx) -> magnitude
     mag_lookup: dict[tuple[str, int], float] = {}
-    for name in VECTOR_NAMES:
+    for name in vector_names:
         for entry in decomposition.get(name, []):
             mag_lookup[(name, entry["feature_idx"])] = entry["magnitude"]
 
-    for vi, name in enumerate(VECTOR_NAMES):
+    # Color fallback for vectors not in COLORS
+    _fallback = ["#3B82F6", "#EF4444", "#10B981", "#F59E0B", "#8B5CF6"]
+    vec_colors = {
+        name: COLORS.get(name, _fallback[i % len(_fallback)])
+        for i, name in enumerate(vector_names)
+    }
+
+    for vi, name in enumerate(vector_names):
         mags = [mag_lookup.get((name, fi), 0.0) for fi in sorted_features]
         offset = (vi - (n_vecs - 1) / 2) * bar_height
         ax.barh(
             y_positions + offset, mags,
-            height=bar_height, color=COLORS[name], alpha=0.85,
+            height=bar_height, color=vec_colors[name], alpha=0.85,
             label=name, edgecolor="white", linewidth=0.4,
         )
 
@@ -344,28 +341,37 @@ def _draw_decomposition_panel(ax, decomposition: dict):
 def select_interesting_patients(
     z_pred: np.ndarray,
     z_target: np.ndarray,
-    z_context: np.ndarray,
     labels: np.ndarray,
     n: int = 5,
     seed: int = SEED,
 ) -> list[int]:
     """Select patient indices worth visualising across different criteria.
+
+    Criteria
+    --------
+    biggest_failures  : highest ||z_pred - z_target|| (worst predictions)
+    best_predictions  : lowest prediction error norm
+    most_dynamic      : z_target farthest from mean (most unusual encounters)
+    escalation_cases  : patients with escalation label = 1
+    random_sample     : random selection
     """
     rng = np.random.default_rng(seed)
     N = z_pred.shape[0]
 
     pred_error_norms = np.linalg.norm(z_pred - z_target, axis=-1)
-    observed_norms   = np.linalg.norm(z_target - z_context, axis=-1)
+    target_dist = np.linalg.norm(z_target - z_target.mean(axis=0), axis=-1)
 
     biggest_failures = np.argsort(-pred_error_norms)[:n]
     best_predictions = np.argsort(pred_error_norms)[:n]
-    most_dynamic     = np.argsort(-observed_norms)[:n]
+    most_dynamic     = np.argsort(-target_dist)[:n]
+    escalation_cases = np.where(labels == 1)[0][:n]
     random_sample    = rng.choice(N, size=min(n, N), replace=False)
 
     # Deduplicate while preserving order
     seen: set[int] = set()
     result: list[int] = []
-    for idx_arr in [biggest_failures, best_predictions, most_dynamic, random_sample]:
+    for idx_arr in [biggest_failures, best_predictions, most_dynamic,
+                    escalation_cases, random_sample]:
         for idx in idx_arr:
             idx = int(idx)
             if idx not in seen:

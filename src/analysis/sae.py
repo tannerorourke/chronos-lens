@@ -6,7 +6,7 @@ Tier C of the three-tier partial labeling bridge (thesis §5.5).
 
 Functions
 ---------
-  extract_sae_activations : run a trained SAE on delta -> sparse activations
+  extract_sae_activations : run a trained SAE on a latent vector -> sparse activations
   load_sae                : reconstruct a SparseAutoencoder from checkpoint
   inspect_sae_features    : open-ended enrichment against raw ICD/med vocabulary
   sae_cluster_crossref    : cross-reference SAE features with HDBSCAN clusters
@@ -73,6 +73,8 @@ def inspect_sae_features(
     cluster_labels: np.ndarray | None = None,
     metadata_features: np.ndarray | None = None,
     metadata_feature_names: list | None = None,
+    encounter_indices: np.ndarray | None = None,
+    encounter_level: bool = False,
     top_n_samples: int = 50,
     top_n_enriched: int = 10,
     min_activation_frac: float = 0.01,
@@ -80,8 +82,12 @@ def inspect_sae_features(
     """Open-ended inspection of SAE features against raw clinical data.
 
     For each non-dead feature that activates on >= min_activation_frac of
-    samples, pulls top activators and computes enrichment over the FULL
-    raw ICD/medication vocabulary from sequences.jsonl.
+    samples, pulls top activators and computes enrichment over the raw
+    ICD/medication vocabulary from sequences.jsonl.
+
+    When encounter_level=True, ICD/med enrichment uses only the specific
+    encounter for each sample (identified by encounter_indices) rather
+    than aggregating across all encounters for the patient.
 
     Parameters
     ----------
@@ -91,6 +97,9 @@ def inspect_sae_features(
     cluster_labels         : (N,) HDBSCAN cluster assignments (optional)
     metadata_features      : (N, n_meta) sample-level metadata (optional)
     metadata_feature_names : column names for metadata (optional)
+    encounter_indices      : (N,) int encounter index per sample (optional,
+                             required when encounter_level=True)
+    encounter_level        : if True, use per-encounter ICD/med lookup
     top_n_samples          : max samples to use as "top activators"
     top_n_enriched         : max enriched codes/meds to report per feature
     min_activation_frac    : minimum fraction of samples a feature must
@@ -109,17 +118,24 @@ def inspect_sae_features(
     sample_icd_sets: list[set] = []
     sample_med_sets: list[set] = []
 
-    for sid in subject_ids:
+    for i, sid in enumerate(subject_ids):
         p = patients.get(str(sid))
         if p is None:
             sample_icd_sets.append(set())
             sample_med_sets.append(set())
             continue
-        icds = set()
-        meds = set()
-        for enc in p.get("encounters", []):
-            icds.update(str(c) for c in enc.get("icd_codes", []))
-            meds.update(str(m).lower() for m in enc.get("meds", []))
+        if encounter_level and encounter_indices is not None:
+            enc_idx = int(encounter_indices[i])
+            encs = p.get("encounters", [])
+            enc = encs[enc_idx] if enc_idx < len(encs) else {}
+            icds = set(str(c) for c in enc.get("icd_codes", []))
+            meds = set(str(m).lower() for m in enc.get("meds", []))
+        else:
+            icds = set()
+            meds = set()
+            for enc in p.get("encounters", []):
+                icds.update(str(c) for c in enc.get("icd_codes", []))
+                meds.update(str(m).lower() for m in enc.get("meds", []))
         sample_icd_sets.append(icds)
         sample_med_sets.append(meds)
 
@@ -338,7 +354,7 @@ def sae_cluster_crossref(
     cluster_ids = sorted(c for c in set(cluster_labels) if c >= 0)
     n_clusters = len(cluster_ids)
 
-    # Mean activation per cluster (all features × all clusters)
+    # Mean activation per cluster (all features x all clusters)
     heatmap_full = np.zeros((n_features, n_clusters))
     for j, cid in enumerate(cluster_ids):
         mask = cluster_labels == cid

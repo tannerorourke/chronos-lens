@@ -1,10 +1,9 @@
 """
-geometric latent-space analysis of the JEPA displacement field. Operates 
-on the raw displacement vectors (no external metadata). 
-Load z_context, z_pred, and labels, compute ||Delta||, PCA, divergence, and 
-ICC analysis.
+Geometric analysis of JEPA latent-space vectors.
 
-- See 'src/analysis/displacement.py' for displacement field construction
+Operates on raw embedding vectors (no external metadata).
+PCA, divergence, ICC, subspace alignment, and CKA analysis.
+
 - Plotting from these functions done in 'notebooks/*.ipynb'
 """
 
@@ -39,7 +38,7 @@ def marchenko_pastur_upper(n: int, p: int, trace: float) -> float:
 # -----------------
 
 def fit_pca(vec: np.ndarray, k: int) -> tuple[PCA, np.ndarray, np.ndarray]:
-    """ Uses n_components=D_vec for PCA so the complete eigenvalue spectrum is available """
+    """Fit full PCA on a (N, D) embedding matrix and return top-k projections."""
     _, D = vec.shape
     pca  = PCA(n_components=D, random_state=SEED, svd_solver="full")
     pca.fit(vec)
@@ -52,8 +51,7 @@ def fit_pca(vec: np.ndarray, k: int) -> tuple[PCA, np.ndarray, np.ndarray]:
 
 def get_pca_stats(pca: PCA, k: int, n_samples: int):
     """
-    Compute stats on the PCA decomposition of the displacement field. Uses 
-    n_components=D_embed for PCA so the complete eigenvalue spectrum is available
+    Compute stats on a PCA decomposition of a latent-space vector set.
 
     References
     ----------
@@ -168,15 +166,17 @@ def find_divergent_pairs(
     delta:        float = 0.5,
 ) -> tuple:
     """
-    Upper-triangle pairs where context histories are cos_similar > eps
-    but cosine_dist of predictions diverge by > delta.
+    Find pairs with similar contexts but divergent predictions.
+
+    Upper-triangle pairs where context cosine similarity > eps
+    but prediction cosine distance > delta.
 
     Parameters
     ----------
-    context_sims : (N, N) cosine similarity matrix
-    pred_dists   : (N, N) cosine distance matrix
+    context_sims : (N, N) cosine similarity matrix (e.g. z_context or z_enc)
+    pred_dists   : (N, N) cosine distance matrix of predictions (z_pred)
     eps          : context similarity lower bound
-    delta        : prediction distance lower bound
+    delta        : prediction divergence lower bound
 
     Returns
     -------
@@ -194,17 +194,15 @@ def regress_divergence(
     pred_dists:   np.ndarray,
 ) -> dict:
     """
-    OLS regression of prediction cosine distance on context cosine similarity
-    over all upper-triangle pairs.
+    OLS regression of prediction divergence on context similarity.
 
-    The continuous version of divergence analysis: instead of hard
-    thresholds, study residuals from the regression as the "unexplained"
-    divergence signal.
+    Continuous version of divergence analysis: residuals from the
+    regression are the "unexplained" prediction divergence signal.
 
     Parameters
     ----------
-    context_sims : (N, N) cosine similarity matrix
-    pred_dists   : (N, N) cosine distance matrix
+    context_sims : (N, N) cosine similarity matrix (e.g. z_context or z_enc)
+    pred_dists   : (N, N) cosine distance matrix of predictions (z_pred)
 
     Returns
     -------
@@ -244,8 +242,8 @@ def project_pair_divergence_vectors(
     pca_components: np.ndarray,
 ) -> np.ndarray:
     """
-    - Compute divergence vectors  d_ij = z_pred_i - z_pred_j
-    - project onto top-k PCA axes
+    Compute prediction divergence vectors d_ij = z_pred_i - z_pred_j
+    and project onto top-k PCA axes.
     """
     row_idx, col_idx = pair_indices
     k = pca_components.shape[0]
@@ -261,10 +259,10 @@ def divergence_variance_comparison(
     pca_components: np.ndarray,
 ) -> tuple:
     """
-    Per-PC projection variance of divergent pairs vs. a matched random baseline.
+    Per-PC projection variance of prediction-divergent pairs vs. random baseline.
 
-    If divergent-pair vectors are concentrated along a PC axis (high variance
-    ratio), that axis encodes the divergence structure - not noise.
+    If divergent-pair vectors concentrate along a PC axis (high variance
+    ratio), that axis encodes prediction divergence structure - not noise.
     """
     row_idx, col_idx = pair_indices
     k     = pca_components.shape[0]
@@ -389,3 +387,87 @@ def compute_icc(
         "trait_threshold":   float(trait_threshold),
         "state_threshold":   float(state_threshold),
     }
+
+
+# =============================================================================
+# Subspace Alignment
+# =============================================================================
+
+def subspace_alignment(pca_a: PCA, pca_b: PCA, top_k: int) -> dict:
+    """
+    Principal angles between the top-k PC subspaces of two PCA decompositions.
+
+    Measures whether two representations (e.g. z_pred vs z_target) share the
+    same dominant subspace. Cosines near 1.0 mean the axes are aligned;
+    near 0.0 means orthogonal subspaces.
+
+    Parameters
+    ----------
+    pca_a, pca_b : fitted sklearn PCA objects (must share embedding dimension)
+    top_k        : number of top PC axes to compare
+
+    Returns
+    -------
+    dict with keys:
+      cos_principal_angles : (top_k,) cosines of canonical angles
+      mean_alignment       : mean of cos_principal_angles
+      min_alignment        : worst-case alignment across axes
+    """
+    k = min(top_k, pca_a.n_components_, pca_b.n_components_)
+    A = pca_a.components_[:k]   # (k, D)
+    B = pca_b.components_[:k]   # (k, D)
+
+    # SVD of A @ B^T gives canonical correlations as singular values
+    M = A @ B.T                 # (k, k)
+    _, s, _ = np.linalg.svd(M)
+    cos_angles = np.clip(s[:k], 0.0, 1.0)
+
+    return {
+        "cos_principal_angles": cos_angles.tolist(),
+        "mean_alignment":      float(cos_angles.mean()),
+        "min_alignment":       float(cos_angles.min()),
+    }
+
+
+# =============================================================================
+# CKA (Centered Kernel Alignment)
+# =============================================================================
+
+def linear_cka(X: np.ndarray, Y: np.ndarray) -> float:
+    """
+    Linear Centered Kernel Alignment between two representation matrices.
+
+    CKA measures similarity between two sets of representations independent
+    of orthogonal rotation and isotropic scaling. Values in [0, 1]; 1.0
+    means identical representational geometry.
+
+    Parameters
+    ----------
+    X : (N, D1) representation matrix
+    Y : (N, D2) representation matrix  (same N)
+
+    Returns
+    -------
+    float : CKA similarity score
+
+    References
+    ----------
+    Kornblith et al. (2019). "Similarity of Neural Network Representations
+    Revisited." ICML.
+    """
+    N = X.shape[0]
+    assert Y.shape[0] == N, "X and Y must have the same number of samples"
+
+    # Center both matrices
+    X = X - X.mean(axis=0)
+    Y = Y - Y.mean(axis=0)
+
+    # Linear HSIC: ||Y^T X||_F^2
+    hsic_xy = float(np.linalg.norm(Y.T @ X, "fro") ** 2)
+    hsic_xx = float(np.linalg.norm(X.T @ X, "fro") ** 2)
+    hsic_yy = float(np.linalg.norm(Y.T @ Y, "fro") ** 2)
+
+    denom = np.sqrt(hsic_xx * hsic_yy)
+    if denom < 1e-12:
+        return 0.0
+    return hsic_xy / denom

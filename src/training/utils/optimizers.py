@@ -1,6 +1,6 @@
 import math
 import torch
-from torch.amp import GradScaler
+from torch.amp import GradScaler # type: ignore
 
 
 def LinearDecay(

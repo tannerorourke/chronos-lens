@@ -309,8 +309,7 @@ def build_patient_sequences(
         })
 
     enc_counts = [len(s["encounters"]) for s in sequences]
-    print(f"\n{'=' * 60}")
-    print(f"Sequences built:")
+    print(f"\nSequences built.")
     print(f"  Patients:      {len(sequences):,}")
     print(f"  Encounters/pt: mean={np.mean(enc_counts):.1f}, "
           f"median={np.median(enc_counts):.0f}, "

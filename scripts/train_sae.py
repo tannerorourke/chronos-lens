@@ -14,11 +14,11 @@ import torch
 import yaml
 
 from src.utils.io import EXPERIMENTS_DIR
-from src.utils.seed import load_seed, set_global_seed
+from src.utils.seed import load_exp_seed, set_global_seed
 from training.train_sae import train_sae, save_sae_results
 
 
-TARGETS = ("delta", "pred_error", "observed_traj")
+TARGETS = ("z_enc", "z_pred", "z_target", "pred_error")
 
 parser = argparse.ArgumentParser(
     description="Train a TopK Sparse Autoencoder on a latent vector of a JEPA model.")
@@ -27,8 +27,8 @@ parser.add_argument(
     help="Experiment subdir under experiments/ (e.g. test_01)")
 parser.add_argument(
     "--target", type=str, default=None, choices=TARGETS,
-    help="Which vector to train on: delta (P-C), pred_error (P-T), "
-         "observed_traj (T-C). Overrides config_sae.yaml. Default: delta.")
+    help="Which vector to train on: z_enc (flattened encoder), z_pred, "
+         "z_target, pred_error (z_pred - z_target). Overrides config_sae.yaml.")
 parser.add_argument(
     "--embeddings", type=str, default=None,
     help="Embeddings .npz filename within the model dir (e.g. embedding_ep_40.npz). "
@@ -58,7 +58,7 @@ def main():
         raise FileNotFoundError(f"Model directory not found: {model_dir}")
 
     # --- Seed from parent model config ---
-    set_global_seed(load_seed(model_dir))
+    set_global_seed(load_exp_seed(model_dir))
 
     # --- Load SAE config ---
     cfg = load_sae_config(model_dir)
@@ -90,20 +90,17 @@ def main():
     print(f"Loading {target} from: {emb_path}")
     npz = np.load(emb_path, allow_pickle=True)
 
-    # --- Load target vector, or compute from base embeddings if not in npz ---
-    if target in npz:
-        data = npz[target].astype(np.float64)
+    # --- Load target vector ---
+    if target == "z_enc":
+        z_encs = npz["z_encs"]                              # (N, C, D)
+        ctx_pad_masks = npz["ctx_pad_masks"].astype(bool)    # (N, C)
+        data = z_encs[~ctx_pad_masks].astype(np.float64)     # (N_valid, D)
+        print(f"  Flattened z_encs: {z_encs.shape} -> {data.shape} valid encounters")
+    elif target == "pred_error":
+        data = (npz["z_pred"] - npz["z_target"]).astype(np.float64)
+        print(f"  Computed pred_error = z_pred - z_target")
     else:
-        z_context = npz["z_context"]
-        z_pred    = npz["z_pred"]
-        z_target  = npz["z_target"]
-        compute_map = {
-            "delta":         lambda: (z_pred - z_context).astype(np.float64),
-            "pred_error":    lambda: (z_pred - z_target).astype(np.float64),
-            "observed_traj": lambda: (z_target - z_context).astype(np.float64),
-        }
-        data = compute_map[target]()
-        print(f"  (computed {target} from last embeddings.npz - not stored)")
+        data = npz[target].astype(np.float64)
 
     N, D = data.shape
     print(f"  N={N} samples, D={D} embed_dim")

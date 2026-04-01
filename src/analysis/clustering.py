@@ -1,15 +1,13 @@
 """
-Analysis functions for Connects the model's geometric structure back 
-to clinical concepts using:
-- LASSO on PCA axes
-   - regress metadata against PC scores, assuming geometry is organised 
-     along linear axes.
-   - Unexplained variance = 1 - R^2.
-- UMAP + HDBSCAN cluster "enrichment"
-    - cluster UMAP embedding with HDBSCAN, compute enrichment of metadata 
-      features per cluster.
-    - Clusters with no clear enrichment are sections to analyze further 
-      (why did the model make this cluster?).
+Metadata enrichment analysis of JEPA latents.
+
+Connects the model's geometric structure back to clinical concepts:
+- LASSO on PCA axes: regress metadata against PC scores, assuming geometry
+  is organised along linear axes.  Supports both patient-level (pooled) and
+  encounter-level analysis.  Unexplained variance = 1 - R^2.
+- UMAP + HDBSCAN cluster enrichment: cluster the embedding with HDBSCAN,
+  compute enrichment of metadata features per cluster.  Clusters with no
+  clear enrichment are sections to analyze further.
 """
 
 import warnings
@@ -20,8 +18,14 @@ from sklearn.preprocessing import StandardScaler
 from hdbscan import HDBSCAN
 
 from src.utils.seed import SEED, get_rng
-from src.mimic.metadata import is_binary  # noqa: F401
 rng  = get_rng()
+
+
+
+def _is_binary(col: np.ndarray) -> bool:
+    """Check if a column contains only 0s and 1s."""
+    unique = np.unique(col[~np.isnan(col)])
+    return len(unique) <= 2 and all(v in (0.0, 1.0) for v in unique)
 
 
 def _lasso_stability_selection(
@@ -105,7 +109,7 @@ def broadcast_to_samples(
 
 
 # =============================================================================
-# Tier A: LASSO Bridge
+# LASSO Bridge
 # =============================================================================
 
 def run_lasso_enrichment(
@@ -114,7 +118,32 @@ def run_lasso_enrichment(
     feature_names: list,
     top_k: int = 10,
     n_bootstrap: int = 100,
+    encounter_level: bool = False,
 ) -> dict:
+    """
+    LASSO regression of metadata features against top-k PC scores.
+
+    When encounter_level=False (default), expects patient-level PC
+    projections (pooled) and patient-level metadata - answers "do PC axes
+    align with patient-level summary statistics?"
+
+    When encounter_level=True, expects per-encounter PC projections and
+    per-encounter metadata - answers "do PC axes of the encoder's encounter
+    representations align with encounter-level clinical features?"
+
+    The difference in R^2 between encounter-level and patient-level runs
+    is itself a finding: it indicates whether the encoder organizes space
+    by encounter content or by patient identity.
+
+    Parameters
+    ----------
+    pc_projections  : (N, >=top_k) PC score matrix
+    metadata        : (N, n_features) metadata at matching granularity
+    feature_names   : list of n_features feature names
+    top_k           : number of PC axes to regress
+    n_bootstrap     : bootstrap iterations for stability selection
+    encounter_level : if True, tag results as encounter-level analysis
+    """
     n_patients, k_avail = pc_projections.shape
     n_features = metadata.shape[1]
     k = min(top_k, k_avail)
@@ -179,7 +208,10 @@ def run_lasso_enrichment(
             if abs(coefs[i]) > 1e-10
         ]
 
+    granularity = "encounter" if encounter_level else "patient"
+
     return {
+        "granularity":                  granularity,
         "n_patients":                   n_patients,
         "n_features":                   n_features,
         "top_k":                        k,
@@ -207,9 +239,8 @@ def run_cluster_enrichment(
     min_cluster_size: int = 10,
 ) -> dict:
     """
-    Tier B - UMAP + HDBSCAN cluster enrichment analysis.
-    https://hdbscan.readthedocs.io/en/latest/index.html
-    
+    UMAP + HDBSCAN cluster enrichment analysis.
+
     Clusters the UMAP embedding with HDBSCAN, then computes enrichment of
     metadata features in each cluster relative to the population baseline.
 
@@ -262,7 +293,7 @@ def run_cluster_enrichment(
     pop_std    = pop_data.std(axis=0)
     pop_std[pop_std < 1e-10] = 1e-10
 
-    # Enrichment z-scores  (n_clusters × n_features)
+    # Enrichment z-scores  (n_clusters x n_features)
     enrichment_matrix = np.zeros((n_clusters, n_features))
     cluster_sizes     = {}
 
@@ -274,7 +305,7 @@ def run_cluster_enrichment(
         cluster_sizes[int(cid)] = int(mask.sum())
 
     # Cluster profiles: top enriched/depleted features per cluster
-    binary_mask = np.array([is_binary(metadata[:, j])
+    binary_mask = np.array([_is_binary(metadata[:, j])
                             for j in range(n_features)])
     cluster_profiles = {}
 

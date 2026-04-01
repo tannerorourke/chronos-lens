@@ -13,7 +13,7 @@ Decoder : Linear(n_features -> embed_dim) - decoder rows ARE the dictionary
 
 Loss
 ----
-||Delta - Delta_reconstructed||^2 (reconstruction MSE)
+||x - x_hat||^2 (reconstruction MSE)
 """
 
 import torch

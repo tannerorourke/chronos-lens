@@ -179,15 +179,28 @@ DRUG_CLASSES = {
     ],
 }
 
+
 # =============================================================================
 # Psychiatric drug class names
-# =============================================================================
 _PSYCH_CLASSES: frozenset[str] = frozenset({
     "reversal", "ssri", "snri", "antidepressant_other", "tca", "maoi",
     "anxiolytic", "benzodiazepine",
     "antipsychotic_typical", "antipsychotic_atypical",
     "mood_stabilizer", "adhd", "mat", "smoking_cessation", "opioid", "sleep"
 })
+
+# =============================================================================
+# Flat set of all psychiatric medication names (lowercased)
+_PSYCH_MEDS_FLAT: set[str] = set()
+for _cls in _PSYCH_CLASSES:
+    if _cls in DRUG_CLASSES:
+        _PSYCH_MEDS_FLAT.update(m.lower() for m in DRUG_CLASSES[_cls])
+
+# =============================================================================
+ESCALATION_CRITERIA = [
+    "new_subcategory", "severity_increase", "new_specifier",
+    "f32_to_f33", "med_initiation", "new_drug_class",
+]
 
 # =============================================================================
 # ICD-10 F-Code Dictionary, by severity
@@ -203,7 +216,6 @@ _PSYCH_CLASSES: frozenset[str] = frozenset({
 # Severity is assigned when ICD-10 explicitly uses the subcategory digit to
 # encode clinical severity (mild / moderate / severe / with psychotic features).
 # Codes that differ only in episode type, specifier, or aetiology get either 0 or -1.
-# =============================================================================
 ICD10_F_CODES = {
     # ------------------------------------------------------------------ #
     # F01-F09  Organic, including symptomatic, mental disorders           #
@@ -909,7 +921,6 @@ ICD10_F_CODES = {
 
 # =============================================================================
 # Set of codes indicating remission, which should be ignored when determining severity
-# =============================================================================
 _REMISSION_CODES: frozenset[str] = frozenset({
     "F30.3", "F30.4",
     "F31.70", "F31.71", "F31.72", "F31.73", "F31.74",

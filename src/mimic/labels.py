@@ -38,74 +38,19 @@ Does NOT fire for:
 
 import numpy as np
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import timedelta
 
-from src.utils.constants import (
-    ICD10_F_CODES, DRUG_CLASSES, _PSYCH_CLASSES, _REMISSION_CODES
-)
-
-# =============================================================================
-# Module constants (built once at import)
-# =============================================================================
-
-def _build_severity_lookup() -> dict[str, int]:
-    """Flatten nested ICD10_F_CODES into {leaf_code: severity}."""
-    lookup: dict[str, int] = {}
-    def _walk(d: dict) -> None:
-        for k, v in d.items():
-            if isinstance(v, dict):
-                _walk(v)
-            else:
-                lookup[k] = v
-                
-    _walk(ICD10_F_CODES)
-    return lookup
-
-_SEVERITY: dict[str, int] = _build_severity_lookup()
-
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-def _parse_dt(t) -> datetime | None:
-    """Parse a datetime from a Timestamp, datetime, or ISO string."""
-    if t is None:
-        return None
-    if isinstance(t, datetime):
-        return t
-    if hasattr(t, "to_pydatetime"):
-        return t.to_pydatetime()
-    try:
-        return datetime.fromisoformat(str(t))
-    except (ValueError, TypeError):
-        return None
-
-
-def _has_label_dx(enc: dict, label_prefix: str) -> bool:
-    """True if any icd_codes entry starts with label_prefix (case-insensitive)."""
-    prefix = label_prefix.upper()
-    return any(str(c).upper().startswith(prefix) for c in enc.get("icd_codes", []))
-
-
-def _get_f_codes_full(enc: dict) -> list[str]:
-    """Full uppercased F-codes from an encounter (prefers icd_codes_full)."""
-    raw = enc.get("icd_codes_full") or enc.get("icd_codes", [])
-    return [c.upper() for c in raw if str(c).upper().startswith("F")]
-
-
-def _get_psych_classes(meds: list[str]) -> set[str]:
-    """Psychiatric drug class names present in the medication list."""
-    joined = " ".join(meds).lower()
-    return {
-        cls
-        for cls in _PSYCH_CLASSES
-        if any(drug in joined for drug in DRUG_CLASSES[cls])
-    }
+from src.utils.constants import SEVERITY_LOOKUP, REMISSION_CODES
+from src.mimic.helper import (
+    parse_dt,
+    encounter_has_prefix,
+    get_encounter_f_codes,
+    get_psych_drug_classes)
     
 # =============================================================================
 # Readmission
 # =============================================================================
+
 def _compute_readmission_label(
     encs: list[dict], readmission_days: int, label_prefix: str
 ) -> int:
@@ -115,15 +60,15 @@ def _compute_readmission_label(
     """
     n = len(encs)
     for i in range(n - 1):
-        dt_i = _parse_dt(encs[i].get("dischtime"))
+        dt_i = parse_dt(encs[i].get("dischtime"))
         if dt_i is None:
             continue
         window_end = dt_i + timedelta(days=readmission_days)
         for j in range(i + 1, n):
-            dt_j = _parse_dt(encs[j].get("admittime"))
+            dt_j = parse_dt(encs[j].get("admittime"))
             if dt_j is None or dt_j > window_end:
                 break
-            if _has_label_dx(encs[j], label_prefix):
+            if encounter_has_prefix(encs[j], label_prefix):
                 return 1
     return 0
 
@@ -154,9 +99,9 @@ def _check_escalation(
             criteria.add("f32_to_f33")
 
         if not is_new_subcat and code not in prior_f_codes:
-            if code in _REMISSION_CODES:
+            if code in REMISSION_CODES:
                 continue
-            sev = _SEVERITY.get(code)
+            sev = SEVERITY_LOOKUP.get(code)
             prior_max = prior_subcats[subcat]
             if sev is None or sev == 0:
                 pass
@@ -166,7 +111,7 @@ def _check_escalation(
                 if sev > prior_max:
                     criteria.add("severity_increase")
 
-    enc_classes = _get_psych_classes(meds)
+    enc_classes = get_psych_drug_classes(meds)
     if enc_classes and not has_prior_psych_meds:
         criteria.add("med_initiation")
     if has_prior_psych_meds and (enc_classes - prior_drug_classes):
@@ -188,11 +133,11 @@ def _update_state(
         subcat = code[:3]
         if subcat not in prior_subcats:
             prior_subcats[subcat] = 0
-        sev = _SEVERITY.get(code)
+        sev = SEVERITY_LOOKUP.get(code)
         if sev is not None and sev > 0:
             prior_subcats[subcat] = max(prior_subcats[subcat], sev)
 
-    enc_classes = _get_psych_classes(meds)
+    enc_classes = get_psych_drug_classes(meds)
     prior_drug_classes.update(enc_classes)
     return bool(enc_classes)
 
@@ -266,7 +211,7 @@ def compute_labels(
 
         # ---- 30-day readmission label ----------------------------------------
         if COMPUTE_READMISSION_LABEL:
-            patient["label_30d"] = _compute_readmission_label(encs, 60, label_prefix)
+            patient["label_30d"] = _compute_readmission_label(encs, 30, label_prefix)
             if patient["label_30d"]:
                 n_pos_30d += 1
 
@@ -282,7 +227,7 @@ def compute_labels(
             has_prior_psych_meds: bool = False
 
             for i, enc in enumerate(encs):
-                f_codes = _get_f_codes_full(enc)
+                f_codes = get_encounter_f_codes(enc, full=True)
                 meds    = [m.lower() for m in enc.get("meds", [])]
 
                 if i == 0:
@@ -329,27 +274,27 @@ def compute_labels(
     n_total = len(sequences)
     n_pos_esc = sum(1 for s in sequences if s.get("label_escalation") == 1)
 
-    print(f"Labels Computed")
-    print(f"  Patients: {n_total:,}")
+    print(f"-- Label Summary --")
+    print(f"    Patients: {n_total:,}")
     
     if COMPUTE_READMISSION_LABEL:
-        print(f"  {'label_30d':<28s} {n_pos_30d:,} ({100 * n_pos_30d / n_total:.1f}%)")
+        print(f"    {'label_30d':<28s} {n_pos_30d:,} ({100 * n_pos_30d / n_total:.1f}% pos)")
     
     if COMPUTE_ESCALATION_LABEL:
-        print(f"  {'label_escalation':<28s} {n_pos_esc:,} ({100 * n_pos_esc / n_total:.1f}%)")
+        print(f"    {'label_escalation':<28s} {n_pos_esc:,} ({100 * n_pos_esc / n_total:.1f}% pos)")
         if criteria_counter:
-            print(f"  - Criterion fire rates (patient-level, may overlap):")
+            print(f"    - Criterion fire rates (patient-level, may overlap):")
             for criterion, count in sorted(criteria_counter.items(), key=lambda x: -x[1]):
                 print(f"      {criterion:<30s} {count:,} ({100 * count / n_total:.1f}%)")
         if first_esc_positions:
             fep = np.array(first_esc_positions)
-            print(f"\n  First-escalation encounter index:")
-            print(f"    mean={fep.mean():.1f}, median={np.median(fep):.0f}, "
+            print(f"\n    First-escalation encounter index:")
+            print(f"      mean={fep.mean():.1f}, median={np.median(fep):.0f}, "
                   f"min={fep.min()}, max={fep.max()}")
     
     if COMPUTE_NEXT_ENC_LABEL and chapters_per_enc:
         cpe = np.array(chapters_per_enc)
-        print(f"  next_enc_icd_blocks (transitions only, last enc excluded):")
+        print(f"    next_enc_icd_blocks (transitions only, last enc excluded):")
         print(f"      Unique Chapters : {len(chapter_counter)}")
         print(f"      Chapters/Enc    : mean={cpe.mean():.2f}, median={np.median(cpe):.0f}, "
                                         f"min={cpe.min()}, max={cpe.max()}")

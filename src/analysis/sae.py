@@ -20,7 +20,8 @@ import torch
 
 from src.models.sae import SparseAutoencoder
 from src.utils.io import load_sequences_dict
-
+from src.utils.arrays import odds_ratio
+from src.mimic.helper import parse_dt
 
 from src.utils.seed import SEED
 
@@ -58,13 +59,6 @@ def extract_sae_activations(
 # =========================================================================
 # feature inspection
 # =========================================================================
-
-def _odds_ratio(freq_group: float, freq_pop: float) -> float:
-    """Compute odds ratio, clamped to avoid division by zero."""
-    p_g = np.clip(freq_group, 1e-10, 1 - 1e-10)
-    p_p = np.clip(freq_pop, 1e-10, 1 - 1e-10)
-    return (p_g / (1 - p_g)) / (p_p / (1 - p_p))
-
 
 def inspect_sae_features(
     sae_activations: np.ndarray,
@@ -166,16 +160,8 @@ def inspect_sae_features(
             np.mean([len(enc.get("meds", [])) for enc in encs]) if encs else 0
         )
         if len(encs) >= 2:
-            from datetime import datetime
-            times = []
-            for enc in encs:
-                t = enc.get("admittime")
-                if isinstance(t, str):
-                    try:
-                        times.append(datetime.fromisoformat(t))
-                    except (ValueError, TypeError):
-                        pass
-            times.sort()
+            times = [parse_dt(enc.get("admittime")) for enc in encs]
+            times = sorted(t for t in times if t is not None)
             if len(times) >= 2:
                 gaps = [(times[i+1] - times[i]).total_seconds() / 86400
                         for i in range(len(times) - 1)]
@@ -212,7 +198,7 @@ def inspect_sae_features(
         for code, count in top_icd_counts.items():
             freq_group = count / len(top_indices)
             freq_pop = pop_icd_freq.get(code, 1e-10)
-            odds = _odds_ratio(freq_group, freq_pop)
+            odds = odds_ratio(freq_group, freq_pop)
             icd_enrichment.append({"code": code, "odds_ratio": round(odds, 2),
                                    "freq_group": round(freq_group, 3),
                                    "freq_pop": round(freq_pop, 3)})
@@ -228,7 +214,7 @@ def inspect_sae_features(
         for med, count in top_med_counts.items():
             freq_group = count / len(top_indices)
             freq_pop = pop_med_freq.get(med, 1e-10)
-            odds = _odds_ratio(freq_group, freq_pop)
+            odds = odds_ratio(freq_group, freq_pop)
             med_enrichment.append({"med": med, "odds_ratio": round(odds, 2),
                                    "freq_group": round(freq_group, 3),
                                    "freq_pop": round(freq_pop, 3)})
@@ -236,7 +222,6 @@ def inspect_sae_features(
         top_meds = med_enrichment[:top_n_enriched]
 
         # Temporal stats for top activators
-        from datetime import datetime as dt
         top_intervals = []
         top_n_enc = []
         top_med_burd = []
@@ -250,15 +235,8 @@ def inspect_sae_features(
             top_med_burd.append(
                 np.mean([len(enc.get("meds", [])) for enc in encs]) if encs else 0
             )
-            times = []
-            for enc in encs:
-                t = enc.get("admittime")
-                if isinstance(t, str):
-                    try:
-                        times.append(dt.fromisoformat(t))
-                    except (ValueError, TypeError):
-                        pass
-            times.sort()
+            times = [parse_dt(enc.get("admittime")) for enc in encs]
+            times = sorted(t for t in times if t is not None)
             if len(times) >= 2:
                 gaps = [(times[i+1] - times[i]).total_seconds() / 86400
                         for i in range(len(times) - 1)]

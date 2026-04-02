@@ -1,142 +1,103 @@
 import json
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 
 from src.utils.io import PARQUET_DIR
+from src.utils.constants import DRUG_CLASSES, PSYCH_CLASSES
 
 
-def save_dataset(
-    sequences: list[dict],
-    out_dir: Path,
-):
+# =============================================================================
+# Clinical data helpers (labels.py, metadata.py, baselines.py, sae.py)
+# =============================================================================
+
+def parse_dt(t) -> datetime | None:
+    """Parse datetime from None, datetime, pandas Timestamp, or ISO string."""
+    if t is None:
+        return None
+    if isinstance(t, datetime):
+        return t
+    if hasattr(t, "to_pydatetime"):
+        return t.to_pydatetime()
+    try:
+        return datetime.fromisoformat(str(t))
+    except (ValueError, TypeError):
+        return None
+
+
+def get_patient_icds(patient: dict) -> list[str]:
+    """All ICD codes across all encounters for a patient. Uppercased, deduplicated."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for enc in patient.get("encounters", []):
+        for c in enc.get("icd_codes", []):
+            s = str(c).upper()
+            if s not in seen:
+                seen.add(s)
+                result.append(s)
+    return result
+
+
+def get_patient_meds(patient: dict) -> list[str]:
+    """All medications across all encounters for a patient. Lowercased, deduplicated."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for enc in patient.get("encounters", []):
+        for m in enc.get("meds", []):
+            s = str(m).lower()
+            if s not in seen:
+                seen.add(s)
+                result.append(s)
+    return result
+
+
+def get_encounter_f_codes(enc: dict, full: bool = False) -> list[str]:
+    """F-codes from a single encounter. Uppercased.
+
+    If full=True, uses icd_codes_full (for severity lookup). Otherwise uses icd_codes.
     """
-    Save sequences and stats:
-      DATA_DIR/
-        sequences.jsonl    - one JSON object per patient
-        dataset_stats.json - cohort stats, schema, label distribution
-    """
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if full:
+        raw = enc.get("icd_codes_full") or enc.get("icd_codes", [])
+    else:
+        raw = enc.get("icd_codes", [])
+    return [str(c).upper() for c in raw if str(c).upper().startswith("F")]
 
-    # --- JSONL ---
-    jsonl_path = out_dir / "sequences.jsonl"
-    with open(jsonl_path, "w") as f:
-        for seq in sequences:
-            f.write(json.dumps({
-                "subject_id": seq["subject_id"],
-                "label_30d": seq.get("label_30d"),
-                "label_escalation": seq.get("label_escalation"),
-                "label_escalation_per_enc": seq.get("label_escalation_per_enc"),
-                "escalation_criteria_fired": seq.get("escalation_criteria_fired"),
-                "next_enc_icd_blocks": seq.get("next_enc_icd_blocks"),
-                "encounters": [
-                    {
-                        "hadm_id": enc["hadm_id"],
-                        "admittime": enc["admittime"].isoformat(),
-                        "dischtime": enc["dischtime"].isoformat(),
-                        "icd_codes": enc["icd_codes"],
-                        "meds": enc["meds"],
-                    }
-                    for enc in seq["encounters"]
-                ],
-            }) + "\n")
 
-    # --- dataset_stats.json ---
-    enc_counts = [len(s["encounters"]) for s in sequences]
-    n_pos = sum(1 for s in sequences if s.get("label_30d") == 1)
-    all_icd = set()
-    all_meds = set()
-    for s in sequences:
-        for enc in s["encounters"]:
-            all_icd.update(enc["icd_codes"])
-            all_meds.update(enc["meds"])
+def encounter_has_prefix(enc: dict, prefix: str) -> bool:
+    """True if any ICD code in the encounter starts with prefix (case-insensitive)."""
+    prefix_upper = prefix.upper()
+    return any(str(c).upper().startswith(prefix_upper) for c in enc.get("icd_codes", []))
 
-    stats = {
-        "n_patients": len(sequences),
-        "n_positive_30d": n_pos,
-        "n_negative_30d": len(sequences) - n_pos,
-        "positive_rate_30d": round(n_pos / len(sequences), 4),
-        "encounters_per_patient": {
-            "mean": round(np.mean(enc_counts), 2),
-            "median": int(np.median(enc_counts)),
-            "min": int(min(enc_counts)),
-            "max": int(max(enc_counts)),
-        },
-        "vocab_size_icd": len(all_icd),
-        "vocab_size_meds": len(all_meds),
-        "schema": {
-            "subject_id": "str",
-            "label_30d": "int",
-            "label_escalation": "int",
-            "label_escalation_per_enc": "list[int]",
-            "escalation_criteria_fired": "list[str]",
-            "next_enc_icd_blocks": "list[list[str]]",
-            "encounters[].hadm_id": "int",
-            "encounters[].admittime": "ISO datetime string",
-            "encounters[].dischtime": "ISO datetime string",
-            "encounters[].icd_codes": "list[str]",
-            "encounters[].meds": "list[str]",
-        },
+
+def has_drug_in_class(meds: list[str], drug_list: list[str]) -> bool:
+    """True if any medication name contains a drug substring from drug_list."""
+    joined = " ".join(meds).lower()
+    return any(d in joined for d in drug_list)
+
+
+def get_psych_drug_classes(meds: list[str]) -> set[str]:
+    """Return set of psychiatric drug class names present in the medication list."""
+    joined = " ".join(meds).lower()
+    return {
+        psy_cls
+        for psy_cls in PSYCH_CLASSES
+        if any(drug in joined for drug in DRUG_CLASSES[psy_cls])
     }
 
-    meta_path = out_dir / "dataset_stats.json"
-    with open(meta_path, "w") as f:
-        json.dump(stats, f, indent=2)
 
-    print(f"\nDataset saved to {out_dir}/")
-    print(f"  {jsonl_path.name:20s} {jsonl_path.stat().st_size / 1024:.0f} KB")
-    print(f"  {meta_path.name:20s} {meta_path.stat().st_size / 1024:.0f} KB (stats & schema)")
+# =============================================================================
+# Sequence data
+# =============================================================================
 
-
-def save_parquets(admissions, patients, diagnoses, prescriptions) -> None:
-    print(f"[save_parquets] Saving parquet's to cache...")
-    
-    tables = {
-        "admissions":    admissions,
-        "patients":      patients,
-        "diagnoses":     diagnoses,
-        "prescriptions": prescriptions,
-    }
-    
-    PARQUET_DIR.mkdir(parents=True, exist_ok=True)
-    for name, df in tables.items():
-        path = PARQUET_DIR / f"{name}.parquet"
-        df.to_parquet(path, index=False)
-        print(f"  {name:20s} {len(df):>8,} rows -> {path.name}")
-        
-    print(f"-- parquet's saved.")
-
-
-def load_parquets(data_dir: Path) -> tuple:
-    print(f"\n[load_parquets] Loading parquets from DATA_DIR...")
-
-    file_map = {
-        "admissions":    "admissions.parquet",
-        "patients":      "patients.parquet",
-        "diagnoses":     "diagnoses.parquet",
-        "prescriptions": "prescriptions.parquet",
-    }
-
-    dfs = {}
-    for name, filename in file_map.items():
-        path = data_dir / filename
-        if not path.exists():
-            raise FileNotFoundError(f"Missing {path}. Expected files: {list(file_map.values())}")
-        dfs[name] = pd.read_parquet(path)
-        print(f"   {name:20s} {len(dfs[name]):>8,} rows")
-
-    return dfs["admissions"], dfs["patients"], dfs["diagnoses"], dfs["prescriptions"]
-
-
-
-def validate_sequences(sequences: list[dict]):
-    print("\nVALIDATING SEQUENCES..")
+def validate_sequences(sequences: list[dict], min_encounters: int):
+    print("\nValidating sequences..")
 
     assert len(sequences) > 0, "FAIL: no sequences produced"
 
     min_enc = min(len(s["encounters"]) for s in sequences)
-    assert min_enc >= 3, f"FAIL: found sequence with {min_enc} encounters"
+    assert min_enc >= min_encounters, f"FAIL: found sequence with {min_enc} encounters"
 
     for seq in sequences:
         times = [enc["admittime"] for enc in seq["encounters"]]
@@ -173,3 +134,4 @@ def validate_sequences(sequences: list[dict]):
                 assert med == med.lower().strip(), f"FAIL: med '{med}' not normalized"
     
     print(f"  {len(sequences)} sequences validated")
+    print(f"{'=' * 60}")

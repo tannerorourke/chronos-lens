@@ -21,6 +21,7 @@ from src.models.jepa_stopgrad import JEPAStopGrad
 from src.models.jepa_ema import JEPA_EMA
 from src.analysis.eval_tasks import evaluate_binary_probe
 from src.analysis.metrics import compute_all_metrics
+from src.utils.arrays import pool_to_patients, flatten_valid_encounters
 
 
 def extract_layer_representations(
@@ -99,32 +100,6 @@ def extract_layer_representations(
 
 
 # =============================================================================
-# Patient-level pooling
-# =============================================================================
-
-def _pool_to_patients(
-    embeddings: np.ndarray,
-    subject_ids: np.ndarray,
-    labels: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    unique_ids, inverse = np.unique(subject_ids, return_inverse=True)
-    n_patients = len(unique_ids)
-    D = embeddings.shape[1]
-
-    patient_embs = np.zeros((n_patients, D), dtype=embeddings.dtype)
-    counts = np.zeros(n_patients, dtype=np.int64)
-    patient_labels = np.empty(n_patients, dtype=labels.dtype)
-
-    for i, inv in enumerate(inverse):
-        patient_embs[inv] += embeddings[i]
-        counts[inv] += 1
-        patient_labels[inv] = labels[i]
-
-    patient_embs /= counts[:, None]
-    return patient_embs, patient_labels
-
-
-# =============================================================================
 # Generic vector probing
 # =============================================================================
 
@@ -156,7 +131,10 @@ def probe_vectors(
     results = {}
     for name, emb in vectors.items():
         if pool_to_patient:
-            emb_p, labels_p = _pool_to_patients(emb, subject_ids, labels)
+            emb_p, unique_ids = pool_to_patients(emb, subject_ids)
+            _, first_idx = np.unique(
+                np.asarray(subject_ids, dtype=str), return_index=True)
+            labels_p = labels[first_idx]
             results[name] = evaluate_binary_probe(
                 emb_p, labels_p, n_splits=n_splits, seed=seed)
         else:
@@ -197,16 +175,11 @@ def probe_encounter_level(
     dict with fold-level and mean/std metrics matching the structure of
     evaluate_binary_probe, plus n_encounters and n_patients.
     """
-    N, C, D = z_encs.shape
     valid_mask = ~ctx_pad_masks  # (N, C) True=valid
 
     # Flatten valid encounters
-    X = z_encs[valid_mask]          # (N_valid, D)
+    X, groups, _ = flatten_valid_encounters(z_encs, ctx_pad_masks, subject_ids)
     y = enc_labels[valid_mask]      # (N_valid,)
-
-    # Expand subject_ids to (N, C) then flatten with same mask
-    sid_expanded = np.repeat(subject_ids[:, np.newaxis], C, axis=1)
-    groups = sid_expanded[valid_mask]  # (N_valid,)
 
     gkf = GroupKFold(n_splits=n_splits)
 

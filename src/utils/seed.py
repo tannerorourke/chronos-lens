@@ -46,7 +46,10 @@ def load_exp_seed(exp_dir: Path) -> int:
     cfg_path = Path(exp_dir) / "config.yaml"
     with open(cfg_path) as f:
         params = yaml.safe_load(f)
-    return params.get("meta", {}).get("seed", DEFAULT_SEED)
+    seed = params.get("meta", {}).get("seed", -1)
+    if seed < 0:
+        raise ValueError(f"No seed found in {cfg_path}")
+    return seed
 
 
 def get_rng(seed: int | None = None) -> np.random.Generator:

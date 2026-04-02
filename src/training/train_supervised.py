@@ -38,21 +38,20 @@ def save_supervised_embeddings(
     epoch: int,
     save_dir: Path,
 ) -> None:
-    """Save supervised encoder outputs in JEPA .npz format.
-
-    z_context is saved as z_encs (N, 1, D) - the pooled context vector unsqueezed
-    to match the JEPA per-encounter layout. z_pred and z_target are zeros.
+    """Save supervised encoder outputs (z_enc_pooled -> (N, 1, D)),
+    pooled context vector unsqueezed to match the JEPA per-encounter 
+    layout. z_pred and z_target are zeros.
     """
-    z_context   = np.concatenate(all_z_c) # (N, D)
+    z_enc_pooled   = np.concatenate(all_z_c) # (N, D)
     subject_ids = np.array(all_sids, dtype=str)
-    N           = z_context.shape[0]
+    N           = z_enc_pooled.shape[0]
 
     file = (save_dir / f"embeddings_{epoch}").with_suffix(".npz")
     np.savez(
         file,
-        z_encs=z_context[:, np.newaxis, :], # (N, 1, D)
-        z_pred=np.zeros_like(z_context),
-        z_target=np.zeros_like(z_context),
+        z_encs=z_enc_pooled[:, np.newaxis, :], # (N, 1, D)
+        z_pred=np.zeros_like(z_enc_pooled),
+        z_target=np.zeros_like(z_enc_pooled),
         subject_ids=subject_ids,
         mask_pos=np.full(N, -1, dtype=np.int64),
     )
@@ -154,8 +153,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             }
 
             def forward_unto_dawn():
-                z_context, logits = model(batch_dev)
-                z_c.append(z_context.detach().cpu().numpy())
+                z_enc_pooled, logits = model(batch_dev)
+                z_c.append(z_enc_pooled.detach().cpu().numpy())
                 sids.extend(batch["subject_ids"])
                 
                 loss = criterion(logits, batch_dev["labels"].float())

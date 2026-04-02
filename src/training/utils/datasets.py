@@ -12,6 +12,7 @@ def build_vocab(
     patients: list[dict], 
     pad_idx: int, 
     dir: Path,
+    save: bool = True
 ) -> dict[str, int]:
     print(f"[build_vocab] building vocab ([PAD]: {pad_idx})...")
     tokens: set[str] = set()
@@ -23,10 +24,11 @@ def build_vocab(
     for i, tok in enumerate(sorted(tokens), start=1):
         vocab[tok] = i
 
-    with open(dir / "vocab.json", "w", encoding="utf-8") as fh:
-        json.dump(vocab, fh, indent=2)
+    if save:
+        with open(dir / "vocab.json", "w", encoding="utf-8") as fh:
+            json.dump(vocab, fh, indent=2)
 
-    print(f"   len: {len(vocab)}")
+    print(f"   vocab len: {len(vocab)} tokens")
     return vocab
 
 
@@ -54,12 +56,12 @@ def encode_encounter(enc: dict, vocab: dict[str, int], PAD_IDX: int,
 class MimicDataset(Dataset):
     """One sample per (patient, masked-encounter-index).
 
-    For a patient with N encounters, N samples are created.  Each sample
-    uses N-1 encounters as context and 1 as the prediction target.
-    Patients with fewer than 2 encounters are skipped.
+    For a patient with N encounters, N samples are created. Each 
+    sample uses N-1 encounters as context and 1 as the prediction 
+    target. Patients with fewer than 2 encounters are skipped.
     
-    Supports ICD-code-only and medication-only modality plus evaluation for
-    30/90d admission prediction and next block prediction
+    Supports ICD-code-only and medication-only modality plus evaluation 
+    for 30d admission prediction and next block prediction.
     """
 
     def __init__(

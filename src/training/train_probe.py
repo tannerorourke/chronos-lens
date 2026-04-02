@@ -1,11 +1,11 @@
 """
 Linear probing - train logistic regression probes on transformer
-layer representations to localize the readmission signal.
+layer representations to localize prediction signal.
 
 Public API
 ----------
   train_linear_probe(X, y, cv, seed)
-      -> per-fold AUC, accuracy, F1; mean +/- std
+      -> per-fold AUC, accuracy, F1, mean +/- std
 
   run_probing_sweep(layer_representations)
       -> probe at every layer + final output, full results dict
@@ -32,9 +32,6 @@ def train_linear_probe(
     seed: int = SEED,
 ) -> dict:
     """Train a logistic regression probe with stratified cross-validation.
-
-    Uses class_weight='balanced' to handle label imbalance (~16% positive).
-    StandardScaler is fit independently per fold to avoid leakage.
 
     Parameters
     ----------
@@ -178,7 +175,7 @@ def run_probing_sweep(
         localization = (
             f"Substantial signal gain from layer 0 (AUC={early_auc:.3f}) "
             f"to final (AUC={final_auc:.3f}), delta={delta:.3f}. "
-            f"Transformer attention is actively building the readmission "
+            f"Transformer attention is actively building prediction "
             f"signal through its layers."
         )
 

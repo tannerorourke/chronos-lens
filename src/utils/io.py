@@ -20,8 +20,8 @@ EXPERIMENTS_DIR = ROOT / "experiments"
 # JSON / Serialization
 # ============================================================================
 
-def _to_json(obj):
-    """Recursively convert numpy types for JSON serialisation."""
+def _serialize(obj):
+    """Recursively convert numpy types for JSON serialisation"""
     if isinstance(obj, np.ndarray):
         return obj.tolist()
     if isinstance(obj, (np.integer,)):
@@ -34,9 +34,9 @@ def _to_json(obj):
     if isinstance(obj, (np.bool_,)):
         return bool(obj)
     if isinstance(obj, dict):
-        return {str(k): _to_json(v) for k, v in obj.items()}
+        return {str(k): _serialize(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [_to_json(v) for v in obj]
+        return [_serialize(v) for v in obj]
     if isinstance(obj, Path):
         return str(obj)
     return obj
@@ -45,13 +45,13 @@ def save_json(data, path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
-        json.dump(_to_json(data), f, indent=2, default=str)
-    print(f"    Saved -> {path.name}")
+        json.dump(_serialize(data), f, indent=2, default=str)
+    print(f"    Saved: {path.name}")
     
     
 def load_json(p: Path):
     if not p.exists():
-        print(f"  [skip] {p.name} not found")
+        print(f"    WARNING: {p.name} not found")
         return None
     with open(p) as f:
         return json.load(f)
@@ -106,7 +106,7 @@ def save_embedding_vecs(
         if "ctx_pad_masks" in records:
             save_dict["ctx_pad_masks"] = records["ctx_pad_masks"]
         np.savez(file, **save_dict)  # type: ignore[arg-type]
-        print(f"   Saved embeddings -> {file.name} (epoch {epoch})")
+        print(f"Saved embeddings -> {file.name} (epoch {epoch})")
 
     return records
 
@@ -196,16 +196,16 @@ def save_metadata(
     patient_ids: np.ndarray,
     path: Path = None,
 ) -> None:
-    d = Path(path) if path else DATA_DIR
-    d.mkdir(parents=True, exist_ok=True)
+    p = Path(path) if path else DATA_DIR
+    p.mkdir(parents=True, exist_ok=True)
     
-    np.save(d / "metadata_features.npy", metadata)
-    with open(d / "metadata_feature_names.json", "w") as f:
+    np.save(p / "metadata_features.npy", metadata)
+    with open(p / "metadata_feature_names.json", "w") as f:
         json.dump(feature_names, f, indent=2)
-    with open(d / "patient_ids.json", "w") as f:
+    with open(p / "patient_ids.json", "w") as f:
         json.dump([str(pid) for pid in patient_ids], f, indent=2)
         
-    print(f"  Metadata saved -> {d}  ({metadata.shape[0]} patients x {metadata.shape[1]} features)")
+    print(f"\nMetadata saved to ../{p.parts[-2]} ({metadata.shape[0]} patients x {metadata.shape[1]} features)")
 
 # =============================================================================
 # config IO

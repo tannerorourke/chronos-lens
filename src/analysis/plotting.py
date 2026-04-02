@@ -506,7 +506,7 @@ def _s2_probe_comparison(results,
     if not probing:
         return
 
-    # Collect (label_key, vector_name) → AUROC
+    # Collect (label_key, vector_name) -> AUROC
     groups: dict[str, dict[str, tuple[float, float]]] = {}
     for label_key, vec_data in probing.items():
         for vec_name, metrics in vec_data.items():
@@ -607,7 +607,7 @@ def _s2_sae_vocab_overlap(results,
     # We have aggregate stats; render as annotated summary bar
     fig, ax = plt.subplots(figsize=(6, 4), dpi=300)
 
-    labels_bar = ["z_pred → z_target", "z_target → z_pred"]
+    labels_bar = [r"z_pred $\rightarrow$ z_target", r"z_target $\rightarrow$ z_pred"]
     fracs = [sc.get("frac_shared_a", 0), sc.get("frac_shared_b", 0)]
     means = [sc.get("mean_best_match_a", 0), sc.get("mean_best_match_b", 0)]
 
@@ -808,8 +808,8 @@ def _s3_sae_crossref_heatmap(crossref,
     fig, ax = plt.subplots(figsize=(7, 4.5), dpi=300)
 
     labels_bar = [
-        f"pred_error → z_enc\n({n_a} features)",
-        f"z_enc → pred_error\n({n_b} features)",
+        f"pred_error $\rightarrow$ z_enc\n({n_a} features)",
+        fr"z_enc $\rightarrow$ pred_error\n({n_b} features)",
     ]
     fracs = [frac_a, frac_b]
     unique_counts = [n_unique_a, n_unique_b]
@@ -1383,7 +1383,7 @@ def plot_sae_heatmap_top_features(
     ax.set_yticks(range(len(top_pe_idx)))
     ax.set_yticklabels([f"PE_F{active_pe[i]}" for i in top_pe_idx],
                         fontsize=6)
-    ax.set_xlabel("observed_traj SAE feature")
+    ax.set_xlabel("prediction_error SAE feature")
     ax.set_ylabel("pred_error SAE feature")
     ax.set_title("Cross-Target Co-Activation\n"
                     "(what real dynamics does the model mispredict?)")

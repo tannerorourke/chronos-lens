@@ -27,54 +27,13 @@ Trajectory features     (3)
 
 import argparse
 from collections import Counter
-from datetime import datetime
 from typing import Callable
 
 import numpy as np
 
 from src.utils.io import DATA_DIR, save_metadata, load_sequences
-from src.utils.constants import DRUG_CLASSES, ESCALATION_CRITERIA, ICD10_F_CODES
-
-
-# =============================================================================
-# Severity lookup (flattened from nested ICD10_F_CODES)
-# =============================================================================
-
-def _build_severity_lookup() -> dict[str, int]:
-    """Flatten nested ICD10_F_CODES into {leaf_code: severity}."""
-    lookup: dict[str, int] = {}
-    def _walk(d: dict) -> None:
-        for k, v in d.items():
-            if isinstance(v, dict):
-                _walk(v)
-            else:
-                lookup[k] = v
-    _walk(ICD10_F_CODES)
-    return lookup
-
-_SEVERITY: dict[str, int] = _build_severity_lookup()
-
-
-# =============================================================================
-# Utility
-# =============================================================================
-
-def _has_drug(meds: list, drug_list: list) -> bool:
-    """Return True if any medication name contains a drug substring."""
-    joined = " ".join(meds).lower()
-    return any(d in joined for d in drug_list)
-
-
-def _parse_admittime(t):
-    """Parse ISO datetime string to datetime object."""
-    if isinstance(t, datetime):
-        return t
-    if isinstance(t, str):
-        try:
-            return datetime.fromisoformat(t)
-        except (ValueError, TypeError):
-            return None
-    return None
+from src.utils.constants import DRUG_CLASSES, ESCALATION_CRITERIA, SEVERITY_LOOKUP
+from src.mimic.helper import parse_dt, has_drug_in_class
 
 
 def _preprocess(patient: dict) -> dict:
@@ -138,7 +97,7 @@ def _3_drug_classes(patient: dict) -> list[tuple[str, float]]:
     """Binary indicators for drug class presence."""
     all_meds = patient["all_meds"]
     return [
-        (f"has_{cls}", 1.0 if _has_drug(all_meds, drug_list) else 0.0)
+        (f"has_{cls}", 1.0 if has_drug_in_class(all_meds, drug_list) else 0.0)
         for cls, drug_list in DRUG_CLASSES.items()
     ]
 
@@ -151,7 +110,7 @@ def _4_temporal(patient: dict) -> list[tuple[str, float]]:
     encs = patient["encounters"]
     n_enc = len(encs)
 
-    times = [_parse_admittime(enc.get("admittime")) for enc in encs]
+    times = [parse_dt(enc.get("admittime")) for enc in encs]
     times = sorted(t for t in times if t is not None)
 
     if len(times) >= 2:
@@ -254,7 +213,7 @@ def _6_trajectory(patient: dict) -> list[tuple[str, float]]:
         for code in full_icds:
             code_upper = str(code).upper()
             if code_upper.startswith("F"):
-                sev = _SEVERITY.get(code_upper, 0)
+                sev = SEVERITY_LOOKUP.get(code_upper, 0)
                 if sev > 0:
                     max_sev = max(max_sev, sev)
 
@@ -362,19 +321,19 @@ def extract_metadata(
 
     # -- Summary --------------------------------------------------------------
     tier_str = " + ".join(f"{n} {name}" for name, n in tier_sizes)
-    print(f"  Patients:  {len(patient_ids)}")
-    print(f"  Features:  {len(feature_names)} ({tier_str})")
+    print(f"    Patients:  {len(patient_ids)}")
+    print(f"    Features:  {len(feature_names)} ({tier_str})")
 
     esc_col = feature_names.index("label_escalation")
     n_esc = int(metadata[:, esc_col].sum())
-    print(f"  Escalation: {n_esc} positive "
+    print(f"    Escalation: {n_esc} positive "
           f"({100 * n_esc / len(patient_ids):.1f}%)")
 
     for fname in ["n_unique_f_blocks", "f_block_growth", "max_f_severity"]:
         col = feature_names.index(fname)
         vals = metadata[:, col]
-        print(f"  {fname}: mean={vals.mean():.2f}, median={np.median(vals):.1f}")
-
+        print(f"    {fname:20s}: mean={vals.mean():.2f}, median={np.median(vals):.1f}")
+    
     return metadata, feature_names, patient_ids
 
 

@@ -57,10 +57,10 @@ class SupervisedTransformer(nn.Module):
             enc_repr = enc_repr.unsqueeze(1)
 
         # run transformer encoder (B, E, D) to (B, D)
-        z_context = self.encoder(enc_repr, key_padding_mask=pad_mask) 
+        z_enc_pooled = self.encoder(enc_repr, key_padding_mask=pad_mask) 
 
-        logits = self.classifier(z_context).squeeze(-1)
-        return z_context, logits
+        logits = self.classifier(z_enc_pooled).squeeze(-1)
+        return z_enc_pooled, logits
 
     @property
     def transformer_layers(self):

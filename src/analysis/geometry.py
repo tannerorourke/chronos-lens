@@ -145,17 +145,7 @@ def fit_phate(
 # Divergent pairs analysis
 # =============================================================================
 
-# --- Utilities ---
-def cosine_sim_matrix(X: np.ndarray) -> np.ndarray:
-    """(N, N) pairwise cosine similarity. Zero-norm rows -> zero similarity."""
-    norms = np.linalg.norm(X, axis=1, keepdims=True)
-    norms = np.where(norms < 1e-10, 1e-10, norms)
-    Xn    = X / norms
-    return Xn @ Xn.T
-
-def cosine_dist_matrix(X: np.ndarray) -> np.ndarray:
-    """(N, N) pairwise cosine distance  (= 1 - cosine_similarity)."""
-    return 1.0 - cosine_sim_matrix(X)
+from src.utils.arrays import cosine_sim_matrix, cosine_dist_matrix
 
 # -----------------
 
@@ -173,7 +163,7 @@ def find_divergent_pairs(
 
     Parameters
     ----------
-    context_sims : (N, N) cosine similarity matrix (e.g. z_context or z_enc)
+    context_sims : (N, N) cosine similarity matrix (e.g. z_target or z_enc)
     pred_dists   : (N, N) cosine distance matrix of predictions (z_pred)
     eps          : context similarity lower bound
     delta        : prediction divergence lower bound
@@ -201,7 +191,7 @@ def regress_divergence(
 
     Parameters
     ----------
-    context_sims : (N, N) cosine similarity matrix (e.g. z_context or z_enc)
+    context_sims : (N, N) cosine similarity matrix (e.g. z_target or z_enc)
     pred_dists   : (N, N) cosine distance matrix of predictions (z_pred)
 
     Returns

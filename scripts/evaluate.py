@@ -38,40 +38,24 @@ from sklearn.metrics import (
     average_precision_score,
     brier_score_loss,
     f1_score,
-    roc_auc_score,
-)
+    roc_auc_score)
 from sklearn.preprocessing import StandardScaler
 
 from src.training.utils.checkpoint import load_model_notrain
 from src.training.utils.datasets import (
     MimicDataset, collate_fn,
     SupervisedDataset, supervised_collate_fn,
-    build_vocab,
-)
+    build_vocab)
 from src.analysis.eval_tasks import (
     evaluate_binary_probe,
     extract_icd_block_targets,
-    probe_icd_blocks,
-)
-from src.mimic.labels import (
-    _check_escalation,
-    _get_f_codes_full,
-    _update_state,
-)
-from src.utils.io import load_sequences, DATA_DIR
-
-
-ALL_TASKS = ["readmit_30d", "escalation", "icd_block", "escalation_type"]
-
-ESCALATION_CRITERIA = [
-    "new_subcategory", "severity_increase", "new_specifier",
-    "f32_to_f33", "med_initiation", "new_drug_class",
-]
-
-# Vectors available per architecture family
-JEPA_VECTORS = ["z_pred", "z_target", "pred_error", "z_enc_pooled"]
-SUPERVISED_VECTORS = ["z_enc_pooled"]
-
+    probe_icd_blocks)
+from src.mimic.labels import _check_escalation, _update_state
+from src.mimic.helper import get_encounter_f_codes
+from src.utils.arrays import pool_to_patients
+from src.utils.constants import ESCALATION_CRITERIA, MODEL_PRED_VECS, SUPERVISED_VECTORS, ALL_TASKS
+from src.utils.io import EXPERIMENTS_DIR, load_json, load_sequences, load_sequences_dict, DATA_DIR
+from src.utils.seed import SEED, load_exp_seed, set_global_seed
 
 # =============================================================================
 # Embedding extraction
@@ -91,23 +75,23 @@ def extract_jepa_embeddings(
     all_z_pred: list[np.ndarray] = []
     all_z_target: list[np.ndarray] = []
     all_ctx_pad_masks: list[np.ndarray] = []
-    all_subject_ids: list[str] = []
     all_mask_pos: list[np.ndarray] = []
+    all_subject_ids: list[str] = []
 
     model.eval()
     with torch.no_grad():
         for batch in loader:
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+            batch_dev = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            z_enc, z_pred, z_target = model(batch)
+            z_enc, z_pred, z_target = model(batch_dev)
             # z_enc: (B, C, D), z_pred: (B, D), z_target: (B, D)
 
             all_z_encs.append(z_enc.cpu().numpy())
             all_z_pred.append(z_pred.cpu().numpy())
             all_z_target.append(z_target.cpu().numpy())
-            all_ctx_pad_masks.append(batch["ctx_pad_mask"].cpu().numpy())
+            all_ctx_pad_masks.append(batch_dev["ctx_pad_mask"].cpu().numpy())
+            all_mask_pos.append(batch_dev["mask_pos"].cpu().numpy())
             all_subject_ids.extend(batch["subject_ids"])
-            all_mask_pos.append(batch["mask_pos"].cpu().numpy())
 
     # Pad z_encs and ctx_pad_masks to uniform context length across batches
     max_C = max(arr.shape[1] for arr in all_z_encs)
@@ -117,20 +101,18 @@ def extract_jepa_embeddings(
     for z, m in zip(all_z_encs, all_ctx_pad_masks):
         B, C = z.shape[0], z.shape[1]
         if C < max_C:
-            z = np.concatenate(
-                [z, np.zeros((B, max_C - C, D), dtype=z.dtype)], axis=1)
-            m = np.concatenate(
-                [m, np.ones((B, max_C - C), dtype=m.dtype)], axis=1)
+            z = np.concatenate([z, np.zeros((B, max_C - C, D), dtype=z.dtype)], axis=1)
+            m = np.concatenate([m, np.ones((B, max_C - C), dtype=m.dtype)], axis=1)
         padded_z_encs.append(z)
         padded_masks.append(m)
 
     return {
-        "z_encs": np.concatenate(padded_z_encs),           # (N, C_max, D)
-        "z_pred": np.concatenate(all_z_pred),               # (N, D)
-        "z_target": np.concatenate(all_z_target),           # (N, D)
-        "ctx_pad_masks": np.concatenate(padded_masks),      # (N, C_max)
-        "subject_ids": np.array(all_subject_ids),           # (N,)
-        "mask_pos": np.concatenate(all_mask_pos),           # (N,)
+        "z_encs": np.concatenate(padded_z_encs),    # (N, C_max, D)
+        "z_pred": np.concatenate(all_z_pred),       # (N, D)
+        "z_target": np.concatenate(all_z_target),   # (N, D)
+        "ctx_pad_masks": np.concatenate(padded_masks), # (N, C_max)
+        "subject_ids": np.array(all_subject_ids),   # (N,)
+        "mask_pos": np.concatenate(all_mask_pos),   # (N,)
     }
 
 
@@ -149,14 +131,16 @@ def extract_supervised_embeddings(
     model.eval()
     with torch.no_grad():
         for batch in loader:
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+            batch_dev = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            z_context, _logits = model(batch)
-            all_z_enc_pooled.append(z_context.cpu().numpy())
+            z_enc_pooled, _ = model(batch_dev)
+            del batch_dev
+            
+            all_z_enc_pooled.append(z_enc_pooled.cpu().numpy())
             all_subject_ids.extend(batch["subject_ids"])
 
     return {
-        "z_enc_pooled": np.concatenate(all_z_enc_pooled),  # (N, D)
+        "z_enc_pooled": np.concatenate(all_z_enc_pooled),   # (N, D)
         "subject_ids": np.array(all_subject_ids),           # (N,)
     }
 
@@ -166,7 +150,10 @@ def extract_supervised_embeddings(
 # =============================================================================
 
 def compute_derived_vectors(raw_vecs: dict) -> dict:
-    """Compute pred_error and z_enc_pooled from raw embedding arrays."""
+    """Compute
+        pred_error = z_pred - z_target
+        z_enc_pooled = mean(z_encs) over valid (non-padded) positions
+    """
     vecs = dict(raw_vecs)
 
     if "z_pred" in vecs and "z_target" in vecs:
@@ -174,8 +161,8 @@ def compute_derived_vectors(raw_vecs: dict) -> dict:
 
     if "z_encs" in vecs and "ctx_pad_masks" in vecs:
         z_encs = vecs["z_encs"]              # (N, C, D)
-        pad_masks = vecs["ctx_pad_masks"]    # (N, C)  True=padding
-        valid = (~pad_masks).astype(np.float32)[..., np.newaxis]  # (N, C, 1)
+        pad_masks = vecs["ctx_pad_masks"]
+        valid = (~pad_masks).astype(np.float32)[..., np.newaxis] # (N, C, 1)
         vecs["z_enc_pooled"] = (
             (z_encs * valid).sum(axis=1) /
             valid.sum(axis=1).clip(min=1.0)
@@ -185,54 +172,9 @@ def compute_derived_vectors(raw_vecs: dict) -> dict:
 
 
 # =============================================================================
-# Patient-level pooling
-# =============================================================================
-
-def pool_to_patients(
-    vecs_dict: dict[str, np.ndarray],
-    subject_ids: np.ndarray,
-) -> tuple[dict[str, np.ndarray], np.ndarray]:
-    """Average sample-level vectors per unique subject_id.
-
-    Returns (pooled_dict, unique_subject_ids).  Pooled keys get a
-    ``_pooled`` suffix unless the name already ends with it.
-    """
-    unique_ids, inverse = np.unique(subject_ids, return_inverse=True)
-    n_patients = len(unique_ids)
-
-    pooled: dict[str, np.ndarray] = {}
-    for name, emb in vecs_dict.items():
-        if emb is None:
-            continue
-        D = emb.shape[1]
-        acc = np.zeros((n_patients, D), dtype=np.float64)
-        counts = np.zeros(n_patients, dtype=np.float64)
-        for i in range(len(subject_ids)):
-            idx = inverse[i]
-            acc[idx] += emb[i]
-            counts[idx] += 1
-        pooled_name = name if name.endswith("_pooled") else name + "_pooled"
-        pooled[pooled_name] = (acc / counts[:, np.newaxis]).astype(np.float32)
-
-    return pooled, unique_ids
-
-
 # =============================================================================
 # Label loading
 # =============================================================================
-
-def load_patients_dict(sequences_path: Path) -> dict[str, dict]:
-    """Load sequences.jsonl into {subject_id_str: patient_dict}."""
-    patients: dict[str, dict] = {}
-    with open(sequences_path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            p = json.loads(line)
-            patients[str(p["subject_id"])] = p
-    return patients
-
 
 def load_label_30d(
     patients_dict: dict[str, dict],
@@ -291,14 +233,14 @@ def compute_escalation_criteria_labels(
         has_prior_psych_meds = False
 
         for j in range(pos):
-            f_codes = _get_f_codes_full(encs[j])
+            f_codes = get_encounter_f_codes(encs[j], full=True)
             meds = [m.lower() for m in encs[j].get("meds", [])]
             had_meds = _update_state(
                 f_codes, meds, prior_subcats, prior_f_codes, prior_drug_classes)
             has_prior_psych_meds = has_prior_psych_meds or had_meds
 
         # Check escalation at mask_pos
-        f_codes = _get_f_codes_full(encs[pos])
+        f_codes = get_encounter_f_codes(encs[pos], full=True)
         meds = [m.lower() for m in encs[pos].get("meds", [])]
         fired = _check_escalation(
             f_codes, meds,
@@ -364,7 +306,6 @@ def evaluate_binary_probe_temporal(
     labels: np.ndarray,
     train_mask: np.ndarray,
     test_mask: np.ndarray,
-    seed: int = 42,
 ) -> dict:
     """Single temporal train/test split binary probe.
 
@@ -378,7 +319,7 @@ def evaluate_binary_probe_temporal(
     y_tr, y_te = labels[train_mask], labels[test_mask]
 
     clf = LogisticRegression(
-        max_iter=1000, class_weight="balanced", random_state=seed)
+        max_iter=1000, class_weight="balanced", random_state=SEED)
     clf.fit(X_tr, y_tr)
 
     y_prob = clf.predict_proba(X_te)[:, 1]
@@ -412,7 +353,6 @@ def probe_icd_blocks_temporal(
     chapter_names: list[str],
     train_mask: np.ndarray,
     test_mask: np.ndarray,
-    seed: int = 42,
 ) -> dict:
     """Single temporal split ICD chapter probing."""
     scaler = StandardScaler()
@@ -437,7 +377,7 @@ def probe_icd_blocks_temporal(
 
         key = chapter_names[c] if chapter_names else str(c)
         clf = LogisticRegression(
-            max_iter=1000, class_weight="balanced", random_state=seed)
+            max_iter=1000, class_weight="balanced", random_state=SEED)
         clf.fit(X_tr, y_tr)
 
         y_prob = clf.predict_proba(X_te)[:, 1]
@@ -477,7 +417,7 @@ def compute_subset_mask(
     subject_ids: np.ndarray,
     subset: str,
 ) -> np.ndarray:
-    """Compute boolean mask for --eval-subset filtering.
+    """Compute boolean mask (True=keep) for --eval-subset filtering.
 
     Parameters
     ----------
@@ -526,7 +466,7 @@ def filter_vecs(vecs: dict, mask: np.ndarray) -> dict:
 
 
 # =============================================================================
-# Result formatting
+# Core evaluation
 # =============================================================================
 
 def _format_binary_result(res: dict) -> dict:
@@ -544,11 +484,7 @@ def _format_binary_result(res: dict) -> dict:
         "n_positive": res["n_positive"],
         "positive_rate": res["positive_rate"],
     }
-
-
-# =============================================================================
-# Core evaluation
-# =============================================================================
+    
 
 def run_tasks(
     vecs: dict,
@@ -556,11 +492,10 @@ def run_tasks(
     sequences_path: Path,
     tasks: list[str],
     is_supervised: bool,
-    seed: int,
     split: str = "random",
     temporal_masks: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> dict:
-    """Run requested evaluation tasks on all available latent vectors.
+    """Run evaluation tasks on all available latent vectors.
 
     Patient-level tasks (readmit_30d) use vectors pooled across mask
     positions per patient to prevent data leakage.  Encounter-level tasks
@@ -570,16 +505,16 @@ def run_tasks(
     mask_pos = vecs.get("mask_pos")
     results: dict = {}
 
-    # -- Build encounter-level vector dict ------------------------------------
+    # -- Build encounter-level vector dict --
     if is_supervised:
         enc_vectors = {"z_enc_pooled": vecs["z_enc_pooled"]}
     else:
         enc_vectors = {
-            name: vecs[name] for name in JEPA_VECTORS
+            name: vecs[name] for name in MODEL_PRED_VECS
             if vecs.get(name) is not None
         }
 
-    # -- Build patient-level vector dict --------------------------------------
+    # -- Build patient-level vector dict --
     if is_supervised:
         pat_vectors = {"z_enc_pooled": vecs["z_enc_pooled"]}
         pat_ids = subject_ids  # one sample per patient already
@@ -589,60 +524,62 @@ def run_tasks(
     # Patient-level temporal masks (computed separately from sample-level)
     pat_temporal: tuple[np.ndarray, np.ndarray] | None = None
     if split == "temporal":
-        pat_train, pat_test, _ = compute_temporal_split(
-            sequences_path, pat_ids)
+        pat_train, pat_test, _ = compute_temporal_split(sequences_path, pat_ids)
         pat_temporal = (pat_train, pat_test)
 
-    # -- readmit_30d (patient-level) ------------------------------------------
+    # -- readmit_30d (patient-level) --
     if "readmit_30d" in tasks:
         labels_30d = load_label_30d(patients_dict, pat_ids)
         task_results: dict = {}
         for vec_name, emb in pat_vectors.items():
             if split == "temporal":
-                res = evaluate_binary_probe_temporal(
-                    emb, labels_30d,
-                    pat_temporal[0], pat_temporal[1], seed=seed)
+                pat_train, pat_test, _ = compute_temporal_split(sequences_path, pat_ids)
+                pat_temporal = (pat_train, pat_test)
+                res = evaluate_binary_probe_temporal(emb, labels_30d, 
+                                                     train_mask=pat_temporal[0], 
+                                                     test_mask=pat_temporal[1])
             else:
-                res = evaluate_binary_probe(emb, labels_30d, seed=seed)
+                res = evaluate_binary_probe(emb, labels_30d)
+                
             task_results[vec_name] = _format_binary_result(res)
         results["readmit_30d"] = task_results
 
-    # -- escalation (encounter-level) -----------------------------------------
+    # -- escalation (encounter-level) --
     if "escalation" in tasks:
         if is_supervised or mask_pos is None:
             print("  [escalation] skipped - requires JEPA model with mask positions")
         else:
-            labels_esc = load_escalation_labels(
-                patients_dict, subject_ids, mask_pos)
+            labels_esc = load_escalation_labels(patients_dict, subject_ids, mask_pos)
             task_results = {}
             for vec_name, emb in enc_vectors.items():
                 if split == "temporal":
                     assert temporal_masks is not None
-                    res = evaluate_binary_probe_temporal(
-                        emb, labels_esc,
-                        temporal_masks[0], temporal_masks[1], seed=seed)
+                    res = evaluate_binary_probe_temporal(emb, labels_esc,
+                                                         train_mask=temporal_masks[0], 
+                                                         test_mask=temporal_masks[1])
                 else:
-                    res = evaluate_binary_probe(emb, labels_esc, seed=seed)
+                    res = evaluate_binary_probe(emb, labels_esc)
+                    
                 task_results[vec_name] = _format_binary_result(res)
             results["escalation"] = task_results
 
-    # -- icd_block (encounter-level) ------------------------------------------
+    # -- icd_block (encounter-level) --
     if "icd_block" in tasks:
         if is_supervised or mask_pos is None:
             print("  [icd_block] skipped - requires JEPA model with mask positions")
         else:
-            targets, chapter_names = extract_icd_block_targets(
-                sequences_path, subject_ids, mask_pos)
+            targets, chapter_names = extract_icd_block_targets(sequences_path, subject_ids, mask_pos)
             task_results = {}
             for vec_name, emb in enc_vectors.items():
                 if split == "temporal":
                     assert temporal_masks is not None
-                    res = probe_icd_blocks_temporal(
-                        emb, targets, chapter_names,
-                        temporal_masks[0], temporal_masks[1], seed=seed)
+                    res = probe_icd_blocks_temporal(emb, targets, chapter_names, 
+                                                    train_mask=temporal_masks[0], 
+                                                    test_mask=temporal_masks[1])
                 else:
                     res = probe_icd_blocks(
-                        emb, targets, chapter_names, seed=seed)
+                        emb, targets, chapter_names)
+                    
                 task_results[vec_name] = {
                     "macro_auroc": res["macro_auroc"],
                     "macro_auprc": res["macro_auprc"],
@@ -651,13 +588,12 @@ def run_tasks(
                 }
             results["icd_block"] = task_results
 
-    # -- escalation_type (encounter-level) ------------------------------------
+    # -- escalation_type (encounter-level) --
     if "escalation_type" in tasks:
         if is_supervised or mask_pos is None:
             print("  [escalation_type] skipped - requires JEPA model with mask positions")
         else:
-            criteria_labels = compute_escalation_criteria_labels(
-                patients_dict, subject_ids, mask_pos)
+            criteria_labels = compute_escalation_criteria_labels(patients_dict, subject_ids, mask_pos)
             task_results = {}
             for vec_name, emb in enc_vectors.items():
                 per_criterion: dict = {}
@@ -674,17 +610,20 @@ def run_tasks(
                         assert temporal_masks is not None
                         y_tr = labels[temporal_masks[0]]
                         y_te = labels[temporal_masks[1]]
+                        
+                        # Skip if either train or test set has no positive or no negative samples
                         if (y_tr.sum() < 1 or (len(y_tr) - y_tr.sum()) < 1
-                                or y_te.sum() < 1
-                                or (len(y_te) - y_te.sum()) < 1):
+                                           or y_te.sum() < 1
+                                           or (len(y_te) - y_te.sum()) < 1):
                             continue
-                        res = evaluate_binary_probe_temporal(
-                            emb, labels,
-                            temporal_masks[0], temporal_masks[1], seed=seed)
+                        res = evaluate_binary_probe_temporal(emb, labels,
+                                                             train_mask=temporal_masks[0],
+                                                             test_mask=temporal_masks[1])
                     else:
+                        # Skip if number of positive or negative samples is too small for stable evaluation
                         if n_pos < 5 or n_neg < 5:
                             continue
-                        res = evaluate_binary_probe(emb, labels, seed=seed)
+                        res = evaluate_binary_probe(emb, labels)
 
                     per_criterion[criterion] = _format_binary_result(res)
                     macro_aurocs.append(res["mean_auroc"])
@@ -703,24 +642,19 @@ def run_tasks(
     return results
 
 
-# =============================================================================
-# Summary table
-# =============================================================================
-
 def print_summary(
     architecture: str,
     results: dict,
     split: str = "random",
     eval_subset: str = "all",
 ) -> None:
-    """Print a formatted summary table to stdout."""
     label = f"{architecture} ({split} split"
     if eval_subset != "all":
         label += f", {eval_subset} subset"
     label += ")"
-    print("\n" + "=" * 80)
-    print(f"  Evaluation Summary - {label}")
-    print("=" * 80)
+    
+    print(f"  Evaluation Summary <{label}>")
+    print("=" * 70)
 
     for task_name, task_results in results.items():
         print(f"\n  {task_name}")
@@ -728,11 +662,10 @@ def print_summary(
 
         if task_name in ("icd_block", "escalation_type"):
             col = "n_ch" if task_name == "icd_block" else "n_crit"
-            n_key = ("n_chapters_evaluated" if task_name == "icd_block"
-                     else "n_criteria_evaluated")
-            header = (f"  {'vector':<20s} {'macro_AUROC':>12s} "
-                      f"{'macro_AUPRC':>12s} {'macro_F1':>12s} {col:>6s}")
+            header = (f"  {'vector':<20s} {'macro_AUROC':>12s} {'macro_AUPRC':>12s} {'macro_F1':>12s} {col:>6s}")
             print(header)
+            
+            n_key = ("n_chapters_evaluated" if task_name == "icd_block" else "n_criteria_evaluated")
             for vec_name, metrics in task_results.items():
                 print(f"  {vec_name:<20s} "
                       f"{metrics['macro_auroc']:>12.4f} "
@@ -740,8 +673,7 @@ def print_summary(
                       f"{metrics['macro_f1']:>12.4f} "
                       f"{metrics[n_key]:>6d}")
         else:
-            header = (f"  {'vector':<20s} {'AUROC':>12s} {'AUPRC':>12s} "
-                      f"{'F1':>12s} {'Brier':>12s}")
+            header = (f"  {'vector':<20s} {'AUROC':>12s} {'AUPRC':>12s} {'F1':>12s} {'Brier':>12s}")
             print(header)
             for vec_name, metrics in task_results.items():
                 print(f"  {vec_name:<20s} "
@@ -749,7 +681,6 @@ def print_summary(
                       f"{metrics['auprc']:>12.4f} "
                       f"{metrics['f1']:>12.4f} "
                       f"{metrics['brier']:>12.4f}")
-
     print()
 
 
@@ -758,53 +689,65 @@ def print_summary(
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Evaluate a trained model on downstream tasks")
-    parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to .pt checkpoint")
+    parser = argparse.ArgumentParser(description="Evaluate trained model on downstream tasks")
+    parser.add_argument("--model", type=str, required=True,
+                        help="model name from 'experiments' directory")
+    parser.add_argument("--checkpoint-name", type=str, required=True,
+                        help="file name of .pt checkpoint in model's checkpoints/ directory.")
     parser.add_argument("--sequences", type=str,
                         default=str(DATA_DIR / "sequences.jsonl"),
                         help="Path to sequences.jsonl")
-    parser.add_argument("--output", type=str, default=None,
+    parser.add_argument("--output", type=str,
+                        default=None,
                         help="Path for results JSON (default: <run_dir>/eval_results.json)")
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tasks", type=str,
                         default="readmit_30d,escalation,icd_block,escalation_type",
                         help="Comma-separated task list")
-    parser.add_argument("--split", type=str, default="random",
+    parser.add_argument("--split", type=str, 
+                        default="random",
                         choices=["random", "temporal"],
                         help="Split strategy: random (stratified CV) or temporal")
-    parser.add_argument("--eval-subset", type=str, default="all",
+    parser.add_argument("--eval-subset", type=str, 
+                        default="all",
                         choices=["all", "fcode", "non_fcode"],
                         help="Evaluate on a patient subset: fcode (F30-F39), non_fcode, or all")
+    parser.add_argument("--batch-size", type=int, 
+                        default=64,
+                        help="Batch size for embedding extraction")
     args = parser.parse_args()
 
-    ckpt_path = Path(args.checkpoint)
     tasks = [t.strip() for t in args.tasks.split(",")]
     for t in tasks:
         if t not in ALL_TASKS:
             raise ValueError(f"Unknown task '{t}'. Available: {ALL_TASKS}")
 
     # -- Resolve experiment directory -----------------------------------------
-    run_dir = ckpt_path.parent.parent
+    run_dir = EXPERIMENTS_DIR / args.model
+    sequences_path = Path(args.sequences)
     config_path = run_dir / "config.yaml"
     vocab_path = run_dir / "vocab.json"
+    
+    loaded_seed = load_exp_seed(run_dir)
+    set_global_seed(loaded_seed)
+    
+    
 
     if not config_path.exists():
         raise FileNotFoundError(f"config.yaml not found in {run_dir}")
-
     with open(config_path) as f:
         config = yaml.safe_load(f)
-
     data_params = config["data"]
-    sequences_path = Path(args.sequences)
 
     # -- Load model -----------------------------------------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ckpt_path = Path(args.checkpoint)
+    
     model, checkpoint = load_model_notrain(ckpt_path, device, restore_rng=False)
     model_params = checkpoint["model_params"]
-    architecture = model_params.get("architecture", "unknown")
-    epoch = checkpoint.get("epoch", "?")
+    architecture = model_params.get("architecture", "")
+    epoch = checkpoint.get("epoch", "")
+    assert architecture != "" and epoch != "", \
+        ValueError("Checkpoint missing 'architecture' or 'epoch'")
     is_supervised = architecture == "supervised"
 
     print(f"  Model:        {architecture}")
@@ -819,29 +762,25 @@ def main():
     n_patients = data_params.get("n_patients", None)
     patients = load_sequences(n=n_patients)
 
-    if vocab_path.exists():
-        with open(vocab_path, encoding="utf-8") as f:
-            vocab = json.load(f)
-        print(f"  Vocab:        {vocab_path} ({len(vocab)} tokens)")
-    else:
-        vocab = build_vocab(patients, pad_idx=0, dir=run_dir)
+    vocab = load_json(vocab_path)
+    assert vocab is not None, f"vocab.json not found at {vocab_path}"
 
     if is_supervised:
         dataset = SupervisedDataset(patients, vocab, data_params, pad_idx=0)
         loader = DataLoader(
-            dataset, batch_size=data_params.get("batch_size", 64),
+            dataset, batch_size=args.batch_size,
             shuffle=False, collate_fn=supervised_collate_fn, drop_last=False,
             num_workers=0)
     else:
         dataset = MimicDataset(patients, vocab, data_params, pad_idx=0)
         loader = DataLoader(
-            dataset, batch_size=data_params.get("batch_size", 64),
+            dataset, batch_size=args.batch_size,
             shuffle=False, collate_fn=collate_fn, drop_last=False,
             num_workers=0)
 
     print(f"  Samples:      {len(dataset)}")
 
-    # -- Extract embeddings ---------------------------------------------------
+    # -- Extract embeddings --
     print("\n  Extracting embeddings...")
     if is_supervised:
         vecs = extract_supervised_embeddings(model, loader, device)
@@ -855,10 +794,10 @@ def main():
         print(f"  z_pred shape:       {vecs['z_pred'].shape}")
         print(f"  z_enc_pooled shape: {vecs['z_enc_pooled'].shape}")
 
-    # -- Load patient data for label lookups ----------------------------------
-    patients_dict = load_patients_dict(sequences_path)
+    # -- Load patient data for label lookups --
+    patients_dict = load_sequences_dict(sequences_path)
 
-    # -- Filter by eval subset if requested -----------------------------------
+    # -- Filter by eval subset --
     if args.eval_subset != "all":
         subset_mask = compute_subset_mask(
             sequences_path, vecs["subject_ids"], args.eval_subset)
@@ -867,7 +806,7 @@ def main():
         print(f"\n  Subset filter: {args.eval_subset} - "
               f"{int(subset_mask.sum())}/{n_before} samples kept")
 
-    # -- Compute temporal split if requested ----------------------------------
+    # -- Compute temporal split --
     temporal_masks = None
     if args.split == "temporal":
         print("\n  Computing temporal split...")
@@ -878,32 +817,31 @@ def main():
         print(f"  Train:        {int(train_mask.sum())} samples")
         print(f"  Test:         {int(test_mask.sum())} samples")
 
-    # -- Run evaluation tasks -------------------------------------------------
+    # -- Run evaluation tasks --
     print("\n  Running evaluation tasks...")
     task_results = run_tasks(
-        vecs, patients_dict, sequences_path, tasks, is_supervised, args.seed,
+        vecs, patients_dict, sequences_path, tasks, is_supervised,
         split=args.split, temporal_masks=temporal_masks)
 
-    # -- Build output ---------------------------------------------------------
-    n_patients_unique = len(np.unique(vecs["subject_ids"]))
+    # -- Build output --
     output = {
         "model": architecture,
         "checkpoint": str(ckpt_path),
         "epoch": epoch,
-        "seed": args.seed,
+        "seed": loaded_seed,
         "split": args.split,
         "eval_subset": args.eval_subset,
         "n_samples": len(vecs["subject_ids"]),
-        "n_patients": n_patients_unique,
+        "n_patients": len(np.unique(vecs["subject_ids"])),
         "modality": data_params.get("modality", "all"),
         "tasks": task_results,
     }
 
-    # -- Print summary table --------------------------------------------------
+    # -- Print summary table --
     print_summary(architecture, task_results,
                   split=args.split, eval_subset=args.eval_subset)
 
-    # -- Save JSON ------------------------------------------------------------
+    # -- Save JSON --
     output_path = Path(args.output) if args.output else run_dir / "eval_results.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:

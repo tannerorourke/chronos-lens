@@ -18,14 +18,8 @@ from sklearn.preprocessing import StandardScaler
 from hdbscan import HDBSCAN
 
 from src.utils.seed import SEED, get_rng
+from src.utils.arrays import is_all_binary
 rng  = get_rng()
-
-
-
-def _is_binary(col: np.ndarray) -> bool:
-    """Check if a column contains only 0s and 1s."""
-    unique = np.unique(col[~np.isnan(col)])
-    return len(unique) <= 2 and all(v in (0.0, 1.0) for v in unique)
 
 
 def _lasso_stability_selection(
@@ -78,34 +72,6 @@ def _lasso_stability_selection(
         ci_high = np.zeros(n_features)
 
     return sel_probs, ci_low, ci_high
-
-
-# =============================================================================
-# Public utilities
-# =============================================================================
-
-def pool_to_patients(
-    values: np.ndarray,
-    subject_ids: np.ndarray,
-    patient_ids: np.ndarray,
-) -> np.ndarray:
-    """Mean-pool sample-level values (N, ...) to patient level (P, ...)."""
-    sid_str = np.asarray(subject_ids, dtype=str)
-    return np.vstack([
-        values[sid_str == pid].mean(axis=0)
-        for pid in patient_ids
-    ])
-
-
-def broadcast_to_samples(
-    metadata: np.ndarray,
-    patient_ids: np.ndarray,
-    subject_ids: np.ndarray,
-) -> np.ndarray:
-    """Broadcast patient-level metadata (P, F) to sample-level (N, F)."""
-    pid_to_idx = {str(pid): i for i, pid in enumerate(patient_ids)}
-    indices = np.array([pid_to_idx[str(sid)] for sid in subject_ids])
-    return metadata[indices]
 
 
 # =============================================================================
@@ -305,7 +271,7 @@ def run_cluster_enrichment(
         cluster_sizes[int(cid)] = int(mask.sum())
 
     # Cluster profiles: top enriched/depleted features per cluster
-    binary_mask = np.array([_is_binary(metadata[:, j])
+    binary_mask = np.array([is_all_binary(metadata[:, j])
                             for j in range(n_features)])
     cluster_profiles = {}
 

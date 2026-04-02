@@ -18,8 +18,6 @@ from sklearn.preprocessing import StandardScaler
 from hdbscan import HDBSCAN
 
 from src.utils.seed import SEED, get_rng
-from src.utils.arrays import is_all_binary
-rng  = get_rng()
 
 
 def _lasso_stability_selection(
@@ -37,6 +35,8 @@ def _lasso_stability_selection(
     ci_low    : (n_features,) 2.5th percentile of bootstrap coefficients
     ci_high   : (n_features,) 97.5th percentile of bootstrap coefficients
     """
+    rng  = get_rng()
+    
     n_samples, n_features = X.shape
     sub_n   = max(4, int(n_samples * subsample_frac))
     counts  = np.zeros(n_features)
@@ -269,6 +269,11 @@ def run_cluster_enrichment(
         cluster_mean = cluster_data.mean(axis=0)
         enrichment_matrix[i] = (cluster_mean - pop_mean) / pop_std
         cluster_sizes[int(cid)] = int(mask.sum())
+
+    def is_all_binary(col: np.ndarray) -> bool:
+        """True if array contains only values in {0, 1}."""
+        unique = np.unique(col[~np.isnan(col)])
+        return len(unique) <= 2 and all(v in (0.0, 1.0) for v in unique)
 
     # Cluster profiles: top enriched/depleted features per cluster
     binary_mask = np.array([is_all_binary(metadata[:, j])

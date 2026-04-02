@@ -25,7 +25,6 @@ environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import argparse
 import json
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -33,458 +32,28 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    average_precision_score,
-    brier_score_loss,
-    f1_score,
-    roc_auc_score)
-from sklearn.preprocessing import StandardScaler
-
 from src.training.utils.checkpoint import load_model_notrain
 from src.training.utils.datasets import (
     MimicDataset, collate_fn,
-    SupervisedDataset, supervised_collate_fn,
-    build_vocab)
-from src.analysis.eval_tasks import (
-    evaluate_binary_probe,
-    extract_icd_block_targets,
-    probe_icd_blocks)
-from src.mimic.labels import _check_escalation, _update_state
-from src.mimic.helper import get_encounter_f_codes
-from src.utils.arrays import pool_to_patients
-from src.utils.constants import ESCALATION_CRITERIA, MODEL_PRED_VECS, SUPERVISED_VECTORS, ALL_TASKS
+    SupervisedDataset, supervised_collate_fn)
+from src.analysis.eval_infra import (
+    extract_jepa_embeddings, extract_supervised_embeddings,
+    load_label, load_escalation_labels, compute_escalation_criterions,
+    compute_subset_mask, 
+    compute_derived_vectors, pool_to_patients,
+    format_binary_result, 
+    compute_temporal_split, 
+    extract_icd_block_targets)
+from src.analysis.probing import (
+    evaluate_binary_probe, evaluate_binary_probe_temporal, 
+    probe_icd_blocks, probe_icd_blocks_temporal)
+from src.utils.constants import ESCALATION_CRITERIA, MODEL_PRED_VECS, ALL_TASKS
 from src.utils.io import EXPERIMENTS_DIR, load_json, load_sequences, load_sequences_dict, DATA_DIR
 from src.utils.seed import SEED, load_exp_seed, set_global_seed
 
 # =============================================================================
-# Embedding extraction
-# =============================================================================
-
-def extract_jepa_embeddings(
-    model: torch.nn.Module,
-    loader: DataLoader,
-    device: torch.device,
-) -> dict:
-    """Run JEPA model inference and collect embeddings.
-
-    Returns dict with keys: z_encs, z_pred, z_target, ctx_pad_masks,
-    subject_ids, mask_pos.
-    """
-    all_z_encs: list[np.ndarray] = []
-    all_z_pred: list[np.ndarray] = []
-    all_z_target: list[np.ndarray] = []
-    all_ctx_pad_masks: list[np.ndarray] = []
-    all_mask_pos: list[np.ndarray] = []
-    all_subject_ids: list[str] = []
-
-    model.eval()
-    with torch.no_grad():
-        for batch in loader:
-            batch_dev = {k: v.to(device) if isinstance(v, torch.Tensor) else v
-                     for k, v in batch.items()}
-            z_enc, z_pred, z_target = model(batch_dev)
-            # z_enc: (B, C, D), z_pred: (B, D), z_target: (B, D)
-
-            all_z_encs.append(z_enc.cpu().numpy())
-            all_z_pred.append(z_pred.cpu().numpy())
-            all_z_target.append(z_target.cpu().numpy())
-            all_ctx_pad_masks.append(batch_dev["ctx_pad_mask"].cpu().numpy())
-            all_mask_pos.append(batch_dev["mask_pos"].cpu().numpy())
-            all_subject_ids.extend(batch["subject_ids"])
-
-    # Pad z_encs and ctx_pad_masks to uniform context length across batches
-    max_C = max(arr.shape[1] for arr in all_z_encs)
-    D = all_z_encs[0].shape[2]
-    padded_z_encs: list[np.ndarray] = []
-    padded_masks: list[np.ndarray] = []
-    for z, m in zip(all_z_encs, all_ctx_pad_masks):
-        B, C = z.shape[0], z.shape[1]
-        if C < max_C:
-            z = np.concatenate([z, np.zeros((B, max_C - C, D), dtype=z.dtype)], axis=1)
-            m = np.concatenate([m, np.ones((B, max_C - C), dtype=m.dtype)], axis=1)
-        padded_z_encs.append(z)
-        padded_masks.append(m)
-
-    return {
-        "z_encs": np.concatenate(padded_z_encs),    # (N, C_max, D)
-        "z_pred": np.concatenate(all_z_pred),       # (N, D)
-        "z_target": np.concatenate(all_z_target),   # (N, D)
-        "ctx_pad_masks": np.concatenate(padded_masks), # (N, C_max)
-        "subject_ids": np.array(all_subject_ids),   # (N,)
-        "mask_pos": np.concatenate(all_mask_pos),   # (N,)
-    }
-
-
-def extract_supervised_embeddings(
-    model: torch.nn.Module,
-    loader: DataLoader,
-    device: torch.device,
-) -> dict:
-    """Run supervised model inference and collect encoder output.
-
-    Returns dict with keys: z_enc_pooled, subject_ids.
-    """
-    all_z_enc_pooled: list[np.ndarray] = []
-    all_subject_ids: list[str] = []
-
-    model.eval()
-    with torch.no_grad():
-        for batch in loader:
-            batch_dev = {k: v.to(device) if isinstance(v, torch.Tensor) else v
-                     for k, v in batch.items()}
-            z_enc_pooled, _ = model(batch_dev)
-            del batch_dev
-            
-            all_z_enc_pooled.append(z_enc_pooled.cpu().numpy())
-            all_subject_ids.extend(batch["subject_ids"])
-
-    return {
-        "z_enc_pooled": np.concatenate(all_z_enc_pooled),   # (N, D)
-        "subject_ids": np.array(all_subject_ids),           # (N,)
-    }
-
-
-# =============================================================================
-# Derived vectors
-# =============================================================================
-
-def compute_derived_vectors(raw_vecs: dict) -> dict:
-    """Compute
-        pred_error = z_pred - z_target
-        z_enc_pooled = mean(z_encs) over valid (non-padded) positions
-    """
-    vecs = dict(raw_vecs)
-
-    if "z_pred" in vecs and "z_target" in vecs:
-        vecs["pred_error"] = vecs["z_pred"] - vecs["z_target"]
-
-    if "z_encs" in vecs and "ctx_pad_masks" in vecs:
-        z_encs = vecs["z_encs"]              # (N, C, D)
-        pad_masks = vecs["ctx_pad_masks"]
-        valid = (~pad_masks).astype(np.float32)[..., np.newaxis] # (N, C, 1)
-        vecs["z_enc_pooled"] = (
-            (z_encs * valid).sum(axis=1) /
-            valid.sum(axis=1).clip(min=1.0)
-        )  # (N, D)
-
-    return vecs
-
-
-# =============================================================================
-# =============================================================================
-# Label loading
-# =============================================================================
-
-def load_label_30d(
-    patients_dict: dict[str, dict],
-    subject_ids: np.ndarray,
-) -> np.ndarray:
-    """Patient-level 30-day F-code readmission labels."""
-    return np.array([
-        patients_dict[str(sid)].get("label_30d", 0)
-        for sid in subject_ids
-    ], dtype=np.int64)
-
-
-def load_escalation_labels(
-    patients_dict: dict[str, dict],
-    subject_ids: np.ndarray,
-    mask_pos: np.ndarray,
-) -> np.ndarray:
-    """Per-encounter escalation labels at each sample's mask position."""
-    labels = np.zeros(len(subject_ids), dtype=np.int64)
-    for i, (sid, pos) in enumerate(zip(subject_ids, mask_pos)):
-        patient = patients_dict[str(sid)]
-        per_enc = patient.get("label_escalation_per_enc", [])
-        pos = int(pos)
-        if pos < len(per_enc):
-            labels[i] = per_enc[pos]
-    return labels
-
-
-def compute_escalation_criteria_labels(
-    patients_dict: dict[str, dict],
-    subject_ids: np.ndarray,
-    mask_pos: np.ndarray,
-) -> dict[str, np.ndarray]:
-    """Recompute per-encounter escalation criteria for each sample.
-
-    Replays the escalation state machine from encounter 0 to mask_pos-1,
-    then checks which criteria fire at mask_pos.
-
-    Returns dict mapping criterion_name -> (N,) binary int64 array.
-    """
-    N = len(subject_ids)
-    criteria_labels = {c: np.zeros(N, dtype=np.int64) for c in ESCALATION_CRITERIA}
-
-    for i in range(N):
-        sid = str(subject_ids[i])
-        pos = int(mask_pos[i])
-        encs = patients_dict[sid]["encounters"]
-
-        if pos == 0:
-            continue
-
-        # Build prior state from encounters 0 .. pos-1
-        prior_subcats: dict[str, int] = {}
-        prior_f_codes: set[str] = set()
-        prior_drug_classes: set[str] = set()
-        has_prior_psych_meds = False
-
-        for j in range(pos):
-            f_codes = get_encounter_f_codes(encs[j], full=True)
-            meds = [m.lower() for m in encs[j].get("meds", [])]
-            had_meds = _update_state(
-                f_codes, meds, prior_subcats, prior_f_codes, prior_drug_classes)
-            has_prior_psych_meds = has_prior_psych_meds or had_meds
-
-        # Check escalation at mask_pos
-        f_codes = get_encounter_f_codes(encs[pos], full=True)
-        meds = [m.lower() for m in encs[pos].get("meds", [])]
-        fired = _check_escalation(
-            f_codes, meds,
-            prior_subcats, prior_f_codes, prior_drug_classes,
-            has_prior_psych_meds,
-        )
-
-        for criterion in fired:
-            if criterion in criteria_labels:
-                criteria_labels[criterion][i] = 1
-
-    return criteria_labels
-
-
-# =============================================================================
-# Temporal train/test split
-# =============================================================================
-
-def compute_temporal_split(
-    sequences_path: Path,
-    subject_ids: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, str]:
-    """Split samples into train/test by median latest admission date.
-
-    All encounter windows from the same patient are assigned to the same
-    split.  Patients whose latest admission is strictly before the median
-    cutoff go to train; the rest go to test.
-
-    Returns
-    -------
-    train_mask  : (N,) bool array over subject_ids
-    test_mask   : (N,) bool array over subject_ids
-    cutoff_iso  : ISO-format string of the cutoff date
-    """
-    patients: dict[str, dict] = {}
-    with open(sequences_path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            p = json.loads(line)
-            patients[str(p["subject_id"])] = p
-
-    latest: dict[str, datetime] = {}
-    for pid, p in patients.items():
-        dates = [datetime.fromisoformat(e["admittime"])
-                 for e in p["encounters"] if "admittime" in e]
-        if dates:
-            latest[pid] = max(dates)
-
-    all_dates = sorted(latest.values())
-    cutoff = all_dates[len(all_dates) // 2]
-
-    train_mask = np.array([latest.get(str(sid), cutoff) < cutoff
-                           for sid in subject_ids])
-    test_mask = ~train_mask
-
-    return train_mask, test_mask, cutoff.isoformat()
-
-
-def evaluate_binary_probe_temporal(
-    embeddings: np.ndarray,
-    labels: np.ndarray,
-    train_mask: np.ndarray,
-    test_mask: np.ndarray,
-) -> dict:
-    """Single temporal train/test split binary probe.
-
-    Returns the same dict structure as evaluate_binary_probe so that
-    downstream formatting code works unchanged (fold lists have length 1,
-    std values are 0.0).
-    """
-    scaler = StandardScaler()
-    X_tr = scaler.fit_transform(embeddings[train_mask])
-    X_te = scaler.transform(embeddings[test_mask])
-    y_tr, y_te = labels[train_mask], labels[test_mask]
-
-    clf = LogisticRegression(
-        max_iter=1000, class_weight="balanced", random_state=SEED)
-    clf.fit(X_tr, y_tr)
-
-    y_prob = clf.predict_proba(X_te)[:, 1]
-    y_pred = clf.predict(X_te)
-
-    auroc = float(roc_auc_score(y_te, y_prob))
-    auprc = float(average_precision_score(y_te, y_prob))
-    f1_val = float(f1_score(y_te, y_pred))
-    brier = float(brier_score_loss(y_te, y_prob))
-
-    n_test = int(test_mask.sum())
-    n_pos = int(y_te.sum())
-    return {
-        "fold_auroc": [auroc], "fold_auprc": [auprc],
-        "fold_f1": [f1_val], "fold_brier": [brier],
-        "mean_auroc": auroc, "std_auroc": 0.0,
-        "mean_auprc": auprc, "std_auprc": 0.0,
-        "mean_f1": f1_val, "std_f1": 0.0,
-        "mean_brier": brier, "std_brier": 0.0,
-        "n_samples": n_test,
-        "n_positive": n_pos,
-        "positive_rate": round(n_pos / n_test, 4) if n_test > 0 else 0.0,
-        "n_train": int(train_mask.sum()),
-        "n_test": n_test,
-    }
-
-
-def probe_icd_blocks_temporal(
-    embeddings: np.ndarray,
-    targets: np.ndarray,
-    chapter_names: list[str],
-    train_mask: np.ndarray,
-    test_mask: np.ndarray,
-) -> dict:
-    """Single temporal split ICD chapter probing."""
-    scaler = StandardScaler()
-    X_tr = scaler.fit_transform(embeddings[train_mask])
-    X_te = scaler.transform(embeddings[test_mask])
-
-    N_te = int(test_mask.sum())
-    C = targets.shape[1]
-    per_chapter: dict[str, dict] = {}
-    macro_aurocs: list[float] = []
-    macro_auprcs: list[float] = []
-    macro_f1s: list[float] = []
-
-    for c in range(C):
-        y_tr = targets[train_mask, c]
-        y_te = targets[test_mask, c]
-
-        if y_tr.sum() < 1 or (len(y_tr) - y_tr.sum()) < 1:
-            continue
-        if y_te.sum() < 1 or (len(y_te) - y_te.sum()) < 1:
-            continue
-
-        key = chapter_names[c] if chapter_names else str(c)
-        clf = LogisticRegression(
-            max_iter=1000, class_weight="balanced", random_state=SEED)
-        clf.fit(X_tr, y_tr)
-
-        y_prob = clf.predict_proba(X_te)[:, 1]
-        y_pred = clf.predict(X_te)
-
-        auroc = float(roc_auc_score(y_te, y_prob))
-        auprc = float(average_precision_score(y_te, y_prob))
-        f1_val = float(f1_score(y_te, y_pred))
-
-        n_pos = int(y_te.sum())
-        per_chapter[key] = {
-            "n_positive": n_pos,
-            "prevalence": round(n_pos / N_te, 4),
-            "mean_auroc": auroc, "std_auroc": 0.0,
-            "mean_auprc": auprc, "std_auprc": 0.0,
-            "mean_f1": f1_val, "std_f1": 0.0,
-        }
-        macro_aurocs.append(auroc)
-        macro_auprcs.append(auprc)
-        macro_f1s.append(f1_val)
-
-    return {
-        "per_chapter": per_chapter,
-        "n_chapters_evaluated": len(per_chapter),
-        "macro_auroc": float(np.mean(macro_aurocs)) if macro_aurocs else float("nan"),
-        "macro_auprc": float(np.mean(macro_auprcs)) if macro_auprcs else float("nan"),
-        "macro_f1": float(np.mean(macro_f1s)) if macro_f1s else float("nan"),
-    }
-
-
-# =============================================================================
-# Cohort subset filtering
-# =============================================================================
-
-def compute_subset_mask(
-    sequences_path: Path,
-    subject_ids: np.ndarray,
-    subset: str,
-) -> np.ndarray:
-    """Compute boolean mask (True=keep) for --eval-subset filtering.
-
-    Parameters
-    ----------
-    sequences_path : path to sequences.jsonl
-    subject_ids    : (N,) sample-level patient IDs
-    subset         : "all", "fcode", or "non_fcode"
-
-    Returns
-    -------
-    (N,) bool array - True for samples to keep
-    """
-    if subset == "all":
-        return np.ones(len(subject_ids), dtype=bool)
-
-    patients: dict[str, dict] = {}
-    with open(sequences_path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            p = json.loads(line)
-            patients[str(p["subject_id"])] = p
-
-    fcode_pids: set[str] = set()
-    for pid, p in patients.items():
-        for enc in p["encounters"]:
-            if any(c.upper().startswith("F3") for c in enc.get("icd_codes", [])):
-                fcode_pids.add(pid)
-                break
-
-    is_fcode = np.array([str(sid) in fcode_pids for sid in subject_ids])
-    return is_fcode if subset == "fcode" else ~is_fcode
-
-
-def filter_vecs(vecs: dict, mask: np.ndarray) -> dict:
-    """Apply a boolean sample mask to all arrays in an embedding dict."""
-    filtered = {}
-    for key, val in vecs.items():
-        if val is None:
-            filtered[key] = None
-        elif isinstance(val, np.ndarray):
-            filtered[key] = val[mask]
-        else:
-            filtered[key] = val
-    return filtered
-
-
-# =============================================================================
 # Core evaluation
 # =============================================================================
-
-def _format_binary_result(res: dict) -> dict:
-    """Extract standard metrics from evaluate_binary_probe result."""
-    return {
-        "auroc": res["mean_auroc"],
-        "auprc": res["mean_auprc"],
-        "f1":    res["mean_f1"],
-        "brier": res["mean_brier"],
-        "std_auroc": res["std_auroc"],
-        "std_auprc": res["std_auprc"],
-        "std_f1":    res["std_f1"],
-        "std_brier": res["std_brier"],
-        "n_samples":  res["n_samples"],
-        "n_positive": res["n_positive"],
-        "positive_rate": res["positive_rate"],
-    }
-    
 
 def run_tasks(
     vecs: dict,
@@ -529,7 +98,7 @@ def run_tasks(
 
     # -- readmit_30d (patient-level) --
     if "readmit_30d" in tasks:
-        labels_30d = load_label_30d(patients_dict, pat_ids)
+        labels_30d = load_label(patients_dict, pat_ids, "label_30d")
         task_results: dict = {}
         for vec_name, emb in pat_vectors.items():
             if split == "temporal":
@@ -541,7 +110,7 @@ def run_tasks(
             else:
                 res = evaluate_binary_probe(emb, labels_30d)
                 
-            task_results[vec_name] = _format_binary_result(res)
+            task_results[vec_name] = format_binary_result(res)
         results["readmit_30d"] = task_results
 
     # -- escalation (encounter-level) --
@@ -560,7 +129,7 @@ def run_tasks(
                 else:
                     res = evaluate_binary_probe(emb, labels_esc)
                     
-                task_results[vec_name] = _format_binary_result(res)
+                task_results[vec_name] = format_binary_result(res)
             results["escalation"] = task_results
 
     # -- icd_block (encounter-level) --
@@ -593,7 +162,7 @@ def run_tasks(
         if is_supervised or mask_pos is None:
             print("  [escalation_type] skipped - requires JEPA model with mask positions")
         else:
-            criteria_labels = compute_escalation_criteria_labels(patients_dict, subject_ids, mask_pos)
+            criteria_labels = compute_escalation_criterions(patients_dict, subject_ids, mask_pos)
             task_results = {}
             for vec_name, emb in enc_vectors.items():
                 per_criterion: dict = {}
@@ -625,7 +194,7 @@ def run_tasks(
                             continue
                         res = evaluate_binary_probe(emb, labels)
 
-                    per_criterion[criterion] = _format_binary_result(res)
+                    per_criterion[criterion] = format_binary_result(res)
                     macro_aurocs.append(res["mean_auroc"])
                     macro_auprcs.append(res["mean_auprc"])
                     macro_f1s.append(res["mean_f1"])
@@ -799,12 +368,10 @@ def main():
 
     # -- Filter by eval subset --
     if args.eval_subset != "all":
-        subset_mask = compute_subset_mask(
-            sequences_path, vecs["subject_ids"], args.eval_subset)
-        n_before = len(vecs["subject_ids"])
-        vecs = filter_vecs(vecs, subset_mask)
-        print(f"\n  Subset filter: {args.eval_subset} - "
-              f"{int(subset_mask.sum())}/{n_before} samples kept")
+        subset_mask = compute_subset_mask(patients_dict, vecs["subject_ids"], args.eval_subset)
+        vecs = { k: v[subset_mask] for k, v in vecs.items() 
+                 if k in ["z_enc_pooled", "z_encs", "z_pred", "z_target"] and v is not None
+               }
 
     # -- Compute temporal split --
     temporal_masks = None

@@ -18,9 +18,9 @@ from collections import Counter
 import numpy as np
 import torch
 
+from src.analysis.eval_infra import odds_ratio
 from src.models.sae import SparseAutoencoder
 from src.utils.io import load_sequences_dict
-from src.utils.arrays import odds_ratio
 from src.mimic.helper import parse_dt
 
 from src.utils.seed import SEED
@@ -265,14 +265,15 @@ def inspect_sae_features(
         # Metadata correlation (if provided)
         metadata_corr = None
         if metadata_features is not None and metadata_feature_names is not None:
-            from scipy import stats as sp_stats
+            from scipy import stats
             corrs = []
             for meta_idx, meta_name in enumerate(metadata_feature_names):
                 meta_col = metadata_features[:, meta_idx]
                 if np.std(meta_col) < 1e-10 or np.std(feat_vals) < 1e-10:
                     continue
-                r, p = sp_stats.pearsonr(feat_vals, meta_col)
-                corrs.append({"feature": meta_name, "r": round(float(r), 3),
+                r, p = stats.pearsonr(feat_vals, meta_col)
+                corrs.append({"feature": meta_name, 
+                              "r": round(float(r), 3),
                               "p": float(p)})
             corrs.sort(key=lambda x: abs(x["r"]), reverse=True)
             metadata_corr = corrs[:5]
@@ -494,3 +495,79 @@ def sae_seed_stability(
         },
     }
     return summary
+
+
+# =========================================================================
+# SAE decomposition for a single patient
+# =========================================================================
+
+def decompose_patient(
+    patient_idx: int,
+    vectors_dict: dict[str, np.ndarray],
+    sae_models_dict: dict[str, SparseAutoencoder],
+    feature_cards_dict: dict[str, list[dict]],
+    top_k: int = 8,
+) -> dict:
+    """Decompose one patient's vectors through their respective SAEs.
+
+    Parameters
+    ----------
+    patient_idx    : row index into the (N, D) arrays
+    vectors_dict   : {name: (N, D)} arrays (e.g. pred_error, z_pred, z_target)
+    sae_models_dict    : {name: SparseAutoencoder} - trained, eval-mode
+    feature_cards_dict : {name: [card, ...]} - from inspect_sae_features
+    top_k          : max active features to return per vector
+
+    Returns
+    -------
+    dict keyed by vector name, each value a list of dicts:
+        {feature_idx, magnitude, label, decoder_direction}
+    sorted descending by magnitude.
+    """
+    def _card_lookup(cards: list[dict]) -> dict[int, str | None]:
+        lookup: dict[int, str | None] = {}
+        for card in cards:
+            idx = card["feature_idx"]
+            label = None
+            enriched = card.get("top_enriched_icd", [])
+            if enriched:
+                label = enriched[0].get("code")
+            if label is None:
+                enriched_meds = card.get("top_enriched_meds", [])
+                if enriched_meds:
+                    label = enriched_meds[0].get("med")
+            lookup[idx] = label
+        return lookup
+
+    result = {}
+    for name, sae in sae_models_dict.items():
+        if name not in vectors_dict:
+            continue
+        vec = vectors_dict[name][patient_idx]
+        cards = feature_cards_dict.get(name, [])
+        card_lookup = _card_lookup(cards)
+
+        device = next(sae.parameters()).device
+        with torch.no_grad():
+            x = torch.tensor(vec, dtype=torch.float32, device=device).unsqueeze(0)
+            activations = sae.encode(x).squeeze(0).cpu().numpy()
+
+        decoder_weight = sae.decoder.weight.detach().cpu().numpy()  # (embed_dim, n_features)
+
+        active_idx = np.nonzero(activations)[0]
+        magnitudes = activations[active_idx]
+        order = np.argsort(-np.abs(magnitudes))[:top_k]
+        active_idx = active_idx[order]
+        magnitudes = magnitudes[order]
+
+        features = []
+        for fi, mag in zip(active_idx, magnitudes):
+            features.append({
+                "feature_idx": int(fi),
+                "magnitude": float(mag),
+                "label": card_lookup.get(int(fi)),
+                "decoder_direction": decoder_weight[:, int(fi)].tolist(),
+            })
+        result[name] = features
+
+    return result

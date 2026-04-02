@@ -17,9 +17,7 @@ import phate as phate_module
 import pingouin as pg
 
 
-from src.utils.seed import SEED, get_rng
-rng  = get_rng()
-
+from src.utils.seed import SEED
 
 # =============================================================================
 # PCA Decomp
@@ -145,8 +143,6 @@ def fit_phate(
 # Divergent pairs analysis
 # =============================================================================
 
-from src.utils.arrays import cosine_sim_matrix, cosine_dist_matrix
-
 # -----------------
 
 def find_divergent_pairs(
@@ -254,6 +250,9 @@ def divergence_variance_comparison(
     If divergent-pair vectors concentrate along a PC axis (high variance
     ratio), that axis encodes prediction divergence structure - not noise.
     """
+    from src.utils.seed import get_rng
+    rng  = get_rng()
+    
     row_idx, col_idx = pair_indices
     k     = pca_components.shape[0]
     n_div = len(row_idx)

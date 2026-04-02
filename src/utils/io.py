@@ -180,8 +180,8 @@ def load_sequences(n=None, path: Path = None) -> list[dict]:
 # Metadata
 # =============================================================================
 
-def load_metadata(path: Path = None) -> tuple:
-    d = Path(path) if path else DATA_DIR
+def load_metadata(dir: Path = None) -> tuple:
+    d = Path(dir) if dir else DATA_DIR
     metadata = np.load(d / "metadata_features.npy")
     with open(d / "metadata_feature_names.json") as f:
         feature_names = json.load(f)

@@ -22,12 +22,7 @@ from src.training.utils.datasets import build_vocab
 BQ_PROJECT_ID = "aihc-463505"
 BQ_PROJECT_NAME = "mimic-aihc"
 MIMIC_BQ_DATASET = "physionet-data.mimiciv_3_1_hosp"
-
 # =============================================================================
-# Extraction Settings
-
-# =============================================================================
-
 
 parser = argparse.ArgumentParser(description="""MIMIC-IV Patient Sequence extraction pipeline
     - Requires a PhysioNet-linked BigQuery project, or cached parquet files in data/parquet/.
@@ -87,7 +82,8 @@ def save_dataset(sequences: list[dict], out_dir: Path):
 
     # -- dataset_stats.json --
     enc_counts = [len(s["encounters"]) for s in sequences]
-    n_pos = sum(1 for s in sequences if s.get("label_30d") == 1)
+    n_pos_30d = sum(1 for s in sequences if s.get("label_30d") == 1)
+    n_pos_esc = sum(1 for s in sequences if s.get("label_escalation") == 1)
     all_icd = set()
     all_meds = set()
     for s in sequences:
@@ -99,9 +95,12 @@ def save_dataset(sequences: list[dict], out_dir: Path):
     with open(meta_path, "w") as f:
         json.dump({
             "n_patients": len(sequences),
-            "n_positive_30d": n_pos,
-            "n_negative_30d": len(sequences) - n_pos,
-            "positive_rate_30d": round(n_pos / len(sequences), 4),
+            "n_positive_30d": n_pos_30d,
+            "n_negative_30d": len(sequences) - n_pos_30d,
+            "positive_rate_30d": round(n_pos_30d / len(sequences), 4),
+            "n_positive_esc": n_pos_esc,
+            "n_negative_esc": len(sequences) - n_pos_esc,
+            "positive_rate_esc": round(n_pos_esc / len(sequences), 4),
             "encounters_per_patient": {
                 "mean": round(np.mean(enc_counts), 2),
                 "median": int(np.median(enc_counts)),

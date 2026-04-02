@@ -12,9 +12,10 @@ Architecture
 from os import environ
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+import gc
+import json
 from pathlib import Path
 from typing import Dict
-import json
 from collections import defaultdict
 
 import numpy as np
@@ -37,20 +38,21 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
     ema         = opt_params["ema"]
+    accum_steps = opt_params.get("accumulation_steps", 1)
 
     # --- data ---
     data_params     = params["data"]
     batch_size      = data_params["batch_size"]
     n_patients      = data_params["n_patients"]
+    max_encounters  = data_params.get("max_encounters", None)
     pin_memory      = data_params.get("pin_mem", True) and device.type == "cuda"
+    num_workers     = data_params.get("num_workers", 0)
 
     # --- meta ---
     meta_p          = params["meta"]
     seed            = meta_p["seed"]
     use_bfloat16    = meta_p["use_bfloat16"]
-    log_vecs        = meta_p["log_vecs"]
-    log_vecs_every  = meta_p["log_vecs_every"] or epochs
-    checkpoint_every = meta_p["checkpoint_every"] or epochs
+    save_every      = meta_p["save_every"] or epochs
 
     # --- build sequences, vocab, dataset, loader ---
     patients = load_sequences(n=n_patients)
@@ -58,11 +60,13 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     with open(run_dir / "vocab.json", "w", encoding="utf-8") as fh:
         json.dump(vocab, fh, indent=2)
 
-    dataset = MimicDataset(patients, vocab, data_params, pad_idx=0)
+    dataset = MimicDataset(patients, vocab, data_params, pad_idx=0, max_encounters=max_encounters)
+    del patients; gc.collect()
+    
     loader = DataLoader(
         dataset, batch_size,
         shuffle=True, collate_fn=collate_fn, drop_last=False,
-        num_workers=2, persistent_workers=True,
+        num_workers=num_workers, persistent_workers=True,
         pin_memory=pin_memory)
 
     ckpt_dir = run_dir / "checkpoints"
@@ -121,11 +125,13 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
     for epoch in range(start_epoch, epochs + 1):
         model.train()
+        
+        save_this_epoch = (epoch % save_every == 0 or epoch == epochs)
         epoch_losses: list[float] = []
         epoch_records: defaultdict[str, list[np.ndarray]] = defaultdict(list)
         n_batches = 0
 
-        for batch in loader:
+        for i, batch in enumerate(loader):
             batch_dev = {
                 k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
@@ -133,38 +139,39 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             
             def forward_unto_dawn():
                 z_enc, z_pred, z_target = model(batch_dev)
-                for k, v in zip(
-                    ["z_encs", "z_pred", "z_target", "mask_pos", "ctx_pad_mask"],
-                    [z_enc, z_pred, z_target, batch_dev["mask_pos"], batch_dev["ctx_pad_mask"]],
-                ):
-                    epoch_records[k].append(v.detach().cpu().numpy())
-                epoch_records["subject_ids"].extend(batch["subject_ids"])
-                
                 loss = F.smooth_l1_loss(z_pred, z_target)
+                if save_this_epoch:
+                    epoch_records["z_encs"].append(z_enc.detach().cpu().numpy())
+                    epoch_records["z_pred"].append(z_pred.detach().cpu().numpy())
+                    epoch_records["z_target"].append(z_target.detach().cpu().numpy())
+                    epoch_records["mask_pos"].append(batch_dev["mask_pos"].cpu().numpy())
+                    epoch_records["ctx_pad_mask"].append(batch_dev["ctx_pad_mask"].cpu().numpy())
+                    epoch_records["subject_ids"].extend(batch["subject_ids"])
                 return loss
 
             if use_bfloat16 and scaler is not None:
-                with torch.amp.autocast("cuda", dtype=torch.bfloat16):  # type: ignore
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16): # type: ignore
                     loss = forward_unto_dawn()
-                    
                 scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                grad_mon.capture()
-                scaler.step(optimizer)
-                scaler.update()
-
             else:
                 loss = forward_unto_dawn()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                grad_mon.capture()
-                optimizer.step()
 
-            optimizer.zero_grad(set_to_none=True)
-
-            if scheduler is not None:
-                scheduler.step()
+            # -- gradient accumulation --
+            if (i + 1) % accum_steps == 0:
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    grad_mon.capture()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    grad_mon.capture()
+                    optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                if scheduler is not None:
+                    scheduler.step()
 
             # -- EMA update of target encoder --
             with torch.no_grad():
@@ -172,6 +179,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 for param_q, param_k in zip(model.encoder.parameters(), model.target_encoder.parameters()):
                     param_k.data.mul_(m).add_((1. - m) * param_q.detach().data)
 
+            # -- stat logging --
             epoch_losses.append(loss.item())
             logger.log_step(loss.item())
             n_batches += 1
@@ -179,21 +187,19 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         # --- EVAL --------------------------------------------------------------
         model.eval()
 
-        if epoch % checkpoint_every == 0 or epoch == epochs:
+        if save_this_epoch:
             save_checkpoint(model, model_params,
                             optimizer, scheduler, scaler,
                             epoch, logger.global_step, logger._loss_history,
                             ckpt_dir, seed=seed)
-
-        stat_log = {}
-        if log_vecs and (epoch % log_vecs_every == 0 or epoch == epochs or epoch == 1):
             records = {k: v for k, v in epoch_records.items()}
             save_embedding_vecs(records, epoch, emb_dir)
+            del records; epoch_records.clear(); gc.collect()
+
         logger.log_epoch(
             loss=float(np.mean(epoch_losses)),
             lr=optimizer.param_groups[0]["lr"],
-            **stat_log, **grad_mon.get_metrics(),
-        )
+            **grad_mon.get_metrics())
         grad_mon.reset()
 
     # ------------------------------------------------------------------

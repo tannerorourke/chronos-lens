@@ -11,9 +11,10 @@ Architecture
 from os import environ
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+import gc
+import json
 from pathlib import Path
 from typing import Dict
-import json
 
 import numpy as np
 import torch
@@ -70,17 +71,18 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
     # --- data -----------------------------------------------------------------
     data_params     = params["data"]
+    label_key       = data_params["label_key"]
     batch_size      = data_params["batch_size"]
     n_patients      = data_params["n_patients"]
+    max_encounters  = data_params.get("max_encounters", None)
     pin_memory      = data_params.get("pin_mem", True) and device.type == "cuda"
+    num_workers     = data_params.get("num_workers", 0)
 
     # --- meta -----------------------------------------------------------------
     meta_p          = params["meta"]
     seed            = meta_p["seed"]
     use_bfloat16    = meta_p["use_bfloat16"]
-    log_vecs        = meta_p["log_vecs"]
-    log_vecs_every  = meta_p["log_vecs_every"] or epochs
-    checkpoint_every = meta_p["checkpoint_every"] or epochs
+    save_every      = meta_p["save_every"] or epochs
 
     # --- build sequences, vocab, dataset, loader ------------------------------
     patients = load_sequences(n=n_patients)
@@ -88,11 +90,13 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     with open(run_dir / "vocab.json", "w", encoding="utf-8") as fh:
         json.dump(vocab, fh, indent=2)
 
-    dataset = SupervisedDataset(patients, vocab, data_params, pad_idx=0)
+    dataset = SupervisedDataset(patients, vocab, data_params, pad_idx=0, max_encounters=max_encounters)
+    del patients; gc.collect()
+    
     loader = DataLoader(
         dataset, batch_size,
         shuffle=True, collate_fn=supervised_collate_fn, drop_last=False,
-        num_workers=2, persistent_workers=True,
+        num_workers=num_workers, persistent_workers=True,
         pin_memory=pin_memory)
 
     ckpt_dir = run_dir / "checkpoints"
@@ -143,6 +147,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
     for epoch in range(start_epoch, epochs + 1):
         model.train()
+        
+        save_this_epoch = (epoch % save_every == 0 or epoch == epochs)
         epoch_losses: list[float] = []
         z_c, sids = [], []
 
@@ -154,10 +160,10 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
             def forward_unto_dawn():
                 z_enc_pooled, logits = model(batch_dev)
-                z_c.append(z_enc_pooled.detach().cpu().numpy())
-                sids.extend(batch["subject_ids"])
-                
                 loss = criterion(logits, batch_dev["labels"].float())
+                if save_this_epoch:
+                    z_c.append(z_enc_pooled.detach().cpu().numpy())
+                    sids.extend(batch["subject_ids"])
                 return loss
 
             if use_bfloat16 and scaler is not None:
@@ -186,27 +192,22 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             epoch_losses.append(loss.item())
             logger.log_step(loss.item())
 
-        # -- end of epoch --------------------------------------------------
+        # --- EVAL -----------------------------------------------------
         model.eval()
 
-        if epoch % checkpoint_every == 0 or epoch == epochs:
+        if save_this_epoch:
             save_checkpoint(model, model_params,
                             optimizer, scheduler, scaler,
                             epoch, logger.global_step, logger._loss_history,
                             ckpt_dir, seed=seed)
-
-        if log_vecs and (epoch % log_vecs_every == 0 or epoch == epochs or epoch == 1):
             save_supervised_embeddings(z_c, sids, epoch, emb_dir)
-
+        
         logger.log_epoch(
             loss=float(np.mean(epoch_losses)),
             lr=optimizer.param_groups[0]["lr"],
-            **grad_mon.get_metrics(),
-        )
+            **grad_mon.get_metrics())
         grad_mon.reset()
 
     # ------------------------------------------------------------------
-    # --- POST-TRAINING ------------------------------------------------
-    # ------------------------------------------------------------------
-
+    # --- DONE ---------------------------------------------------------
     logger.finalize()

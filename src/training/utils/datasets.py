@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 
+import numpy as np
 import torch
 from torch.utils.data import Dataset
     
@@ -32,11 +33,16 @@ def build_vocab(
     return vocab
 
 
-def encode_encounter(enc: dict, vocab: dict[str, int], PAD_IDX: int,
-                     modality: str = "all") -> list[int]:
+def encode_encounter(
+    enc: dict, 
+    vocab: dict[str, int], 
+    PAD_IDX: int,
+    modality: str = "all",
+    use_np_int32: bool = True,
+) -> list[int] | np.ndarray:
     """Return a list of token indices for one encounter dict.
 
-    modality : "all" | "icd_only" | "meds_only"
+       modality : "all" | "icd_only" | "meds_only"
     """
     if modality == "icd_only":
         codes = enc.get("icd_codes", [])
@@ -44,8 +50,13 @@ def encode_encounter(enc: dict, vocab: dict[str, int], PAD_IDX: int,
         codes = enc.get("meds", [])
     else:
         codes = enc.get("icd_codes", []) + enc.get("meds", [])
-    ids = [vocab[c] for c in codes if c in vocab]
-    return ids if ids else [PAD_IDX]   # at least one token
+    enc_toks = [vocab[c] for c in codes if c in vocab]
+    
+    if use_np_int32:
+        enc_toks = np.array(enc_toks, dtype=np.int32)
+    if len(enc_toks) == 0:
+        return [PAD_IDX]
+    return enc_toks
 
 
 # =============================================================================
@@ -71,34 +82,29 @@ class MimicDataset(Dataset):
         data_params: dict, 
         pad_idx: int = 0,
         max_encounters: int | None = None, 
-        max_tokens: int | None = None,
-        label_key: str = "label"
+        use_np_int32: bool = True
     ):
         max_encounters = data_params["max_encounters"]
-        max_tokens     = data_params["max_tokens"]
         modality       = data_params["modality"]
         
         self.samples: list[dict] = []
         self.pad_idx = pad_idx
-        self.label_key = label_key
         for p in patients:
             encs = p.get("encounters", [])
             if len(encs) < 2:
                 continue
             if max_encounters is not None:
                 encs = encs[:max_encounters]
-            label  = int(p.get(label_key, 0))
             sid    = str(p["subject_id"])
-            tokens = [encode_encounter(e, vocab, self.pad_idx, modality) for e in encs]
-            if max_tokens is not None:
-                tokens = [t[:max_tokens] for t in tokens]
+            tokens = [encode_encounter(e, vocab, self.pad_idx, modality, use_np_int32) 
+                      for e in encs]
+
             for mask_pos in range(len(encs)):
                 self.samples.append({
                     "context":    [tokens[i] for i in range(len(encs)) if i != mask_pos],
                     "target":     tokens[mask_pos],
                     "mask_pos":   mask_pos,
                     "subject_id": sid,
-                    "label":      label,
                 })
         assert len(self.samples) > 0, "[MimicDataset] No training samples produced"
 
@@ -143,7 +149,6 @@ def collate_fn(batch: list[dict]) -> dict:
         tgt_tok_mask[i, :n] = True
 
     mask_pos   = torch.tensor([item["mask_pos"] for item in batch], dtype=torch.long)
-    labels     = torch.tensor([item["label"]    for item in batch], dtype=torch.long)
     subject_ids = [item["subject_id"] for item in batch]
 
     return {
@@ -162,20 +167,25 @@ def collate_fn(batch: list[dict]) -> dict:
 # =============================================================================
 
 class SupervisedDataset(Dataset):
-    """One sample per patient using all encounters.
-
-    Unlike MimicDataset which creates N samples per patient (one per
-    masked encounter), this creates exactly one sample with all
-    encounters as context and the patient label as the target.
+    """One sample per patient using all encounters. Includes label=label_key
+       for loss computation. Unlike MimicDataset which creates N samples per 
+       patient (one per masked encounter), this creates exactly one sample with 
+       all encounters as context and the patient label as the target.
     
-    Used by the supervised transformer.
+       Used by the supervised transformer.
     """
 
-    def __init__(self, patients: list[dict], vocab: dict[str, int],
-                 data_params: dict, pad_idx: int = 0, label_key: str = "label"):
+    def __init__(
+        self, 
+        patients: list[dict], 
+        vocab: dict[str, int],
+        data_params: dict,
+        pad_idx: int = 0, 
+        max_encounters: int | None = None
+    ):
         max_encounters = data_params["max_encounters"]
-        max_tokens     = data_params["max_tokens"]
         modality       = data_params.get("modality", "all")
+        label_key      = data_params.get("label_key", "label_30d")
 
         self.samples: list[dict] = []
         self.pad_idx = pad_idx
@@ -188,8 +198,7 @@ class SupervisedDataset(Dataset):
             label  = int(p.get(label_key, 0))
             sid    = str(p["subject_id"])
             tokens = [encode_encounter(e, vocab, pad_idx, modality) for e in encs]
-            if max_tokens is not None:
-                tokens = [t[:max_tokens] for t in tokens]
+            
             self.samples.append({
                 "context":    tokens,
                 "subject_id": sid,

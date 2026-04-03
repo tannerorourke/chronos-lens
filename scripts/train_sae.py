@@ -93,8 +93,8 @@ def main():
     # --- Load target vector ---
     if target == "z_enc":
         z_encs = npz["z_encs"]                              # (N, C, D)
-        ctx_pad_masks = npz["ctx_pad_masks"].astype(bool)    # (N, C)
-        data = z_encs[~ctx_pad_masks].astype(np.float64)     # (N_valid, D)
+        ctx_pad_mask = npz["ctx_pad_mask"].astype(bool)    # (N, C)
+        data = z_encs[~ctx_pad_mask].astype(np.float64)     # (N_valid, D)
         print(f"  Flattened z_encs: {z_encs.shape} -> {data.shape} valid encounters")
     elif target == "pred_error":
         data = (npz["z_pred"] - npz["z_target"]).astype(np.float64)

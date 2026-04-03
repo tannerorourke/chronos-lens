@@ -28,10 +28,11 @@ def main():
     if not params:
         raise SystemExit(f"[run_train] Exiting. No parameters provided from 'experiments/{args.model}/config.yaml'.")
     
+    set_global_seed(params.get("meta", {}).get("seed"))
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
-        
         use_bf16 = params.get("meta", {}).get("use_bfloat16", False)
         if use_bf16:
             # Disable tf32 matmul when using bfloat16 to avoid stacking two levels of reduced precision
@@ -42,11 +43,11 @@ def main():
             torch.backends.cudnn.allow_tf32 = False
             torch.set_float32_matmul_precision('high')
     
-    print(f"Device: {device}")
+    print(f"Device: {torch.cuda.get_device_name() if device.type == 'cuda' else device}")
     print(f"Running model '{args.model}'")
-    print(f"  tag: {params['meta'].get('tag', '')}: {params['meta']['description']}")
+    print(f"  {params['meta'].get('tag', '')}: {params['meta']['description']}")
 
-    set_global_seed(params.get("meta", {}).get("seed"))
+    
 
     arch = params.get("model", {}).get("architecture", "stopgrad")
     if arch == "ema":

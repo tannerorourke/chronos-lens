@@ -37,13 +37,13 @@ def vicreg_regularization(
         zero = z.new_tensor(0.0)
         return var_weight * zero, cov_weight * zero, zero
 
-    # --- Variance term ---------------------------------------------------
+    # --- Variance term ---
     # Per-dimension std across the batch.
-    std = torch.sqrt(z.var(dim=0) + 1e-4)          # (D,)
+    std = torch.sqrt(z.var(dim=0) + 1e-4) # (D,)
     # Hinge: penalise dimensions whose std drops below 1
-    var_loss = F.relu(1.0 - std).mean()
+    var_loss = torch.mean(F.relu(1.0 - std))
 
-    # --- Covariance term -------------------------------------------------
+    # --- Covariance term ---
     # Center -> compute (D, D) covariance matrix
     z_centered = z - z.mean(dim=0)
     cov = (z_centered.T @ z_centered) / (B - 1)    # (D, D)
@@ -85,7 +85,7 @@ def jepa_stopgrad_loss(
     # --- VICReg regularization on z_pred ---
     var_pred, cov_pred, _ = vicreg_regularization(z_pred,    var_weight, cov_weight)
     
-    # --- VICReg on z_enc (flatten valid encounters) ----------------------
+    # --- VICReg on z_enc (flatten valid encounters) ---
     valid_mask = ~ctx_pad_mask                          # (B, C) True=real
     z_enc_flat = z_enc[valid_mask]                      # (N_valid, D)
     var_enc, cov_enc, _ = vicreg_regularization(z_enc_flat, var_weight, cov_weight)

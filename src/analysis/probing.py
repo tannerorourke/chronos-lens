@@ -146,7 +146,7 @@ def probe_vectors(
 
 def probe_encounter_level(
     z_encs: np.ndarray,
-    ctx_pad_masks: np.ndarray,
+    ctx_pad_mask: np.ndarray,
     enc_labels: np.ndarray,
     subject_ids: np.ndarray,
     n_splits: int = 5
@@ -160,7 +160,7 @@ def probe_encounter_level(
     Parameters
     ----------
     z_encs        : (N, C, D) encoder outputs per context encounter
-    ctx_pad_masks : (N, C) bool, True = padding
+    ctx_pad_mask : (N, C) bool, True = padding
     enc_labels    : (N, C) binary labels per encounter
     subject_ids   : (N,) patient IDs per sample
     n_splits      : number of GroupKFold splits
@@ -170,10 +170,10 @@ def probe_encounter_level(
     dict with fold-level and mean/std metrics matching the structure of
     evaluate_binary_probe, plus n_encounters and n_patients.
     """
-    valid_mask = ~ctx_pad_masks  # (N, C) True=valid
+    valid_mask = ~ctx_pad_mask  # (N, C) True=valid
 
     # Flatten valid encounters
-    X, groups, _ = flatten_valid_encounters(z_encs, ctx_pad_masks, subject_ids)
+    X, groups, _ = flatten_valid_encounters(z_encs, ctx_pad_mask, subject_ids)
     y = enc_labels[valid_mask]      # (N_valid,)
 
     gkf = GroupKFold(n_splits=n_splits)

@@ -11,12 +11,12 @@ import numpy as np
 def extract_jepa_embeddings(model, loader, device) -> dict:
     """Run JEPA model inference and collect embeddings.
 
-    Returns dict with keys: z_encs, z_pred, z_target, ctx_pad_masks, subject_ids, mask_pos
+    Returns dict with keys: z_encs, z_pred, z_target, ctx_pad_mask, subject_ids, mask_pos
     """
     all_z_encs: list[np.ndarray] = []
     all_z_pred: list[np.ndarray] = []
     all_z_target: list[np.ndarray] = []
-    all_ctx_pad_masks: list[np.ndarray] = []
+    all_ctx_pad_mask: list[np.ndarray] = []
     all_mask_pos: list[np.ndarray] = []
     all_subject_ids: list[str] = []
 
@@ -31,16 +31,16 @@ def extract_jepa_embeddings(model, loader, device) -> dict:
             all_z_encs.append(z_enc.cpu().numpy())
             all_z_pred.append(z_pred.cpu().numpy())
             all_z_target.append(z_target.cpu().numpy())
-            all_ctx_pad_masks.append(batch_dev["ctx_pad_mask"].cpu().numpy())
+            all_ctx_pad_mask.append(batch_dev["ctx_pad_mask"].cpu().numpy())
             all_mask_pos.append(batch_dev["mask_pos"].cpu().numpy())
             all_subject_ids.extend(batch["subject_ids"])
 
-    # Pad z_encs and ctx_pad_masks to uniform context length across batches
+    # Pad z_encs and ctx_pad_mask to uniform context length across batches
     max_C = max(arr.shape[1] for arr in all_z_encs)
     D = all_z_encs[0].shape[2]
     padded_z_encs: list[np.ndarray] = []
     padded_masks: list[np.ndarray] = []
-    for z, m in zip(all_z_encs, all_ctx_pad_masks):
+    for z, m in zip(all_z_encs, all_ctx_pad_mask):
         B, C = z.shape[0], z.shape[1]
         if C < max_C:
             z = np.concatenate([z, np.zeros((B, max_C - C, D), dtype=z.dtype)], axis=1)
@@ -52,7 +52,7 @@ def extract_jepa_embeddings(model, loader, device) -> dict:
         "z_encs": np.concatenate(padded_z_encs),    # (N, C_max, D)
         "z_pred": np.concatenate(all_z_pred),       # (N, D)
         "z_target": np.concatenate(all_z_target),   # (N, D)
-        "ctx_pad_masks": np.concatenate(padded_masks), # (N, C_max)
+        "ctx_pad_mask": np.concatenate(padded_masks), # (N, C_max)
         "subject_ids": np.array(all_subject_ids),   # (N,)
         "mask_pos": np.concatenate(all_mask_pos),   # (N,)
     }
@@ -95,9 +95,9 @@ def compute_derived_vectors(raw_vecs: dict) -> dict:
     if "z_pred" in vecs and "z_target" in vecs:
         vecs["pred_error"] = vecs["z_pred"] - vecs["z_target"]
 
-    if "z_encs" in vecs and "ctx_pad_masks" in vecs:
+    if "z_encs" in vecs and "ctx_pad_mask" in vecs:
         z_encs = vecs["z_encs"]              # (N, C, D)
-        pad_masks = vecs["ctx_pad_masks"]
+        pad_masks = vecs["ctx_pad_mask"]
         valid = (~pad_masks).astype(np.float32)[..., np.newaxis] # (N, C, 1)
         vecs["z_enc_pooled"] = (
             (z_encs * valid).sum(axis=1) /
@@ -233,7 +233,7 @@ def compute_subset_mask(patients: dict[str, dict], subject_ids: np.ndarray, subs
     return subset_mask
 
 
-def flatten_valid_encounters(z_encs, ctx_pad_masks, subject_ids) -> tuple:
+def flatten_valid_encounters(z_encs, ctx_pad_mask, subject_ids) -> tuple:
     """Flatten z_enc from (N, C, D) to (N_valid, D) using pad masks. Usually called
        in order to pool encounters over patients. enc_positions[i] is the context 
        position index for the i-th valid encounter.
@@ -241,7 +241,7 @@ def flatten_valid_encounters(z_encs, ctx_pad_masks, subject_ids) -> tuple:
     Returns (z_enc_flat, enc_subject_ids, enc_positions).
     
     """
-    valid_mask = ~ctx_pad_masks.astype(bool)
+    valid_mask = ~ctx_pad_mask.astype(bool)
     z_enc_flat = z_encs[valid_mask]
     sample_idx, ctx_pos = np.where(valid_mask)
     enc_subject_ids = np.asarray(subject_ids, dtype=str)[sample_idx]

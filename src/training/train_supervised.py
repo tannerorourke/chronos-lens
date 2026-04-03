@@ -86,9 +86,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
     # --- build sequences, vocab, dataset, loader ------------------------------
     patients = load_sequences(n=n_patients)
-    vocab = build_vocab(patients, pad_idx=0, dir=run_dir)
-    with open(run_dir / "vocab.json", "w", encoding="utf-8") as fh:
-        json.dump(vocab, fh, indent=2)
+    vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=False)
 
     dataset = SupervisedDataset(patients, vocab, data_params, pad_idx=0, max_encounters=max_encounters)
     del patients; gc.collect()
@@ -96,7 +94,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     loader = DataLoader(
         dataset, batch_size,
         shuffle=True, collate_fn=supervised_collate_fn, drop_last=False,
-        num_workers=num_workers, persistent_workers=True,
+        num_workers=num_workers, persistent_workers=num_workers > 0,
         pin_memory=pin_memory)
 
     ckpt_dir = run_dir / "checkpoints"
@@ -149,7 +147,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         model.train()
         
         save_this_epoch = (epoch % save_every == 0 or epoch == epochs)
-        epoch_losses: list[float] = []
         z_c, sids = [], []
 
         for batch in loader:
@@ -173,7 +170,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                grad_mon.capture()
+                logger.grad_mon.capture(model.parameters())
                 scaler.step(optimizer)
                 scaler.update()
 
@@ -181,7 +178,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 loss = forward_unto_dawn()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                grad_mon.capture()
+                logger.grad_mon.capture(model.parameters())
                 optimizer.step()
 
             optimizer.zero_grad(set_to_none=True)
@@ -189,8 +186,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             if scheduler is not None:
                 scheduler.step()
 
-            epoch_losses.append(loss.item())
-            logger.log_step(loss.item())
+            logger.log_batch(loss.item(), batch.size(0))
 
         # --- EVAL -----------------------------------------------------
         model.eval()
@@ -198,15 +194,12 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         if save_this_epoch:
             save_checkpoint(model, model_params,
                             optimizer, scheduler, scaler,
-                            epoch, logger.global_step, logger._loss_history,
+                            epoch, logger.global_step, logger.loss_history,
                             ckpt_dir, seed=seed)
             save_supervised_embeddings(z_c, sids, epoch, emb_dir)
         
-        logger.log_epoch(
-            loss=float(np.mean(epoch_losses)),
-            lr=optimizer.param_groups[0]["lr"],
-            **grad_mon.get_metrics())
-        grad_mon.reset()
+        logger.log_epoch(lr=optimizer.param_groups[0]["lr"],
+                         **grad_mon.get_metrics())
 
     # ------------------------------------------------------------------
     # --- DONE ---------------------------------------------------------

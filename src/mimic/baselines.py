@@ -37,13 +37,58 @@ from src.utils.seed import SEED, set_global_seed
 
 LABEL_KEYS = ["label_30d", "label_escalation"]
 
+# Columns to exclude when predicting each label.
+# These are features derived from or proxying the prediction target.
+_EXCLUDE_FOR_LABEL: dict[str, list[str]] = {
+    "label_escalation": [
+        "label_escalation",
+        "label_escalation_per_enc",
+        "escalation_criteria_fired",
+        "label_30d",
+        # Tier 5: all escalation-derived features
+        "n_escalation_events",
+        "first_escalation_position",
+        "escalation_rate",
+        "has_new_subcategory",
+        "has_severity_increase",
+        "has_new_specifier",
+        "has_f32_to_f33",
+        "has_med_initiation",
+        "has_new_drug_class",
+        # Tier 6 trajectory (derived from the same encounter-over-encounter changes)
+        "f_block_growth",       # approx has_new_subcategory as a count
+        "n_unique_f_blocks",    # correlated with f_block_growth
+        "max_f_severity",       # correlated with severity_increase
+    ],
+    "label_30d": [
+        # The label itself
+        "label_30d",
+        "label_escalation",
+        "label_escalation_per_enc",
+        "escalation_criteria_fired",
+        # Tier 4 temporal: min gap directly encodes readmission timing
+        "min_days_between_admissions",
+        "mean_days_between_admissions",
+    ],
+}
+
 # =============================================================================
 # Private helpers
 # =============================================================================
 
-def _drop_label_cols(X, feature_names: list[str], label_keys: list[str] = LABEL_KEYS):
-    """Remove columns whose name matches any label key."""
-    keep = [i for i, name in enumerate(feature_names) if name not in label_keys]
+def _drop_cols_for_label(X, feature_names: list[str], label_key: str):
+    """Remove columns that leak information about the target label.
+
+    Always drops ALL label columns (don't let label_30d predict escalation
+    either — they may be correlated). Then drops label-specific exclusions
+    (escalation-derived features, temporal proxies, etc.).
+    """
+    exclude: set[str] = set()
+    for cols in _EXCLUDE_FOR_LABEL.values():
+        exclude.update(cols)
+    exclude.update(_EXCLUDE_FOR_LABEL.get(label_key, []))
+
+    keep = [i for i, name in enumerate(feature_names) if name not in exclude]
     new_names = [feature_names[i] for i in keep]
     if scipy.sparse.issparse(X):
         return X[:, keep], new_names
@@ -133,7 +178,7 @@ def _run_a_baseline(
         return fold-level + mean metrics.
     """
     n_pos = int(y.sum())
-    print(f"    {name:<22s} ({X.shape[1]} features) ... ", end="", flush=True)
+    print(f"\n    {name:<22s} ({X.shape[1]} features) ... ", end="", flush=True)
     
     is_sparse = scipy.sparse.issparse(X)
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
@@ -179,10 +224,10 @@ def _run_a_baseline(
         "std_brier":  float(np.std(fold_brier)),
     }
     
-    print(f"\n  AUROC: {results['mean_auroc']:.4f} +/- {results['std_auroc']:.4f}")
-    print(f"  AUPRC: {results['mean_auprc']:.4f} +/- {results['std_auprc']:.4f}")
-    print(f"  F1:    {results['mean_f1']:.4f} +/- {results['std_f1']:.4f}")
-    print(f"  Brier: {results['mean_brier']:.4f} +/- {results['std_brier']:.4f}")
+    print(f"\n      AUROC: {results['mean_auroc']:.4f} +/- {results['std_auroc']:.4f}")
+    print(f"      AUPRC: {results['mean_auprc']:.4f} +/- {results['std_auprc']:.4f}")
+    print(f"      F1:    {results['mean_f1']:.4f} +/- {results['std_f1']:.4f}")
+    print(f"      Brier: {results['mean_brier']:.4f} +/- {results['std_brier']:.4f}")
     
     return results
 
@@ -211,45 +256,53 @@ def run_baselines(
     ordered_sequences = [pid_to_seq[pid] for pid in patient_ids]
     del pid_to_seq
 
-    # Pre-clean metadata features (remove columns whose name matches any label key)
-    X_meta_all, _ = _drop_label_cols(metadata, feature_names)
-    X_meta_all = np.nan_to_num(X_meta_all, nan=0.0)
-    print(f"    Metadata features: {X_meta_all.shape[0]} patients x {X_meta_all.shape[1]} features")
-
     results: dict = {}
     for label_key in LABEL_KEYS:
         labels = np.array([int(s.get(label_key, 0)) for s in ordered_sequences])
         n_pos = int(labels.sum())
         n_neg = len(labels) - n_pos
-        print(f"\n    Label: {label_key}  (pos={n_pos}, neg={n_neg})")
+        print(f"  Label: {label_key}  (pos={n_pos}, neg={n_neg})")
 
         scale_pos = n_neg / n_pos
         label_results: dict = {}
 
-        # -- Metadata baselines (small) --
-        label_results["metadata_logistic"] = _run_a_baseline(
-            LogisticRegression, dict(max_iter=1000, class_weight="balanced", 
-                                     solver="lbfgs", random_state=SEED),
-            X_meta_all, labels, name="metadata_logistic",
-        )
+        # -- Metadata baselines (small, per-label column exclusion) --
+        X_meta_clean, meta_names_clean = _drop_cols_for_label(
+            metadata, feature_names, label_key)
+        X_meta_clean = np.nan_to_num(X_meta_clean, nan=0.0)
         
+        # print(f"Remaining features ({len(meta_names_clean)}):")
+        # for name in meta_names_clean:
+        #     print(f"  {name}")
+        
+        print(f"  Metadata features: {X_meta_clean.shape[1]} features "
+              f"({len(feature_names) - len(meta_names_clean)} excluded for {label_key})")
+
+        label_results["metadata_logistic"] = _run_a_baseline(
+            LogisticRegression, dict(max_iter=1000, class_weight="balanced",
+                                     solver="lbfgs", random_state=SEED),
+            X_meta_clean, labels, name="metadata_logistic",
+        )
+
         label_results["metadata_xgboost"] = _run_a_baseline(
             XGBClassifier, dict(n_estimators=200, max_depth=6, learning_rate=0.1,
                                 scale_pos_weight=scale_pos, eval_metric="logloss",
                                 random_state=SEED, verbosity=0),
-            X_meta_all, labels, name="metadata_xgboost",
+            X_meta_clean, labels, name="metadata_xgboost",
         )
+        del X_meta_clean
 
-        # -- Token baselines (large, sparse) --
-        print("    Building token-level features...")
+        # -- Token baselines (large, sparse, per-label column exclusion) --
+        print("  Building token-level features...")
         X_tok, tok_names = _build_token_features(ordered_sequences, vocab=vocab)
-        X_tok_clean, _ = _drop_label_cols(X_tok, tok_names)
+        X_tok_clean, tok_names_clean = _drop_cols_for_label(
+            X_tok, tok_names, label_key)
         del X_tok, tok_names
-        print(f"      Token features: {X_tok_clean.shape[0]} patients x {X_tok_clean.shape[1]} features"
+        print(f"  Token features: {X_tok_clean.shape[0]} patients x {X_tok_clean.shape[1]} features"
               f" (sparse, {X_tok_clean.nnz} nonzeros)")
 
         label_results["token_logistic"] = _run_a_baseline(
-            LogisticRegression, dict(max_iter=1000, class_weight="balanced", 
+            LogisticRegression, dict(max_iter=1000, class_weight="balanced",
                                      solver="lbfgs", random_state=SEED),
             X_tok_clean, labels, name="token_logistic",
         )

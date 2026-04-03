@@ -117,14 +117,14 @@ def _sae_feature_comparison(sae_a, sae_b, threshold=0.8):
 # ============================================================================
 
 def _build_encounter_content_labels(patients_dict, subject_ids, mask_pos,
-                                    ctx_pad_masks):
+                                    ctx_pad_mask):
     """Build per-encounter binary labels for content attributes.
 
     Returns dict mapping attribute_name -> (N, C) int8 array.
     Context position j maps to original encounter index j if j < mask_pos,
     else j + 1 (the masked encounter is excluded from context).
     """
-    N, C = ctx_pad_masks.shape
+    N, C = ctx_pad_mask.shape
     has_fcode = np.zeros((N, C), dtype=np.int8)
     has_psych_med = np.zeros((N, C), dtype=np.int8)
 
@@ -133,7 +133,7 @@ def _build_encounter_content_labels(patients_dict, subject_ids, mask_pos,
         encs = patients_dict.get(sid, {}).get("encounters", [])
         mp = int(mask_pos[i])
         for j in range(C):
-            if ctx_pad_masks[i, j]:
+            if ctx_pad_mask[i, j]:
                 continue
             orig_idx = j if j < mp else j + 1
             if orig_idx >= len(encs):
@@ -273,19 +273,19 @@ def run_representation(ctx, stage_dir):
     if not is_sup:
         enc_labels = _build_encounter_content_labels(
             ctx["patients_dict"], ctx["subject_ids"],
-            ctx["mask_pos"], ctx["ctx_pad_masks"]
+            ctx["mask_pos"], ctx["ctx_pad_mask"]
         )
 
         for attr_name, attr_labels in enc_labels.items():
-            n_pos = int(attr_labels[~ctx["ctx_pad_masks"]].sum())
-            n_valid = int((~ctx["ctx_pad_masks"]).sum())
+            n_pos = int(attr_labels[~ctx["ctx_pad_mask"]].sum())
+            n_valid = int((~ctx["ctx_pad_mask"]).sum())
             if n_pos < 5 or (n_valid - n_pos) < 5:
                 print(f"    Encounter {attr_name}: insufficient samples, skipping")
                 continue
             
             try:
                 res = probe_encounter_level(
-                    ctx["z_encs"], ctx["ctx_pad_masks"],
+                    ctx["z_encs"], ctx["ctx_pad_mask"],
                     attr_labels, ctx["subject_ids"])
                 probing_results[f"encounter_{attr_name}"] = res
                 print(f"    Encounter {attr_name}: AUROC={res['mean_auroc']:.4f}")
@@ -1210,7 +1210,7 @@ def build_context(args, model_dir: Path, output_dir: Path, data_dir: Path):
             "z_encs":         npz["z_encs"],
             "z_pred":         npz["z_pred"],
             "z_target":       npz["z_target"],
-            "ctx_pad_masks":  npz["ctx_pad_masks"].astype(bool),
+            "ctx_pad_mask":  npz["ctx_pad_mask"].astype(bool),
             "mask_pos":       npz["mask_pos"],
         }
     
@@ -1232,7 +1232,7 @@ def build_context(args, model_dir: Path, output_dir: Path, data_dir: Path):
             "patient_subject_ids": patient_subject_ids,
             # No encounter-level data
             "z_encs": None, "z_pred": None, "z_target": None,
-            "pred_error": None, "ctx_pad_masks": None, "mask_pos": None,
+            "pred_error": None, "ctx_pad_mask": None, "mask_pos": None,
             "z_enc_flat": None, "enc_subject_ids": None,
             "enc_indices": None, "enc_original_indices": None,
             "z_pred_pooled": None, "z_target_pooled": None,
@@ -1247,17 +1247,17 @@ def build_context(args, model_dir: Path, output_dir: Path, data_dir: Path):
         z_pred = tensor_dict["z_pred"]
         z_target = tensor_dict["z_target"]
         pred_error = z_pred - z_target
-        ctx_pad_masks = tensor_dict["ctx_pad_masks"]
+        ctx_pad_mask = tensor_dict["ctx_pad_mask"]
         mask_pos = tensor_dict["mask_pos"]
 
         # -- Pool flattened sample z_enc per patient --
         z_enc_flat, enc_subject_ids, enc_indices = \
-            flatten_valid_encounters(z_encs, ctx_pad_masks, subject_ids)
+            flatten_valid_encounters(z_encs, ctx_pad_mask, subject_ids)
         
         z_enc_pooled, _ = pool_to_patients(z_enc_flat, enc_subject_ids)
 
         # -- Map context position to original encounter index --
-        valid_mask = ~ctx_pad_masks.astype(bool)
+        valid_mask = ~ctx_pad_mask.astype(bool)
         sample_idx, ctx_pos = np.where(valid_mask)
         enc_original_indices = np.where(ctx_pos < mask_pos[sample_idx], ctx_pos,
                                         ctx_pos + 1
@@ -1273,7 +1273,7 @@ def build_context(args, model_dir: Path, output_dir: Path, data_dir: Path):
         ctx.update({
             "z_encs": z_encs, "z_pred": z_pred, "z_target": z_target, 
             "pred_error": pred_error, "z_enc_flat": z_enc_flat,
-            "ctx_pad_masks": ctx_pad_masks, "mask_pos": mask_pos,
+            "ctx_pad_mask": ctx_pad_mask, "mask_pos": mask_pos,
             "enc_subject_ids": enc_subject_ids,
             "enc_indices": enc_indices,
             "enc_original_indices": enc_original_indices,

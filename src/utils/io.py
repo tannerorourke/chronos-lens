@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 from typing import Tuple
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -80,9 +81,10 @@ def save_embedding_vecs(
 ) -> dict[str, np.ndarray]:
     records: dict[str, np.ndarray] = {}
     for k, v in model_records.items():
+        # print(k, [a.shape for a in v[:3]])
         if k == "subject_ids":
             records[k] = np.array(v, dtype=str)
-        elif k in ("z_encs", "ctx_pad_masks"):
+        elif k in ("z_encs", "ctx_pad_mask"):
             max_c = max(arr.shape[1] for arr in v)
             padded = []
             for arr in v:
@@ -103,10 +105,10 @@ def save_embedding_vecs(
             "subject_ids": records["subject_ids"],
             "mask_pos":    records["mask_pos"],
         }
-        if "ctx_pad_masks" in records:
-            save_dict["ctx_pad_masks"] = records["ctx_pad_masks"]
+        if "ctx_pad_mask" in records:
+            save_dict["ctx_pad_mask"] = records["ctx_pad_mask"]
         np.savez(file, **save_dict)  # type: ignore[arg-type]
-        print(f"Saved embeddings -> {file.name} (epoch {epoch})")
+        print(f"    Saved embeddings -> {file.name} (epoch {epoch})")
 
     return records
 
@@ -214,9 +216,9 @@ def save_metadata(
 def resolve_run_dir(prefix: str) -> Path:
     existing = sorted(EXPERIMENTS_DIR.glob(f"{prefix}_v*"))
     if not existing:
-        return EXPERIMENTS_DIR / f"{prefix}_v001"
+        return EXPERIMENTS_DIR / f"{prefix}_v01"
     last_num = int(existing[-1].name.split("_v")[-1])
-    return EXPERIMENTS_DIR / f"{prefix}_v{last_num + 1:03d}"
+    return EXPERIMENTS_DIR / f"{prefix}_v0{last_num + 1:03d}"
 
 
 def init_run_dir(model: str) -> Path:
@@ -226,12 +228,12 @@ def init_run_dir(model: str) -> Path:
     if not base_dir.exists() or not (base_dir / "config.yaml").is_file():
         raise FileNotFoundError(f"[create_run] Expected config.yaml in experiments/{model}")
 
-    has_artifacts = any(
-        (base_dir / sub).exists() and any((base_dir / sub).iterdir())
-        for sub in ["checkpoints", "logs"]
-    )
+    has_artifacts = any((base_dir / sub).exists() and any((base_dir / sub).iterdir())
+                        for sub in ["checkpoints", "logs"]
+                       )
     if has_artifacts:
+        print(f"WARNING: ../{base_dir.parts[-4]} already exists with artifacts. Starting new run in ../{run_dir.parts[-4]}")
         run_dir = resolve_run_dir(model)
-        run_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(base_dir, run_dir, dirs_exist_ok=True)
 
     return run_dir

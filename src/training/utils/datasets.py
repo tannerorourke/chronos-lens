@@ -84,8 +84,8 @@ class MimicDataset(Dataset):
         max_encounters: int | None = None, 
         use_np_int32: bool = True
     ):
-        max_encounters = data_params["max_encounters"]
-        modality       = data_params["modality"]
+        max_encounters = data_params.get("max_encounters", None)
+        modality       = data_params.get("modality", "all")
         
         self.samples: list[dict] = []
         self.pad_idx = pad_idx

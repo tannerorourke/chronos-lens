@@ -10,6 +10,7 @@ experiments/*/**
 # compile files
 __pycache__/
 *.egg-info/
+build/
 
 # Jupyter Notebook
 .ipynb_checkpoints

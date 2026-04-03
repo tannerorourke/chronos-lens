@@ -69,7 +69,7 @@ class JEPAStopGrad(nn.Module):
         # -- Target path (shared weights, stop-gradient) --
         with torch.no_grad():
             z_target = self.encoder(tgt_tokens, tgt_tok_mask)                     # (B, D)
-            z_target = F.layer_norm(z_target, (z_target.size(-1),))
+            # z_target = F.layer_norm(z_target, (z_target.size(-1),))
             z_target = z_target.detach()
 
         return z_enc, z_pred, z_target

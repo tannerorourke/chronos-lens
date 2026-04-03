@@ -23,7 +23,7 @@ class WarmupCosineAnnealing:
         self.optimizer    = optimizer
         self.warmup_steps = max(0, warmup_steps)
         self.total_steps  = total_steps
-        self.min_lr       = min_lr
+        self.min_lr       = float(min_lr)
         self.base_lr      = float(optimizer.param_groups[0]["lr"])
         self._step        = 0
         self._last_lr     = [self.min_lr]

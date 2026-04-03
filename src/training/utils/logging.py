@@ -1,127 +1,201 @@
-import json
 import time
 import csv
 from pathlib import Path
-from datetime import datetime
+import statistics as stats
+
 from torch.utils.tensorboard import SummaryWriter
 
 
+
+class GradientMonitor:
+    def __init__(self, model=None):
+        self.model = model
+        self._norms: list[float] = []
+
+    def capture(self, mparams):
+        params = mparams if self.model is None else self.model.parameters()
+        total_norm = 0.0
+        for p in params:
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+        self._norms.append(total_norm ** 0.5)
+
+    def get_metrics(self) -> dict:
+        if not self._norms: return {}
+        
+        import statistics
+        return {
+            "grad_norm_mean": statistics.mean(self._norms),
+            "grad_norm_max": max(self._norms),
+            "grad_norm_min": min(self._norms),
+            "grad_norm_std": statistics.stdev(self._norms) if len(self._norms) > 1 else 0.0,
+        }
+
+    def reset(self):
+        self._norms.clear()
+        
+        
+class CsvWriter:
+    def __init__(self, logdir: Path):
+        self._closed = False
+        self._logpath = logdir / "epoch_metrics.csv"
+        self._writer = None
+        self._file = open(self._logpath, "w", newline="")
+        
+    def write(self, metrics: dict):
+        if self._writer is None:
+            self._writer = csv.DictWriter(self._file, 
+                                          fieldnames=list(metrics.keys()))
+            self._writer.writeheader()
+        self._writer.writerow(metrics)
+        self._file.flush()
+        
+    def __del__(self):
+        if not self._closed:
+            self._file.close()
+        
+        
+
 class TrainingLogger:
-    """ All-in-one CSV, TensorBoard, and cli logger."""
+    """ All-in-one CSV, TensorBoard, and CLI logger for
+        loss, grad norms, and custom metrics
+    """
     def __init__(
         self, 
         logdir: Path, 
         epoch: int = 0,
         global_step: int = 0, 
         loss_history: list[float] = None, 
-        flush_every: int = 1
+        log_norms: bool = True,
+        log_csv: bool = True,
+        log_tb: bool = True,
+        verbose: bool = False
     ):
         self._closed = False
-        self.flush_every = flush_every
-        self.run_start = time.time()
+        self._run_start = time.time()
+        self._verbose = verbose
+        
+        self._ep_samples: int = 0
+        self.epoch_losses: list[float] = []
+        self.loss_history: list[float] = loss_history if loss_history is not None else []
         self.epoch = epoch
         self.global_step = global_step
-        self._epoch_losses: list[float] = []
-        self._loss_history: list[float] = loss_history if loss_history is not None else []
-
-        self.logdir = logdir
-        self.log_dir = logdir / "logs"
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        
+        self._log_norms = log_norms
+        self.grad_mon = GradientMonitor()
+        
+        
+        self._logdir = logdir / "logs"
+        self._logdir.mkdir(parents=True, exist_ok=True)
 
         # initialized on first log_epoch
-        self._csv_writer = None
-        self._csv_path = self.log_dir / "epoch_metrics.csv"
-        self._csv_file = open(self._csv_path, "w", newline="")
+        self._log_csv = log_csv
+        self._csv_writer = CsvWriter(logdir=self._logdir)
 
         # TensorBoard
-        self.writer = SummaryWriter(log_dir=str(logdir / "tb_logs"))
+        self._log_tb = log_tb
+        self._tb_writer = SummaryWriter(log_dir=str(logdir / "tb_logs"))
 
         print(f"[TrainingLogger] Logging it up in {logdir.parent.name}/{logdir.name}")
-        
-    @property
-    def epoch_train_loss(self) -> float:
-        if not self._epoch_losses:
-            return float("nan")
-        return sum(self._epoch_losses) / len(self._epoch_losses)
-
-    def log_step(self, loss: float):
-        self._epoch_losses.append(loss)
+            
+    # -- step/epoch/final logging --
+    def log_batch(self, loss, s):
+        self._ep_samples += s
+        self.epoch_losses.append(float(loss))
         self.global_step += 1
-        self.writer.add_scalar("step/loss", loss, self.global_step)
-
-    def log_epoch(self, loss: float, lr: float | None = None, **metrics):
+        if self._log_tb:
+            step_loss = float(loss) / s
+            self._tb_writer.add_scalar("step/loss", step_loss, self.global_step)
+        
+    def log_epoch(self, lr: float | None = None, **metrics):
         self.epoch += 1
-        wall_time = time.time() - self.run_start
-
-        if "train_loss" not in metrics and self._epoch_losses:
-            metrics["train_loss"] = self.epoch_train_loss
-
-        row = {
+        
+        # -- collect --
+        wall_time = time.time() - self._run_start
+        epoch_loss = float(sum(self.epoch_losses) / self._ep_samples)
+        norm_m = self.grad_mon.get_metrics()
+        self.loss_history.append(epoch_loss)
+        self.epoch_losses.clear()
+        self.grad_mon.reset()
+        
+        ep_metrics = {
             "epoch": self.epoch,
             "wall_sec": round(wall_time, 1),
-            "steps": self.global_step,
-            "train_loss": self._fmt(loss),
-            **{k: self._fmt(v) for k, v in metrics.items()},
+            "lr": self._fmt(lr),
+            "loss": self._fmt(epoch_loss),
         }
+        
+        cli_pp = {
+            "epoch": self.epoch,
+            "lr": self._fmt(lr),
+            "loss": self._fmt(epoch_loss),
+            "wall_sec": round(wall_time, 1),
+        }
+        
+        # -- grad norms --
+        if len(norm_m) > 0 and self._log_norms:
+            for k, v in norm_m.items():
+                metrics[k] = v
+                if k == "grad_norm_mean" or self._verbose:
+                    cli_pp[k] = self._fmt(v)
+            
+        # -- extra metrics --
+        if self._verbose:
+            cli_pp["steps"] = self.global_step
+            ep_metrics["steps"] = self.global_step
+            for k, v in metrics.items():
+                ep_metrics[k] = self._fmt(v)
+                cli_pp[k] = self._fmt(v)
+                
+        # -- CLI --
+        cli = [f"{k}={self._fmt(v)}" for k, v in cli_pp.items() if k != "wall_sec"]
+        cli.append(f"[{wall_time:.0f}s]")
+        print(" | ".join(cli))
 
-        # Initialize CSV header on first epoch
-        if self._csv_writer is None:
-            self._csv_writer = csv.DictWriter(
-                self._csv_file, fieldnames=list(row.keys())
-            )
-            self._csv_writer.writeheader()
-        self._csv_writer.writerow(row)
-
-        self._loss_history.append(float(loss))
-
-        if self.epoch % self.flush_every == 0:
-            self._csv_file.flush()
-        self._epoch_losses.clear()
-
-        # TensorBoard metrics
-        for key, value in row.items():
-            if key in ("epoch", "wall_sec", "steps") or value in (None, ""):
-                continue
-            v = int(value) if isinstance(value, bool) else float(value)
-            self.writer.add_scalar(f"epoch/{key}", v, self.epoch)
-        if lr is not None:
-            self.writer.add_scalar("epoch/lr", lr, self.epoch)
-        self.writer.flush()
-
-        parts = [f"Epoch {self.epoch:>4d}"]
-        for k, v in metrics.items():
-            parts.append(f"{k}={self._fmt(v)}")
-        parts.append(f"[{wall_time:.0f}s]")
-        print(" | ".join(parts))
+        # -- log to CSV --
+        if self._log_csv:
+            self._csv_writer.write(ep_metrics)
+        
+        # -- log to Tensorboard --
+        if self._log_tb:
+            if lr is not None:
+                self._tb_writer.add_scalar("epoch/lr", lr, self.epoch)
+            for key, value in ep_metrics.items():
+                if key in ("epoch", "wall_sec", "steps") or value in (None, ""):
+                    continue
+                v = int(value) if isinstance(value, bool) else float(value)
+                self._tb_writer.add_scalar(f"epoch/{key}", v, self.epoch)
+            self._tb_writer.flush()
 
     def finalize(self):
-        total_time = time.time() - self.run_start
+        import json
+        from datetime import datetime
+        from src.analysis.plotting import plot_loss_curve
+        
+        total_time = time.time() - self._run_start
 
-        self._write_json("run_summary.json", {
-            "total_epochs": self.epoch,
-            "total_steps": self.global_step,
-            "wall_time_sec": round(total_time, 1),
-            "wall_time_human": self._pp_time(total_time),
-            "finished_at": datetime.now().isoformat(),
-        })
+        with open(self._logdir / "run_summary.json", "w") as f:
+            json.dump({
+                "total_epochs": self.epoch,
+                "total_steps": self.global_step,
+                "wall_time_sec": round(total_time, 1),
+                "wall_time_human": self._pp_time(total_time),
+                "finished_at": datetime.now().isoformat(),
+            }, f, indent=2, default=str)
+            
+        plot_loss_curve(self.loss_history, self._logdir, show=False, save=True)
 
-        self.writer.flush()
-        self.writer.close()
-        self._csv_file.close()
+        self._tb_writer.flush()
+        self._tb_writer.close()
         self._closed = True
         print(f"\n[TrainingLogger] Run complete in {self._pp_time(total_time)}")
 
     # -- Utility
-
-    def _write_json(self, filename: str, data):
-        with open(self.log_dir / filename, "w") as f:
-            json.dump(data, f, indent=2, default=str)
-
     @staticmethod
     def _fmt(v) -> str:
-        if v is None:
-            return ""
-        if isinstance(v, float):
+        if v is None: return ""
+        
+        if isinstance(v, float): 
             return f"{v:.6f}" if abs(v) < 1 else f"{v:.4f}"
         return str(v)
 
@@ -135,8 +209,7 @@ class TrainingLogger:
 
     def __del__(self):
         if not self._closed:
-            self._csv_file.close()
-            self.writer.close()
+            self._tb_writer.close()
     
 
 # ===========================================================================
@@ -178,31 +251,3 @@ class EMATracker:
         self._param_diffs.clear()
 
 
-class GradientMonitor:
-    """Lightweight grad monitor.."""
-
-    def __init__(self, model):
-        self.model = model
-        self._grad_norms: list[float] = []
-
-    def capture(self):
-        total_norm = 0.0
-        for p in self.model.parameters():
-            if p.grad is not None:
-                total_norm += p.grad.data.norm(2).item() ** 2
-        self._grad_norms.append(total_norm ** 0.5)
-
-    def get_metrics(self) -> dict:
-        if not self._grad_norms:
-            return {}
-        import statistics
-        norms = self._grad_norms
-        return {
-            "grad_norm_mean": statistics.mean(norms),
-            "grad_norm_max": max(norms),
-            "grad_norm_min": min(norms),
-            "grad_norm_std": statistics.stdev(norms) if len(norms) > 1 else 0.0,
-        }
-
-    def reset(self):
-        self._grad_norms.clear()

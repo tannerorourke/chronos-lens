@@ -29,7 +29,7 @@
 - z_pred: (N, D)                    - predictor output (per encounter, masked)
 - z_target: (N, D)                  - target encoder output (per encounter, masked)
 - pred_error: (N, D)                - z_pred - z_target
-- ctx_pad_masks: (N, C) bool        - True = padding encounter slot
+- ctx_pad_mask: (N, C) bool        - True = padding encounter slot
 - mask_pos: (N,) int64              - which encounter was masked per sample
 
 ### Flattened valid (padding removed) encounters from z_encs 

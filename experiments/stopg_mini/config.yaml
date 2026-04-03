@@ -2,7 +2,7 @@ model:
     embed_dim: 48
     num_heads: 2
     num_layers: 2
-    ffn_dim: 256
+    ffn_dim: 192
     max_seq_len: 128
     predictor_embed_dim: 32
     predictor_depth: 2
@@ -12,13 +12,13 @@ optimization:
     base_lr: 1e-4
     schedule: "linear_decay"
     min_lr_ratio: 0.1
-    sim_weight: 1.0
-    var_weight: 1.0
-    cov_weight: 0.04
+    sim_weight: 25.0
+    var_weight: 25.0
+    cov_weight: 1.0
 data:
     batch_size: 64
     accumulation_steps: 2
-    n_patients: 1000 # 0=all
+    n_patients: 5000 # 0=all
     max_encounters: null # null = no limit
     pin_mem: True
     num_workers: 0
@@ -30,7 +30,7 @@ sae_config:
     batch_size: 8
 meta:
     seed: 42
-    use_bfloat16: True
+    use_bfloat16: False
     tag: "jepa_stopg_mini"
     description: "Testing successful training (stopgrad) and pipeline"
     resume_from: null # provide path to .pt checkpoint. tag must match.

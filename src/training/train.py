@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict
 from collections import defaultdict
 
+from tqdm import tqdm
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -118,7 +119,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         vicreg_accum = {k: 0.0 for k in vicreg_keys}
         n_batches = 0
 
-        for i, batch in enumerate(loader):
+        for i, batch in tqdm(enumerate(loader), leave=False, 
+                             total=len(loader), unit="batch", desc="percolating..", colour="green"):
             batch_dev = {
                 k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
@@ -167,7 +169,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             # -- stat logging --
             for k in vicreg_keys:
                 vicreg_accum[k] += loss_dict[k].detach().item()
-            logger.log_batch(loss.item(), batch.size(0))
+            logger.log_batch(loss.item(), len(batch))
             n_batches += 1
 
         # --- EVAL -----------------------------------------------------

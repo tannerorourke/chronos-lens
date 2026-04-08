@@ -1,6 +1,6 @@
 model:
     embed_dim: 64
-    num_heads: 8
+    num_heads: 4
     num_layers: 2
     ffn_dim: 256
     max_seq_len: 128
@@ -8,20 +8,21 @@ model:
     predictor_depth: 2
     architecture: stopgrad
 optimization:
-    epochs: 100
-    base_lr: 3e-4
+    epochs: 50
     schedule: "warmup_cosine"
-    warmup_epochs: 10
+    base_lr: 1e-4
+    min_lr: 1e-5
+    warmup_epochs: 5
     sim_weight: 1.0
     var_weight: 1.0
     cov_weight: 0.04
 data:
     batch_size: 64
-    accumulation_steps: 2
+    accumulation_steps: 3
     n_patients: 0 # 0=all
     max_encounters: null # null = no limit
     pin_mem: true
-    num_workers: 0
+    num_workers: 1
 sae_config:
     n_features: 256
     top_k: 12

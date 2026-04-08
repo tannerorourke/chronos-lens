@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict
 from collections import defaultdict
 
+from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -107,7 +108,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total trainable params: {(n_params / 1e6):.2f}M")
 
-    logger = TrainingLogger(run_dir, start_epoch-1, global_step, loss_history)
+    logger = TrainingLogger(run_dir, start_epoch-1, global_step, loss_history,
+                            embdir=emb_dir, n_total=len(loader.dataset), max_ctx=max_encounters, embed_dim=model_params["embed_dim"])
     
     # ------------------------------------------------------------------
     # --- TRAINING LOOP ------------------------------------------------
@@ -121,7 +123,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         epoch_records: defaultdict[str, list[np.ndarray]] = defaultdict(list)
         n_batches = 0
 
-        for i, batch in enumerate(loader):
+        for i, batch in tqdm(enumerate(loader), leave=False,
+                             total=len(loader), unit="batch", desc="percolating..", colour="green"):
             batch_dev = {
                 k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
@@ -177,6 +180,10 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         model.eval()
 
         if save_this_epoch:
+            logger.write_embeddings(z_enc, z_pred, z_target,
+                            batch_dev["mask_pos"],
+                            batch_dev["ctx_pad_mask"],
+                            batch["subject_ids"])
             save_checkpoint(model, model_params,
                             optimizer, scheduler, scaler,
                             epoch, logger.global_step, logger.loss_history,

@@ -23,11 +23,12 @@ data:
     pin_mem: true
     num_workers: 0
 sae_config:
-    n_features: 256
-    top_k: 12
-    epochs: 200
-    lr: 3e-4
-    batch_size: 8
+    z_enc:
+        n_features: 256
+        top_k: 12
+        epochs: 200
+        lr: 3e-4
+        batch_size: 8
 meta:
     seed: 42
     use_bfloat16: True

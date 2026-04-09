@@ -472,7 +472,7 @@ def extract_icd_block_targets(
     return targets, all_chapters
 
 # =========================================================================
-# 3. Patient selection utility
+# Patient selection utility
 # =========================================================================
 
 def select_interesting_patients(

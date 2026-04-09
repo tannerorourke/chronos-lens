@@ -411,7 +411,7 @@ class TrainingLogger:
                 "finished_at": datetime.now().isoformat(),
             }, f, indent=2, default=str)
             
-        plot_loss_curve(self.loss_history, self._logdir, show=False, save=True)
+        plot_loss_curve(self.loss_history, show=False, save=True, fig_dir=self._logdir)
 
         self._tb_writer.flush()
         self._tb_writer.close()

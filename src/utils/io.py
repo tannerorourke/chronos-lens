@@ -1,8 +1,9 @@
 from pathlib import Path
 import json
 from typing import Tuple
-import shutil
+from argparse import Namespace
 
+import yaml
 import numpy as np
 import pandas as pd
 
@@ -41,6 +42,7 @@ def _serialize(obj):
     if isinstance(obj, Path):
         return str(obj)
     return obj
+
 
 def save_json(data, path):
     path = Path(path)
@@ -177,7 +179,6 @@ def load_sequences(n=None, path: Path = None) -> list[dict]:
     except Exception as e:
         raise FileNotFoundError(f"[load_sequences] Error loading sequences from '{src}': {e}")
 
-
 # =============================================================================
 # Metadata
 # =============================================================================
@@ -213,27 +214,42 @@ def save_metadata(
 # config IO
 # =============================================================================
 
-def resolve_run_dir(prefix: str) -> Path:
-    existing = sorted(EXPERIMENTS_DIR.glob(f"{prefix}_v*"))
-    if not existing:
-        return EXPERIMENTS_DIR / f"{prefix}_v01"
-    last_num = int(existing[-1].name.split("_v")[-1])
-    return EXPERIMENTS_DIR / f"{prefix}_v0{last_num + 1:03d}"
-
-
-def init_run_dir(model: str) -> Path:
-    base_dir = EXPERIMENTS_DIR / model
-    run_dir = base_dir
-
-    if not base_dir.exists() or not (base_dir / "config.yaml").is_file():
-        raise FileNotFoundError(f"[create_run] Expected config.yaml in experiments/{model}")
-
-    has_artifacts = any((base_dir / sub).exists() and any((base_dir / sub).iterdir())
-                        for sub in ["checkpoints", "logs"]
-                       )
-    if has_artifacts:
-        print(f"WARNING: ../{base_dir.parts[-4]} already exists with artifacts. Starting new run in ../{run_dir.parts[-4]}")
-        run_dir = resolve_run_dir(model)
-        shutil.copytree(base_dir, run_dir, dirs_exist_ok=True)
-
-    return run_dir
+def get_model_config(args: Namespace) -> tuple[Path, dict]:
+    model = args.model
+    exp_dir = EXPERIMENTS_DIR / model
+    if not exp_dir.exists():
+        raise FileNotFoundError(f"Model directory not found: experiments/{model}")
+    
+    params: dict = {}
+    command = args.command
+    assert command in ["model", "sae"], f"Invalid command: {command}"
+    
+    with open(exp_dir / "config.yaml", 'r') as y_file:
+        params = yaml.safe_load(y_file)
+    if not params:
+        raise FileNotFoundError(f"'experiments/{model}/config.yaml' not found.")
+        
+    if command == "sae":
+        from src.utils.constants import SAE_TARGETS
+        assert params.get("sae_config"), \
+            f"config['sae_config'] not found."
+        assert all(k in params for k in ["n_features", "top_k", "epochs", "lr", "batch_size"]), \
+            "sae_config missing required keys: 'n_features', 'top_k', 'epochs', 'lr', 'batch_size'"
+        params = params["sae_config"]
+        
+        assert args.target in SAE_TARGETS, \
+            f"config['sae_config'] child must be one of {SAE_TARGETS}"
+        params = params[args.target]
+        
+        return exp_dir, params
+    
+    # JEPA variants, supervised transformer
+    assert params.get("model", {}).get("architecture", "") in ["ema", "stopgrad", "supervised"], \
+        f"config['model']['architecture'] must be one of 'ema', 'stopgrad', or 'supervised'"
+    assert params.get("meta", {}).get("seed"), \
+        f"parameter 'seed' missing in config.yaml['meta']"
+    
+    if any((exp_dir / sub).exists() and any((exp_dir / sub).iterdir()) for sub in ["checkpoints", "logs"]):
+        raise FileExistsError(f"   'experiments/{model}' already exists with artifacts. Run with config['meta']['resume_from'] to resume training.")
+    
+    return exp_dir, params

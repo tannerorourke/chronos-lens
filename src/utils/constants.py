@@ -2,6 +2,7 @@
 
 MODEL_VECS          = ["z_enc", "z_pred", "z_target"]
 MODEL_PRED_VECS     = ["z_pred", "z_target", "pred_error", "z_enc_pooled"]
+SAE_TARGETS         = ["z_enc", "z_pred", "z_target", "pred_error"]
 SUPERVISED_VECTORS  = ["z_enc_pooled"]
 
 

@@ -27,6 +27,7 @@ class JEPA_EMA(nn.Module):
     z_pred    : (B, D) predictor output (differentiable)
     z_target  : (B, D) EMA target encoding (no grad)
     """
+    
     def __init__(
         self,
         vocab_size: int,
@@ -54,7 +55,6 @@ class JEPA_EMA(nn.Module):
             vocab_size, embed_dim, num_heads, num_layers, max_seq_len, ffn_dim, pad_idx)
         self.predictor = Predictor(
             embed_dim, predictor_embed_dim, max_seq_len, num_heads, predictor_depth)
-
         self.target_encoder = copy.deepcopy(self.encoder)
         for p in self.target_encoder.parameters():
             p.requires_grad_(False)
@@ -67,13 +67,13 @@ class JEPA_EMA(nn.Module):
         tgt_tok_mask = batch["tgt_tok_mask"]  # (B, T_tok)
         mask_pos     = batch["mask_pos"]      # (B,)
 
-        # -- Encode context: per-encounter representations (with grads) --
+        # --- Encode context (with grads)
         z_enc = self.encoder(ctx_tokens, ctx_tok_mask, ctx_pad_mask, pool=False) # (B, C, D)
 
         # -- Predict masked encounters --
         z_pred = self.predictor(z_enc, ctx_pad_mask, mask_pos) # (B, D)
 
-        # -- Target path (no grads) --
+        # -- Target path (no grad)
         with torch.no_grad():
             z_target = self.target_encoder(tgt_tokens, tgt_tok_mask) # (B, D)
             z_target = F.layer_norm(z_target, (z_target.size(-1),))

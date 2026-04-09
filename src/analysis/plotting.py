@@ -64,19 +64,20 @@ def show_or_savefig(
         
         
 def plot_loss_curve(
-    loss_history: list[float], run_dir: Path,
-    show: bool = True, save: bool = True
+    loss_history: list[float], 
+    show: bool = False, save: bool = True,
+    fig_dir: Path = EXPERIMENTS_DIR / "figures",
+    fig_name: str = "loss_curve",
+    title: str = "Training Loss",
 ):
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(range(1, len(loss_history) + 1), loss_history, marker="o", linewidth=2)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("MSE Loss")
-    ax.set_title("JEPA Training Loss")
+    ax.set_title(title, fontsize=_TITLE_PT)
     ax.grid(True, alpha=0.4)
     fig.tight_layout()
-
-    save_path = run_dir / "loss_curve.png"
-    show_or_savefig(fig, show, save_path=save_path if save else None)
+    show_or_savefig(fig, show, save_path=fig_dir / fig_name if save else None)
 
 # =============================================================================
 # Encounter Representation Characteristics

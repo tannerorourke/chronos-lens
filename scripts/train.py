@@ -1,6 +1,5 @@
 import argparse
 
-import yaml
 import torch
 
 from src.utils.io import get_model_config
@@ -72,8 +71,7 @@ def main():
         else:
             from src.training.train import main as train_main
         train_main(params, exp_dir, device)
-    if params['meta'].get('tag'):
-        print(f"  {params['meta'].get('tag', '')}: {params['meta'].get('description', '')}")
+    
     
 
 if __name__ == "__main__":

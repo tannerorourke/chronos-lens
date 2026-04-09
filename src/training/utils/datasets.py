@@ -28,8 +28,7 @@ def build_vocab(
     if save:
         with open(dir / "vocab.json", "w", encoding="utf-8") as fh:
             json.dump(vocab, fh, indent=2)
-
-    print(f"   vocab len: {len(vocab)} tokens")
+    
     return vocab
 
 

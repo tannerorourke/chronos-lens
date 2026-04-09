@@ -26,16 +26,16 @@ class JEPAStopGrad(nn.Module):
 
     def __init__(
         self,
-        vocab_size:          int,
-        embed_dim:           int = 64,
-        num_heads:           int = 2,
-        num_layers:          int = 2,
-        max_seq_len:         int = 256,
-        ffn_dim:             int = 256,
+        vocab_size: int,
+        embed_dim: int           = 64,
+        num_heads: int           = 2,
+        num_layers: int          = 2,
+        max_seq_len: int         = 256,
+        ffn_dim: int             = 256,
         predictor_embed_dim: int = 32,
-        predictor_depth:     int = 2,
-        pad_idx:             int = 0,
-        architecture:        str = "stopgrad",
+        predictor_depth: int     = 2,
+        pad_idx: int             = 0,
+        architecture: str        = "stopgrad",
     ):
         super().__init__()
         self.architecture        = architecture
@@ -51,6 +51,8 @@ class JEPAStopGrad(nn.Module):
             vocab_size, embed_dim, num_heads, num_layers, max_seq_len, ffn_dim, pad_idx)
         self.predictor = Predictor(
             embed_dim, predictor_embed_dim, max_seq_len, num_heads, predictor_depth)
+        # No target encoder is created - predictor and target paths share the same encoder. 
+        # The target path blocks gradient flow via torch.no_grad() + detach()
 
     def forward(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         ctx_tokens   = batch["ctx_tokens"]    # (B, C, T_tok)
@@ -60,16 +62,16 @@ class JEPAStopGrad(nn.Module):
         tgt_tok_mask = batch["tgt_tok_mask"]  # (B, T_tok)
         mask_pos     = batch["mask_pos"]      # (B,)
 
-        # -- Encode context --
-        z_enc = self.encoder(ctx_tokens, ctx_tok_mask, ctx_pad_mask, pool=False)  # (B, C, D)
+        # --- Encode context (with grads)
+        z_enc = self.encoder(ctx_tokens, ctx_tok_mask, ctx_pad_mask, pool=False) # (B, C, D)
 
         # -- Predict masked encounters --
-        z_pred = self.predictor(z_enc, ctx_pad_mask, mask_pos)                    # (B, D)
+        z_pred = self.predictor(z_enc, ctx_pad_mask, mask_pos) # (B, D)
         
-        # -- Target path (shared weights, stop-gradient) --
+        # -- Target path (shared weights, stop-gradient)
         with torch.no_grad():
-            z_target = self.encoder(tgt_tokens, tgt_tok_mask)                     # (B, D)
-            # z_target = F.layer_norm(z_target, (z_target.size(-1),))
+            z_target = self.encoder(tgt_tokens, tgt_tok_mask) # (B, D)
+            z_target = F.layer_norm(z_target, (z_target.size(-1),))
             z_target = z_target.detach()
 
         return z_enc, z_pred, z_target

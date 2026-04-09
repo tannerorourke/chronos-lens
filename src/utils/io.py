@@ -160,6 +160,7 @@ def load_sequences_dict(path: Path) -> dict:
     
 
 def load_sequences(n=None, path: Path = None) -> list[dict]:
+    """Load sequences as iterable list of dicts (for training)"""
     src = Path(path) if path else DATA_DIR / "sequences.jsonl"
     sequences = []
     try:

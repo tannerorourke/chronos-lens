@@ -24,7 +24,7 @@ from tqdm import tqdm
 from src.models.supervised_transformer import SupervisedTransformer
 from src.training.utils.datasets import SupervisedDataset, supervised_collate_fn, build_vocab
 from src.training.utils.optimizers import init_optimizers
-from src.training.utils.logging import GradientMonitor, TrainingLogger
+from src.training.utils.logging import TrainingLogger
 from src.training.utils.checkpoint import build_model, save_checkpoint, load_model_checkpoint
 from src.utils.io import load_sequences, EXPERIMENTS_DIR
 
@@ -151,8 +151,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         save_this_epoch = (epoch % save_emb_every == 0 or epoch == epochs)
         z_c, sids = [], []
 
-        for batch in tqdm(loader, leave=False, 
-                          total=len(loader), unit="batch", colour="green"):
+        for batch in tqdm(loader, leave=False, total=len(loader), unit="batch", desc=f"[epoch {epoch}/{epochs}]"):
             batch_dev = {
                 k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
@@ -163,7 +162,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             loss.backward()
             
             pre_clip = nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            logger.grad_mon.capture(pre_clip.item())
+            logger.log_grad_norm(pre_clip.item())
             
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
@@ -193,3 +192,4 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # ------------------------------------------------------------------
     # --- DONE ---------------------------------------------------------
     logger.finalize()
+    return

@@ -147,7 +147,7 @@ def load_embeddings(model_dir, embeddings_arg=None) -> Tuple[dict, Path]:
 # Sequences
 # =============================================================================
 
-def load_sequences_dict(path: Path) -> dict:
+def load_sequences_dict(path: Path = DATA_DIR / "sequences.jsonl") -> dict:
     patients = {}
     with open(path, encoding="utf-8") as fh:
         for line in fh:
@@ -159,7 +159,7 @@ def load_sequences_dict(path: Path) -> dict:
     return patients
     
 
-def load_sequences(n=None, path: Path = None) -> list[dict]:
+def load_sequences(n=None, path: Path = DATA_DIR / "sequences.jsonl") -> list[dict]:
     """Load sequences as iterable list of dicts (for training)"""
     src = Path(path) if path else DATA_DIR / "sequences.jsonl"
     sequences = []
@@ -216,10 +216,10 @@ def save_metadata(
 # =============================================================================
 
 def get_model_config(args: Namespace) -> tuple[Path, dict]:
-    model = args.model
-    exp_dir = EXPERIMENTS_DIR / model
+    exp = args.exp
+    exp_dir = EXPERIMENTS_DIR / exp
     if not exp_dir.exists():
-        raise FileNotFoundError(f"Model directory not found: experiments/{model}")
+        raise FileNotFoundError(f"Model directory not found: experiments/{exp}")
     
     params: dict = {}
     command = args.command
@@ -228,7 +228,7 @@ def get_model_config(args: Namespace) -> tuple[Path, dict]:
     with open(exp_dir / "config.yaml", 'r') as y_file:
         params = yaml.safe_load(y_file)
     if not params:
-        raise FileNotFoundError(f"'experiments/{model}/config.yaml' not found.")
+        raise FileNotFoundError(f"'experiments/{exp}/config.yaml' not found.")
         
     if command == "sae":
         from src.utils.constants import SAE_TARGETS
@@ -251,6 +251,6 @@ def get_model_config(args: Namespace) -> tuple[Path, dict]:
         f"parameter 'seed' missing in config.yaml['meta']"
     
     if any((exp_dir / sub).exists() and any((exp_dir / sub).iterdir()) for sub in ["checkpoints", "logs"]):
-        raise FileExistsError(f"   'experiments/{model}' already exists with artifacts. Run with config['meta']['resume_from'] to resume training.")
+        raise FileExistsError(f"   'experiments/{exp}' already exists with artifacts. Run with config['meta']['resume_from'] to resume training.")
     
     return exp_dir, params

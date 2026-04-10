@@ -77,21 +77,17 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         num_workers=num_workers, persistent_workers=num_workers > 0,
         pin_memory=pin_memory)
 
-    
-
-    # --- model ---
+    # --- model
     model_params = params["model"]
     model_params["vocab_size"] = len(vocab)
     model = build_model(model_params, device)
     assert type(model) == JEPA_EMA
     
-    # --- init optimizer / scheduler
-    # No scaler needed for bfloat16
+    # --- init optimizer / scheduler / no scaler necessary
     optimizer, scheduler = init_optimizers(
         model, opt_params,
         ipe=len(loader),
         num_epochs=epochs)
-
 
     start_epoch, start_step, loss_history = 1, 1, []
     # --- load checkpoint?
@@ -156,8 +152,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
         with logger.embedding_writer(epoch, n_total, max_ctx, embed_dim) as ew:
             for i, batch in tqdm(enumerate(loader), leave=False,
-                                 total=len(loader), unit="batch",
-                                 desc="percolating..", colour="green"):
+                                 total=len(loader), colour="green", unit="batch",
+                                 desc=f"[epoch {epoch}/{epochs}]"):
                 batch_dev = {
                     k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                     for k, v in batch.items()
@@ -171,7 +167,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 # --- grad accumulation
                 if (i + 1) % accum_steps == 0:
                     pre_clip = nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-                    logger.grad_mon.capture(pre_clip.item())
+                    logger.log_grad_norm(pre_clip.item())
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                     if scheduler is not None:

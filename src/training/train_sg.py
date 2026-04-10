@@ -140,16 +140,17 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
         with logger.embedding_writer(epoch, n_total, max_ctx, embed_dim) as ew:
             for i, batch in tqdm(enumerate(loader), leave=False,
-                                 total=len(loader), unit="batch",
-                                 desc="percolating..", colour="green"):
+                                 total=len(loader), unit="batch", colour="green",
+                                 desc=f"[epoch {epoch}/{epochs}]"):
                 batch_dev = {
                     k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                     for k, v in batch.items()
                 }
                 
-                z_enc, z_pred, z_target = model(batch_dev)
+                z_enc, z_pred, z_target, z_target_sg = model(batch_dev)
                 loss_dict = jepa_stopgrad_loss(
-                    z_enc, z_pred, z_target, batch_dev["ctx_pad_mask"],
+                    z_enc, z_pred, z_target, z_target_sg, 
+                    batch_dev["ctx_pad_mask"],
                     sim_weight, var_weight, cov_weight)
                 loss = loss_dict["loss"]
                 loss.backward()
@@ -157,7 +158,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 # --- grad accumulation
                 if (i + 1) % accum_steps == 0:
                     pre_clip = nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-                    logger.grad_mon.capture(pre_clip.item())
+                    logger.log_grad_norm(pre_clip.item())
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                     if scheduler is not None:

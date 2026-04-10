@@ -8,40 +8,13 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 
 
-class GradientMonitor:
-    def __init__(self, model=None):
-        self.model = model
-        self._norms: list[float] = []
-
-    def capture(self, mparams):
-        params = mparams if self.model is None else self.model.parameters()
-        total_norm = 0.0
-        for p in params:
-            if p.grad is not None:
-                total_norm += p.grad.data.norm(2).item() ** 2
-        self._norms.append(total_norm ** 0.5)
-
-    def get_metrics(self) -> dict:
-        if not self._norms: return {}
-
-        return {
-            "grad_norm_mean": stats.mean(self._norms),
-            "grad_norm_max": max(self._norms),
-            "grad_norm_min": min(self._norms),
-            "grad_norm_std": stats.stdev(self._norms) if len(self._norms) > 1 else 0.0,
-        }
-
-    def reset(self):
-        self._norms.clear()
-
-
 class CsvWriter:
     def __init__(self, logdir: Path, fn: str = "epoch_metrics.csv"):
-        self._closed = False
         self._logdir = logdir
-        self._fn = fn
+        self._logdir.mkdir(parents=True, exist_ok=True)
         self._writer = None
-        self._file = open(self._logdir / self._fn, "w", newline="")
+        self._fp = self._logdir / fn
+        self._file = open(self._fp, "w", newline="")
 
     def write(self, metrics: dict):
         if self._writer is None:
@@ -49,10 +22,9 @@ class CsvWriter:
             self._writer.writeheader()
         self._writer.writerow(metrics)
         self._file.flush()
-
+        
     def __del__(self):
-        if not self._closed:
-            self._file.close()
+        self._file.close()
 
 
 class EmbeddingTracker:
@@ -246,20 +218,20 @@ class EmbeddingWriter:
 # -- Core Logging Class
 class TrainingLogger:
     """ All-in-one CSV, TensorBoard, CLI, and embedding logger for
-        loss, grad norms, JEPA embeddings, and custom metrics
+        loss, grad norms, JEPA embeddings, and custom metrics.
+        Minimal memory overhead to fit on a single GPU.
     """
     def __init__(
         self,
         logdir: Path,
         epoch: int = 0,
         global_step: int = 0,
-        loss_history: list[float] = None,
-        log_norms: bool = True,
+        loss_history: list[float] = [],
+        embed_every: int | None = None,
+        total_epochs: int | None = None,
         log_csv: bool = True,
         log_tb: bool = True,
         verbose: bool = False,
-        embed_every: int | None = None,
-        total_epochs: int | None = None,
     ):
         self._closed = False
         self._run_start = time.time()
@@ -269,12 +241,10 @@ class TrainingLogger:
 
         self._ep_samples: int = 0
         self.epoch_losses: list[float] = []
-        self.loss_history: list[float] = loss_history if loss_history is not None else []
+        self.loss_history: list[float] = loss_history
         self.epoch = epoch
         self.global_step = global_step
-
-        self._log_norms = log_norms
-        self.grad_mon = GradientMonitor()
+        self.grad_norms: list[float] = []
 
         # Embedding health trackers (updated every batch, every epoch)
         self.embed_tracker_z_enc    = EmbeddingTracker()
@@ -287,7 +257,7 @@ class TrainingLogger:
 
         # initialized on first log_epoch
         self._log_csv = log_csv
-        self._csv_writer = CsvWriter(logdir=self._logdir, fn=f"{self._logdir.name}_metrics.csv")
+        self._csv_writer = CsvWriter(logdir=self._logdir, fn=f"{self._logdir.parent.name}_metrics.csv")
 
         # TensorBoard
         self._log_tb = log_tb
@@ -295,51 +265,16 @@ class TrainingLogger:
 
         print(f"[TrainingLogger] Logging it up in {logdir.parent.name}/{logdir.name}")
 
-    # -- step/epoch/final logging --
-    def log_batch(self, loss, s):
-        self._ep_samples += s
-        self.epoch_losses.append(float(loss))
-        self.global_step += 1
-        if self._log_tb:
-            step_loss = float(loss) / s
-            self._tb_writer.add_scalar("step/loss", step_loss, self.global_step)
-
-    def log_step_scalar(self, name: str, value: float) -> None:
-        """Log a single scalar at the current global_step to TensorBoard."""
-        if self._log_tb:
-            self._tb_writer.add_scalar(name, value, self.global_step)
-
-    def update_embed_health_single(self, z_enc_pooled: "torch.Tensor") -> None:
-        # z_enc_pooled is already (B, D), no per-encounter pooling needed
-        z_np = z_enc_pooled.detach().cpu().float().numpy()
-        self.embed_tracker_z_enc.update(z_np)
-
-    def update_embed_health(
-        self,
-        z_enc:        "torch.Tensor",   # (B, C, D)
-        z_pred:       "torch.Tensor",   # (B, D)
-        z_target:     "torch.Tensor",   # (B, D)
-        ctx_pad_mask: "torch.Tensor",   # (B, C)
-    ) -> None:
-        # One device->host sync, shared across all three trackers.
-        z_enc_np    = z_enc.detach().cpu().float().numpy()        # (B, C, D)
-        z_pred_np   = z_pred.detach().cpu().float().numpy()       # (B, D)
-        z_target_np = z_target.detach().cpu().float().numpy()     # (B, D)
-        pad_np      = ctx_pad_mask.detach().cpu().float().numpy() # (B, C)
-
-        # Pool z_enc over valid positions
-        valid     = (pad_np == 0).astype(np.float32)              # (B, C)
-        valid_sum = valid.sum(axis=1, keepdims=True).clip(min=1)  # (B, 1)
-        z_enc_pooled = (z_enc_np * valid[..., None]).sum(axis=1) / valid_sum
-
-        self.embed_tracker_z_enc.update(z_enc_pooled)
-        self.embed_tracker_z_pred.update(z_pred_np)
-        self.embed_tracker_z_target.update(z_target_np)
-
+    # --- Utilities
     def is_embed_epoch(self, epoch: int) -> bool:
         if self._embed_every is None:
             return False
         return (epoch % self._embed_every == 0) or (epoch == self._total_epochs)
+    
+    def log_step_scalar(self, name: str, value: float) -> None:
+        # Log a single scalar at the current global_step to TensorBoard
+        if self._log_tb:
+            self._tb_writer.add_scalar(name, value, self.global_step)
 
     def embedding_writer(
         self, 
@@ -356,11 +291,62 @@ class TrainingLogger:
             embed_dim=embed_dim,
             active=self.is_embed_epoch(epoch),
         )
+        
+    def get_norm_metrics(self) -> dict:
+        if not self.grad_norms: return {}
 
+        return {
+            "grad_norm_mean": stats.mean(self.grad_norms),
+            "grad_norm_max": max(self.grad_norms),
+            "grad_norm_min": min(self.grad_norms),
+            "grad_norm_std": stats.stdev(self.grad_norms) if len(self.grad_norms) > 1 else 0.0,
+        }
+        
+    # --- step/epoch logging
+    def log_batch(self, loss, s):
+        self._ep_samples += s
+        self.epoch_losses.append(float(loss))
+        self.global_step += 1
+        if self._log_tb:
+            step_loss = float(loss) / s
+            self._tb_writer.add_scalar("step/loss", step_loss, self.global_step)
+
+    def log_grad_norm(self, grad_norm: int | float) -> None:
+        self.grad_norms.append(float(grad_norm))
+        self.log_step_scalar("step/grad_norm", grad_norm)
+
+    def update_embed_health_single(self, z_enc_pooled: "torch.Tensor") -> None:
+        # z_enc_pooled is already (B, D), no per-encounter pooling needed
+        z_np = z_enc_pooled.detach().cpu().float().numpy()
+        self.embed_tracker_z_enc.update(z_np)
+
+    def update_embed_health(
+        self,
+        z_enc:        "torch.Tensor",  # (B, C, D)
+        z_pred:       "torch.Tensor",  # (B, D)
+        z_target:     "torch.Tensor",  # (B, D)
+        ctx_pad_mask: "torch.Tensor",  # (B, C)
+    ) -> None:
+        # One device->host sync, shared across all three trackers.
+        z_enc_np    = z_enc.detach().cpu().float().numpy()        # (B, C, D)
+        z_pred_np   = z_pred.detach().cpu().float().numpy()       # (B, D)
+        z_target_np = z_target.detach().cpu().float().numpy()     # (B, D)
+        pad_np      = ctx_pad_mask.detach().cpu().float().numpy() # (B, C)
+
+        # Pool z_enc over valid positions
+        valid     = (pad_np == 0).astype(np.float32)              # (B, C)
+        valid_sum = valid.sum(axis=1, keepdims=True).clip(min=1)  # (B, 1)
+        z_enc_pooled = (z_enc_np * valid[..., None]).sum(axis=1) / valid_sum
+
+        self.embed_tracker_z_enc.update(z_enc_pooled)
+        self.embed_tracker_z_pred.update(z_pred_np)
+        self.embed_tracker_z_target.update(z_target_np)
+
+    # --- Final logging
     def log_epoch(self, lr: float | None = None, **metrics):
         self._logdir.mkdir(parents=True, exist_ok=True)
 
-        # -- collect --
+        # -- collect
         self.epoch += 1
         wall_time = time.time() - self._run_start
         epoch_loss = float(sum(self.epoch_losses) / self._ep_samples)
@@ -374,21 +360,18 @@ class TrainingLogger:
             "loss": self._fmt(epoch_loss),
         }
 
-        cli_pp = {
-            "epoch": self.epoch,
+        cli_pp: dict = {
             "lr": self._fmt(lr),
-            "loss": self._fmt(epoch_loss),
-            "wall_sec": round(wall_time, 1),
+            "loss": self._fmt(epoch_loss)
         }
 
-        # -- always-on: grad norms --
-        grad_norms = self.grad_mon.get_metrics()
-        self.grad_mon.reset()
-        if self._log_norms and grad_norms:
-            for k, v in grad_norms.items():
+        # --- grad norms
+        if len(self.grad_norms) > 0:
+            for k, v in self.get_norm_metrics().items():
                 ep_metrics[k] = self._fmt(v)
                 if k == "grad_norm_mean" or self._verbose:
                     cli_pp[k] = self._fmt(v)
+        self.grad_norms.clear()
 
         # -- always-on: embed health --
         embed_health = {}
@@ -404,7 +387,7 @@ class TrainingLogger:
         for k, v in embed_health.items():
             ep_metrics[k] = self._fmt(v)
 
-        # -- extras from caller (always CSV/TB, verbose-gated for CLI) --
+        # -- extras from caller (always CSV/TB, verbose-gated for CLI)
         ep_metrics["steps"] = self.global_step
         for k, v in metrics.items():
             ep_metrics[k] = self._fmt(v)
@@ -413,16 +396,16 @@ class TrainingLogger:
             for k, v in metrics.items():
                 cli_pp[k] = self._fmt(v)
 
-        # -- CLI --
-        cli = [f"{k}={self._fmt(v)}" for k, v in cli_pp.items() if k != "wall_sec"]
-        cli.append(f"[{wall_time:.0f}s]")
+        # -- loig to CLI
+        cli = [f"Ep {self.epoch}"] + [f"{k}={self._fmt(v)}" for k, v in cli_pp.items() if k != "wall_sec"]
+        cli.append(f"[{round(wall_time, 1):f}s]")
         print(" | ".join(cli))
 
-        # -- log to CSV --
+        # -- log to CSV
         if self._log_csv:
             self._csv_writer.write(ep_metrics)
 
-        # -- log to Tensorboard --
+        # -- log to Tensorboard
         if self._log_tb:
             if lr is not None:
                 self._tb_writer.add_scalar("epoch/lr", lr, self.epoch)
@@ -481,10 +464,6 @@ class TrainingLogger:
             return f"{h}h {m}m {s}s"
         return f"{m}m {s}s"
 
-    def __del__(self):
-        if not self._closed:
-            self._tb_writer.close()
-
 
 class DriftMonitor:
     """Tracks encoder drift between online and target encoders on a fixed probe batch.
@@ -542,7 +521,7 @@ class DriftMonitor:
         }
 
 
-class EMATracker:
+class EMAMonitor:
     """
     Track encoder divergence from context encoder.
 

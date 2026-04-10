@@ -72,6 +72,7 @@ def main():
             from src.training.train_sg import main as train_main
         train_main(params, exp_dir, device)
     
+    print("Done.")    
     
 
 if __name__ == "__main__":

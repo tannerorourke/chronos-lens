@@ -36,7 +36,6 @@ def save_checkpoint(
     model_params: dict,
     optimizer,
     scheduler,
-    scaler,
     epoch: int,
     global_step: int,
     loss_history: list,
@@ -52,7 +51,6 @@ def save_checkpoint(
         "seed":         seed,
         "optimizer":    None if optimizer is None else optimizer.state_dict(),
         "scheduler":    None if scheduler is None else scheduler.state_dict(),
-        "scaler":       None if scaler is None else scaler.state_dict(),
         "epoch":        epoch,
         "global_step":  global_step,
         "loss_history": loss_history,
@@ -88,7 +86,6 @@ def load_model_checkpoint(
     model,
     optimizer,
     scheduler,
-    scaler,
     path: Path,
     device: torch.device,
     restore_rng: bool = True,
@@ -109,11 +106,6 @@ def load_model_checkpoint(
         scheduler.load_state_dict(checkpoint["scheduler"])
         print(f"loaded scheduler from epoch {epoch}")
     
-    scaler_dict = checkpoint["scaler"]
-    if scaler is not None and scaler_dict is not None:
-        scaler.load_state_dict(checkpoint["scaler"])
-        print(f"loaded scaler from epoch {epoch}")
-    
     if restore_rng:
         _restore_rng(checkpoint)
 
@@ -122,4 +114,4 @@ def load_model_checkpoint(
     loss_hist = checkpoint.get("loss_history", [])
 
     model.eval()
-    return model, model_params, optimizer, scheduler, scaler, epoch, global_step, loss_hist
+    return model, model_params, optimizer, scheduler, epoch, global_step, loss_hist

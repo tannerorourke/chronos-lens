@@ -54,7 +54,7 @@ class JEPAStopGrad(nn.Module):
         # No target encoder is created - predictor and target paths share the same encoder. 
         # The target path blocks gradient flow via torch.no_grad() + detach()
 
-    def forward(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         ctx_tokens   = batch["ctx_tokens"]    # (B, C, T_tok)
         ctx_tok_mask = batch["ctx_tok_mask"]  # (B, C, T_tok)
         ctx_pad_mask = batch["ctx_pad_mask"]  # (B, C)
@@ -62,19 +62,16 @@ class JEPAStopGrad(nn.Module):
         tgt_tok_mask = batch["tgt_tok_mask"]  # (B, T_tok)
         mask_pos     = batch["mask_pos"]      # (B,)
 
-        # --- Encode context (with grads)
         z_enc = self.encoder(ctx_tokens, ctx_tok_mask, ctx_pad_mask, pool=False) # (B, C, D)
-
-        # -- Predict masked encounters --
         z_pred = self.predictor(z_enc, ctx_pad_mask, mask_pos) # (B, D)
         
-        # -- Target path (shared weights, stop-gradient)
-        with torch.no_grad():
-            z_target = self.encoder(tgt_tokens, tgt_tok_mask) # (B, D)
-            z_target = F.layer_norm(z_target, (z_target.size(-1),))
-            z_target = z_target.detach()
+        # Target path WITH grad (for symmetric VICReg)
+        z_target = self.encoder(tgt_tokens, tgt_tok_mask)  # (B, D)
+        
+        # Target path STOP-grad (for sim loss)
+        z_target_sg = z_target.detach()
 
-        return z_enc, z_pred, z_target
+        return z_enc, z_pred, z_target, z_target_sg
 
     @property
     def transformer_layers(self):

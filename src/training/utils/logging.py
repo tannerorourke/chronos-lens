@@ -57,7 +57,7 @@ class CsvWriter:
 
 class EmbeddingTracker:
     """Welford online mean/variance + L2-norm tracker for one embedding
-    tensor type. Cheap enough to per batch per epoch."""
+    tensor type. Cheap enough to compute per batch per epoch."""
 
     def __init__(self):
         self._n: int = 0
@@ -242,6 +242,8 @@ class EmbeddingWriter:
         print(f"  [EmbeddingWriter] Saved {out_path.name} ({n}/{self._n_total} samples)")
 
 
+# ------------------------------------------------------------------
+# -- Core Logging Class
 class TrainingLogger:
     """ All-in-one CSV, TensorBoard, CLI, and embedding logger for
         loss, grad norms, JEPA embeddings, and custom metrics

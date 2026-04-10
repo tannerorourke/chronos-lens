@@ -10,8 +10,11 @@ model:
 optimization:
     epochs: 50
     base_lr: 1e-4
-    schedule: "linear_decay"
+    schedule: "warmup_cosine"
     min_lr_ratio: 0.1
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    grad_clip: 5.0
     sim_weight: 25.0
     var_weight: 25.0
     cov_weight: 1.0

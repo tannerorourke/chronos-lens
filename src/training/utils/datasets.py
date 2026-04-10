@@ -66,12 +66,10 @@ def encode_encounter(
 class MimicDataset(Dataset):
     """One sample per (patient, masked-encounter-index).
 
-    For a patient with N encounters, N samples are created. Each 
-    sample uses N-1 encounters as context and 1 as the prediction 
-    target. Patients with fewer than 2 encounters are skipped.
-    
-    Supports ICD-code-only and medication-only modality plus evaluation 
-    for 30d admission prediction and next block prediction.
+    For patient with N encounters, N-1 samples are created. Each sample 
+    uses encounters [0..mask_pos-1] as causal context and encounter 
+    [mask_pos] as the prediction target. Patients with fewer than 2 
+    encounters are skipped.
     """
 
     def __init__(
@@ -100,12 +98,11 @@ class MimicDataset(Dataset):
 
             for mask_pos in range(len(encs)):
                 self.samples.append({
-                    "context":    [tokens[i] for i in range(len(encs)) if i != mask_pos],
+                    "context":    tokens[:mask_pos],
                     "target":     tokens[mask_pos],
                     "mask_pos":   mask_pos,
                     "subject_id": sid,
                 })
-        assert len(self.samples) > 0, "[MimicDataset] No training samples produced"
 
     def __len__(self):
         return len(self.samples)

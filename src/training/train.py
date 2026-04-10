@@ -18,6 +18,7 @@ from typing import Dict
 
 from tqdm import tqdm
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from src.models.jepa_stopgrad import JEPAStopGrad
@@ -40,6 +41,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     var_weight  = opt_params.get("var_weight", 1.0)
     cov_weight  = opt_params.get("cov_weight", 0.04)
     accum_steps = opt_params.get("accumulation_steps", 1)
+    grad_clip   = opt_params.get("grad_clip", 5.0)
 
     # --- data
     data_params     = params["data"]
@@ -54,7 +56,14 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     seed            = meta_p["seed"]
     use_bfloat16    = meta_p["use_bfloat16"]
     save_ckpt_every = meta_p.get("save_ckpt_every", epochs)
-    embed_every     = meta_p.get("embed_every", epochs)
+    save_emb_every  = meta_p.get("save_emb_every", epochs)
+    m_tag           = meta_p.get("tag", None)
+    m_desc          = meta_p.get("description", None)
+    ckpt_dir = run_dir / "checkpoints"
+    
+    print(f"Starting {m_tag if m_tag else 'up'}..")
+    if m_desc:
+        print(f"  -- {params['meta'].get('description', '')}")
 
     # --- build sequences, vocab, dataset, loader
     patients = load_sequences(n=n_patients)
@@ -71,8 +80,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         num_workers=num_workers, persistent_workers=num_workers > 0,
         pin_memory=pin_memory)
 
-    ckpt_dir = run_dir / "checkpoints"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    
 
     # --- model ---
     model_params = params["model"]
@@ -80,24 +88,22 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     model = build_model(model_params, device)
     assert type(model) == JEPAStopGrad
     
-    # --- init optimizer / scheduler / scaler
-    optimizer, scheduler, scaler = init_optimizers(
+    # --- init optimizer / scheduler
+    optimizer, scheduler = init_optimizers(
         model, opt_params,
         ipe=len(loader),
-        num_epochs=epochs,
-        use_bfloat16=use_bfloat16)
+        num_epochs=epochs)
     
     
-    start_epoch, global_step, loss_history = 1, 1, []
+    start_epoch, start_step, loss_history = 1, 1, []
     # --- load checkpoint?
     if params.get("resume_from"):
         ckpt_path = EXPERIMENTS_DIR / params["resume_from"]
-        model, model_params, optimizer, scheduler, scaler, start_epoch, global_step, loss_history = \
+        model, model_params, optimizer, scheduler, start_epoch, start_step, loss_history = \
             load_model_checkpoint(
                 model,
-                optimizer, scheduler, scaler, 
+                optimizer, scheduler, 
                 ckpt_path, device, restore_rng=True)
-    
 
     print("Params:",
           f"Total: {(sum(p.numel() for p in model.parameters()) / 1e6):.2f}M",
@@ -107,9 +113,9 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     logger = TrainingLogger(
         run_dir,
         epoch=start_epoch - 1,
-        global_step=global_step,
+        global_step=start_step,
         loss_history=loss_history,
-        embed_every=embed_every,
+        embed_every=save_emb_every,
         total_epochs=epochs,
     )
     
@@ -140,41 +146,24 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                     k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                     for k, v in batch.items()
                 }
+                
+                z_enc, z_pred, z_target = model(batch_dev)
+                loss_dict = jepa_stopgrad_loss(
+                    z_enc, z_pred, z_target, batch_dev["ctx_pad_mask"],
+                    sim_weight, var_weight, cov_weight)
+                loss = loss_dict["loss"]
+                loss.backward()
 
-                def forward_unto_dawn():
-                    z_enc, z_pred, z_target = model(batch_dev)
-                    loss_dict = jepa_stopgrad_loss(
-                        z_enc, z_pred, z_target, batch_dev["ctx_pad_mask"],
-                        sim_weight, var_weight, cov_weight)
-                    return loss_dict, z_enc, z_pred, z_target
-
-                if use_bfloat16 and scaler is not None:
-                    with torch.amp.autocast("cuda", dtype=torch.bfloat16):  # type: ignore
-                        loss_dict, z_enc, z_pred, z_target = forward_unto_dawn()
-                        loss = loss_dict["loss"]
-                    scaler.scale(loss).backward()
-                else:
-                    loss_dict, z_enc, z_pred, z_target = forward_unto_dawn()
-                    loss = loss_dict["loss"]
-                    loss.backward()
-
-                # --- gradient accumulation
+                # --- grad accumulation
                 if (i + 1) % accum_steps == 0:
-                    if scaler is not None:
-                        scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                        logger.grad_mon.capture(model.parameters())
-                        scaler.step(optimizer)
-                        scaler.update()
-                    else:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                        logger.grad_mon.capture(model.parameters())
-                        optimizer.step()
+                    pre_clip = nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    logger.grad_mon.capture(pre_clip.item())
+                    optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                     if scheduler is not None:
                         scheduler.step()
 
-                # --- embedding health (every epoch, cheap)
+                # --- embedding health
                 logger.update_embed_health(
                     z_enc=z_enc,
                     z_pred=z_pred,
@@ -203,7 +192,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
         if epoch % save_ckpt_every == 0 or epoch == epochs:
             save_checkpoint(model, model_params,
-                            optimizer, scheduler, scaler,
+                            optimizer, scheduler,
                             epoch, logger.global_step, logger.loss_history,
                             ckpt_dir, seed=seed)
 

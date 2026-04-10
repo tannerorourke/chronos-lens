@@ -1,5 +1,5 @@
 import math
-import torch
+import torch.optim as optim
 from torch.amp import GradScaler # type: ignore
 
 
@@ -11,7 +11,7 @@ def LinearDecay(
 ):
     """ Linear decay from base_lr to (min_lr_ratio * base_lr) over total_steps """
     total_steps = ipe*num_epochs
-    return torch.optim.lr_scheduler.LambdaLR(
+    return optim.lr_scheduler.LambdaLR(
             optimizer,
             lr_lambda=lambda step: max(min_lr_ratio, 
                                        1.0 - (1.0 - min_lr_ratio) * step / total_steps))
@@ -79,11 +79,24 @@ def init_optimizers(
     model, opt_params,
     ipe: int,
     num_epochs: int,
-    use_bfloat16=False,
-    checkpoint=None
 ):
     base_lr = float(opt_params.get("base_lr", 0.0))
-    optimizer = torch.optim.Adam(model.parameters(), lr=base_lr)
+    wd = float(opt_params.get("weight_decay", 0.05))
+    betas = opt_params.get("betas", [0.9, 0.95])
+    b1, b2 = betas[0], betas[1]
+    
+    # Exclude biases and LayerNorm params from weight decay using param-group split
+    decay_params, nodecay_params = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad: continue
+        if p.dim() < 2 or "norm" in name.lower() or "bias" in name:
+            nodecay_params.append(p)
+        else:
+            decay_params.append(p)
+    optimizer = optim.AdamW([
+        {"params": decay_params, "weight_decay": wd},
+        {"params": nodecay_params, "weight_decay": 0.0},
+    ], lr=base_lr, betas=(b1, b2))
     
     sched_type = opt_params.get("schedule", "")
     if sched_type == "warmup_cosine":
@@ -91,7 +104,8 @@ def init_optimizers(
             optimizer,
             warmup_steps=ipe*opt_params.get("warmup_epochs", 0),
             total_steps=ipe*num_epochs,
-            min_lr=opt_params.get("min_lr", 0.0))
+            min_lr=opt_params.get("min_lr", 0.0)
+        )
     elif sched_type == "linear_decay":
         min_lr_ratio = opt_params.get("min_lr_ratio", 0.0)
         
@@ -99,17 +113,11 @@ def init_optimizers(
             optimizer,
             num_epochs=num_epochs,
             ipe=ipe,
-            min_lr_ratio=min_lr_ratio)
-        
-    elif sched_type == "static":
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
-        
-    elif sched_type == "" or sched_type is None:
-        scheduler = None
-        
+            min_lr_ratio=min_lr_ratio
+        )
     else:
-        raise ValueError(f"[init_optimizers] scheduler '{sched_type}' not one of 'warmup_cosine_annealing', 'linear_decay', 'linear', or 'static'")
+        scheduler = None
     
-    scaler = GradScaler('cuda') if use_bfloat16 else None
+    # No scaler is needed for bf16/fp32
     
-    return optimizer, scheduler, scaler
+    return optimizer, scheduler

@@ -1,42 +1,33 @@
 model:
-    embed_dim: 128
+    embed_dim: 64
     num_heads: 8
-    num_layers: 4
-    ffn_dim: 512
+    num_layers: 2
+    ffn_dim: 256
     max_seq_len: 128
-    predictor_embed_dim: 64
+    predictor_embed_dim: 32
     predictor_depth: 2
-    architecture: stopgrad
+    architecture: ema
 optimization:
-    epochs: 100
+    epochs: 3
     base_lr: 3e-4
     schedule: "warmup_cosine"
     warmup_epochs: 10
     weight_decay: 0.05
     betas: [0.9, 0.95]
     grad_clip: 5.0
-    sim_weight: 1.0
-    var_weight: 1.0
-    cov_weight: 0.04
+    ema: [0.998, 1.0]
 data:
-    batch_size: 8
+    batch_size: 64
     accumulation_steps: 2
     n_patients: 0 # 0=all
     max_encounters: null # null = no limit
     pin_mem: true
     num_workers: 0
-sae_config:
-    z_enc:
-        n_features: 256
-        top_k: 12
-        epochs: 200
-        lr: 3e-4
-        batch_size: 8
 meta:
     seed: 42
     use_bfloat16: True
-    tag: "jepa_stopg_42_v01"
-    description: "First optimization run with Stopgrad JEPA, seed 42"
+    tag: "jepa_ema_42_test"
+    description: "Test run (iJEPA), seed 42"
     resume_from: null # provide path to .pt checkpoint. tag must match.
     save_ckpt_every: 10 # null = once at end
     save_emb_every: 5 # null = once at end; Embeddings are sent to tb every epoch

@@ -13,6 +13,9 @@ optimization:
     base_lr: 1e-4
     min_lr: 1e-5
     warmup_epochs: 5
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    grad_clip: 5.0
     sim_weight: 1.0
     var_weight: 1.0
     cov_weight: 0.04

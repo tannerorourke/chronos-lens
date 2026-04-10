@@ -273,8 +273,8 @@ def inspect_sae_features(
                     continue
                 r, p = stats.pearsonr(feat_vals, meta_col)
                 corrs.append({"feature": meta_name, 
-                              "r": round(float(r), 3),
-                              "p": float(p)})
+                              "r": round(float(r), 3), # type: ignore
+                              "p": float(p)}) # type: ignore
             corrs.sort(key=lambda x: abs(x["r"]), reverse=True)
             metadata_corr = corrs[:5]
 

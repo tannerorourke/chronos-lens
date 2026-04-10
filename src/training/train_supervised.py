@@ -12,7 +12,6 @@ from os import environ
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import gc
-import json
 from pathlib import Path
 from typing import Dict
 
@@ -20,6 +19,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from src.models.supervised_transformer import SupervisedTransformer
 from src.training.utils.datasets import SupervisedDataset, supervised_collate_fn, build_vocab
@@ -65,11 +65,11 @@ def save_supervised_embeddings(
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
-    # --- optimization ---------------------------------------------------------
+    # --- optimization
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
 
-    # --- data -----------------------------------------------------------------
+    # --- data
     data_params     = params["data"]
     label_key       = data_params["label_key"]
     batch_size      = data_params["batch_size"]
@@ -78,13 +78,16 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     pin_memory      = data_params.get("pin_mem", True) and device.type == "cuda"
     num_workers     = data_params.get("num_workers", 0)
 
-    # --- meta -----------------------------------------------------------------
+    # --- meta
     meta_p          = params["meta"]
     seed            = meta_p["seed"]
     use_bfloat16    = meta_p["use_bfloat16"]
-    save_every      = meta_p["save_every"] or epochs
+    save_ckpt_every = meta_p["save_ckpt_every"] or epochs
+    save_emb_every  = meta_p["save_emb_every"] or epochs
+    ckpt_dir = run_dir / "checkpoints"
+    emb_dir = run_dir / "embeddings"
 
-    # --- build sequences, vocab, dataset, loader ------------------------------
+    # --- build sequences, vocab, dataset, loader
     patients = load_sequences(n=n_patients)
     vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=False)
 
@@ -97,44 +100,43 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         num_workers=num_workers, persistent_workers=num_workers > 0,
         pin_memory=pin_memory)
 
-    ckpt_dir = run_dir / "checkpoints"
-    emb_dir  = run_dir / "embeddings"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    emb_dir.mkdir(parents=True, exist_ok=True)
+    
 
-    # --- model ----------------------------------------------------------------
+    # --- model
     model_params = params["model"]
     model_params["vocab_size"] = len(vocab)
     model = build_model(model_params, device)
     assert type(model) == SupervisedTransformer
 
-    # --- init optimizer / scheduler / scaler ----------------------------------
-    optimizer, scheduler, scaler = init_optimizers(
+    # --- init optimizer / scheduler
+    optimizer, scheduler = init_optimizers(
         model, opt_params,
         ipe=len(loader),
-        num_epochs=epochs,
-        use_bfloat16=use_bfloat16)
+        num_epochs=epochs)
 
     start_epoch, global_step, loss_history = 1, 1, []
     # --- load checkpoint? ----------------------------------------------
     if params.get("resume_from"):
         ckpt_path = EXPERIMENTS_DIR / params["resume_from"]
-        model, model_params, optimizer, scheduler, scaler, start_epoch, global_step, loss_history = \
+        model, model_params, optimizer, scheduler, start_epoch, global_step, loss_history = \
             load_model_checkpoint(
                 model,
-                optimizer,
-                scheduler,
-                scaler,
-                ckpt_path,
-                device,
-                restore_rng=True)
+                optimizer, scheduler,
+                ckpt_path, device, restore_rng=True
+            )
 
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total trainable params: {(n_params / 1e6):.2f}M")
+    print("Params:",
+          f"Total: {(sum(p.numel() for p in model.parameters()) / 1e6):.2f}M",
+          f"Trainable: {(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6):.2f}M")
 
-    logger   = TrainingLogger(run_dir, start_epoch, global_step, loss_history)
-    grad_mon = GradientMonitor(model)
-
+    logger = TrainingLogger(
+        run_dir,
+        epoch=start_epoch - 1,
+        global_step=global_step,
+        loss_history=loss_history,
+        embed_every=save_emb_every,
+        total_epochs=epochs,
+    )
     criterion = nn.BCEWithLogitsLoss()
 
     # ------------------------------------------------------------------
@@ -146,60 +148,47 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         
-        save_this_epoch = (epoch % save_every == 0 or epoch == epochs)
+        save_this_epoch = (epoch % save_emb_every == 0 or epoch == epochs)
         z_c, sids = [], []
 
-        for batch in loader:
+        for batch in tqdm(loader, leave=False, 
+                          total=len(loader), unit="batch", colour="green"):
             batch_dev = {
                 k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
             }
 
-            def forward_unto_dawn():
-                z_enc_pooled, logits = model(batch_dev)
-                loss = criterion(logits, batch_dev["labels"].float())
-                if save_this_epoch:
-                    z_c.append(z_enc_pooled.detach().cpu().numpy())
-                    sids.extend(batch["subject_ids"])
-                return loss
-
-            if use_bfloat16 and scaler is not None:
-                with torch.amp.autocast("cuda", dtype=torch.bfloat16):  # type: ignore
-                    loss = forward_unto_dawn()
-
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                logger.grad_mon.capture(model.parameters())
-                scaler.step(optimizer)
-                scaler.update()
-
-            else:
-                loss = forward_unto_dawn()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                logger.grad_mon.capture(model.parameters())
-                optimizer.step()
-
+            z_enc_pooled, logits = model(batch_dev)
+            loss = criterion(logits, batch_dev["labels"].float())
+            loss.backward()
+            
+            pre_clip = nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            logger.grad_mon.capture(pre_clip.item())
+            
+            optimizer.step()
             optimizer.zero_grad(set_to_none=True)
-
             if scheduler is not None:
                 scheduler.step()
-
-            logger.log_batch(loss.item(), batch.size(0))
+                
+            if save_this_epoch:
+                z_c.append(z_enc_pooled.detach().cpu().numpy())
+                sids.extend(batch["subject_ids"])
+            
+            logger.update_embed_health_single(z_enc_pooled)
+            logger.log_batch(loss.item(), len(batch["subject_ids"]))
 
         # --- EVAL -----------------------------------------------------
         model.eval()
 
-        if save_this_epoch:
+        if (epoch % save_ckpt_every == 0 or epoch == epochs):
             save_checkpoint(model, model_params,
-                            optimizer, scheduler, scaler,
+                            optimizer, scheduler,
                             epoch, logger.global_step, logger.loss_history,
                             ckpt_dir, seed=seed)
+        if save_this_epoch:
             save_supervised_embeddings(z_c, sids, epoch, emb_dir)
         
-        logger.log_epoch(lr=optimizer.param_groups[0]["lr"],
-                         **grad_mon.get_metrics())
+        logger.log_epoch(lr=optimizer.param_groups[0]["lr"])
 
     # ------------------------------------------------------------------
     # --- DONE ---------------------------------------------------------

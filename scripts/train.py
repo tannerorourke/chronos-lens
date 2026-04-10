@@ -69,7 +69,7 @@ def main():
         elif arch == "supervised":
             from src.training.train_supervised import main as train_main
         else:
-            from src.training.train import main as train_main
+            from src.training.train_sg import main as train_main
         train_main(params, exp_dir, device)
     
     

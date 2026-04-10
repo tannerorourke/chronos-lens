@@ -19,13 +19,13 @@ from typing import Dict
 
 from tqdm import tqdm
 import torch
-import torch.nn.functional as F
+import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from src.models.jepa_ema import JEPA_EMA
 from src.training.utils.datasets import MimicDataset, collate_fn, build_vocab
 from src.training.utils.optimizers import init_optimizers
-from src.training.utils.logging import TrainingLogger
+from src.training.utils.logging import TrainingLogger, DriftMonitor
 from src.training.utils.checkpoint import build_model, save_checkpoint, load_model_checkpoint
 from src.utils.io import load_sequences, EXPERIMENTS_DIR
 
@@ -91,7 +91,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         model, opt_params,
         ipe=len(loader),
         num_epochs=epochs)
-    
+
 
     start_epoch, start_step, loss_history = 1, 1, []
     # --- load checkpoint?
@@ -99,7 +99,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         ckpt_path = EXPERIMENTS_DIR / params["resume_from"]
         model, model_params, optimizer, scheduler, start_epoch, start_step, loss_history = \
             load_model_checkpoint(
-                model,
+                model, 
                 optimizer, scheduler, 
                 ckpt_path, device, restore_rng=True)
 
@@ -111,7 +111,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     total_steps = (len(loader) * epochs) // accum_steps
     def momentum_at(step: int, m0: float, m1: float) -> float:
         return m0 + (m1 - m0) * (step / total_steps)
-
+    
     # --- training utility
     logger = TrainingLogger(
         run_dir,
@@ -129,13 +129,22 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         max_ctx = max(len(s["context"]) for s in dataset.samples)
     embed_dim = model_params["embed_dim"]
     
+    # Drift monitoring: the ratio drift_over_pred tells us what fraction of the
+    # prediction residual is actually encoder drift. A single frozen cpu batch
+    # is measured to ensure trajectories are are comparable.
+    # For a well-defensible residual analysis, this ratio should be <0.05 at 
+    # convergence. If it stays high, the P - T confound is not bounded and 
+    # residual-based claims need stronger caveats.
+    drift_mon = DriftMonitor()
+    drift_mon.set_probe(next(iter(loader)))
+    
     # -- conditional autocast
     autocast_ctx = (
         torch.autocast("cuda", dtype=torch.bfloat16)
         if use_bfloat16 and device.type == "cuda"
         else nullcontext()
     )
-    
+
     # ------------------------------------------------------------------
     # --- TRAINING LOOP ------------------------------------------------
     # ------------------------------------------------------------------
@@ -157,22 +166,22 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 with autocast_ctx:
                     z_enc, z_pred, z_target = model(batch_dev)
                     loss = nn.functional.smooth_l1_loss(z_pred, z_target)
-                    loss.backward()
+                loss.backward()
 
                 # --- grad accumulation
                 if (i + 1) % accum_steps == 0:
                     pre_clip = nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                     logger.grad_mon.capture(pre_clip.item())
-                        optimizer.step()
+                    optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                     if scheduler is not None:
                         scheduler.step()
 
-                # --- EMA update of target encoder
-                with torch.no_grad():
+                    # --- EMA update of target encoder
+                    with torch.no_grad():
                         m = momentum_at(logger.global_step // accum_steps, ema[0], ema[1])
-                    for param_q, param_k in zip(model.encoder.parameters(), model.target_encoder.parameters()):
-                        param_k.data.mul_(m).add_((1. - m) * param_q.detach().data)
+                        for param_q, param_k in zip(model.encoder.parameters(), model.target_encoder.parameters()):
+                            param_k.data.mul_(m).add_((1. - m) * param_q.detach().data)
 
                 # --- embedding health
                 logger.update_embed_health(
@@ -192,6 +201,13 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                     subject_ids=batch["subject_ids"],
                 )
 
+                # --- step-level collapse early warning
+                if logger.global_step % 20 == 0:
+                    logger.log_step_scalar(
+                        "step/z_target_std_min",
+                        z_target.std(0).min().item(),
+                    )
+
                 # --- stat logging
                 logger.log_batch(loss.item(), len(batch))
                 n_batches += 1
@@ -205,6 +221,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                             epoch, logger.global_step, logger.loss_history,
                             ckpt_dir, seed=seed)
 
+        drift_metrics = drift_mon.compute(model, device)
         logger.log_epoch(lr=optimizer.param_groups[0]["lr"], **drift_metrics)
 
     # ------------------------------------------------------------------

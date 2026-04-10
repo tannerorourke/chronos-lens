@@ -76,7 +76,6 @@ class JEPA_EMA(nn.Module):
         # -- Target path (no grad)
         with torch.no_grad():
             z_target = self.target_encoder(tgt_tokens, tgt_tok_mask) # (B, D)
-            z_target = F.layer_norm(z_target, (z_target.size(-1),))
 
         return z_enc, z_pred, z_target
 

@@ -304,6 +304,16 @@ class TrainingLogger:
             step_loss = float(loss) / s
             self._tb_writer.add_scalar("step/loss", step_loss, self.global_step)
 
+    def log_step_scalar(self, name: str, value: float) -> None:
+        """Log a single scalar at the current global_step to TensorBoard."""
+        if self._log_tb:
+            self._tb_writer.add_scalar(name, value, self.global_step)
+
+    def update_embed_health_single(self, z_enc_pooled: "torch.Tensor") -> None:
+        # z_enc_pooled is already (B, D), no per-encounter pooling needed
+        z_np = z_enc_pooled.detach().cpu().float().numpy()
+        self.embed_tracker_z_enc.update(z_np)
+
     def update_embed_health(
         self,
         z_enc:        "torch.Tensor",   # (B, C, D)
@@ -476,9 +486,61 @@ class TrainingLogger:
             self._tb_writer.close()
 
 
-# ===========================================================================
-# EMA Tracker
-# ===========================================================================
+class DriftMonitor:
+    """Tracks encoder drift between online and target encoders on a fixed probe batch.
+
+    For EMA JEPA, the target encoder f_ξ diverges from the online encoder f_θ.
+    This means the prediction residual P - T = predictor(f_θ(ctx)) - f_ξ(x_t)
+    conflates (1) true prediction error and (2) encoder drift f_θ(x_t) - f_ξ(x_t).
+    This monitor quantifies (2) so the confound can be reported and bounded.
+    """
+
+    def __init__(self):
+        self._probe_batch = None  # stored on CPU
+
+    def set_probe(self, batch: dict) -> None:
+        """Store a fixed probe batch (CPU tensors). Called once at start of training."""
+        self._probe_batch = {
+            k: v.detach().cpu() if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+        }
+
+    @torch.no_grad()
+    def compute(self, model, device) -> dict:
+        """Run one forward pass on the probe and return drift metrics."""
+        if self._probe_batch is None:
+            return {}
+        batch = {
+            k: v.to(device) if isinstance(v, torch.Tensor) else v
+            for k, v in self._probe_batch.items()
+        }
+        model.eval()
+        
+        # Online and target encoder outputs on the same target tokens
+        z_online = model.encoder(batch["tgt_tokens"], batch["tgt_tok_mask"])
+        z_target = model.target_encoder(batch["tgt_tokens"], batch["tgt_tok_mask"])
+        
+        # Full forward pass for prediction residual
+        _, z_pred, z_t = model(batch)
+        model.train()
+
+        # calculate drift
+        drift    = z_online - z_target                  # (B, D)
+        pred_err = z_pred - z_t                         # (B, D)
+
+        drift_l2    = drift.norm(dim=-1)                # (B,)
+        pred_err_l2 = pred_err.norm(dim=-1)             # (B,)
+
+        cos_drift_err = torch.nn.functional.cosine_similarity(drift, pred_err, dim=-1)
+
+        return {
+            "drift_l2_mean":     drift_l2.mean().item(),
+            "drift_l2_max":      drift_l2.max().item(),
+            "pred_err_l2_mean":  pred_err_l2.mean().item(),
+            "drift_over_pred":   (drift_l2.mean() / pred_err_l2.mean().clamp_min(1e-8)).item(),
+            "drift_cos_pred":    cos_drift_err.mean().item(),
+        }
+
 
 class EMATracker:
     """

@@ -27,7 +27,7 @@ def main(
     exp_dir: Path,
     target: str,
     embeddings: str,
-    device: torch.device = torch.device("cpu"),
+    device: torch.device,
 ) -> None:
     print(f"Configuring SAE for {target} :)")
     

@@ -117,9 +117,9 @@ class EmbeddingWriter:
             return np.lib.format.open_memmap(
                 path, mode="w+", dtype=dtype, shape=shape)
 
-        self._mm_z_enc    = _mmap("z_encs",       (self._n_total, self._max_ctx, self._embed_dim))
-        self._mm_z_pred   = _mmap("z_pred",       (self._n_total, self._embed_dim))
-        self._mm_z_target = _mmap("z_target",     (self._n_total, self._embed_dim))
+        self._mm_z_enc    = _mmap("z_encs",       (self._n_total, self._max_ctx, self._embed_dim), dtype=np.float16) # type: ignore
+        self._mm_z_pred   = _mmap("z_pred",       (self._n_total, self._embed_dim), dtype=np.float16) # type: ignore
+        self._mm_z_target = _mmap("z_target",     (self._n_total, self._embed_dim), dtype=np.float16) # type: ignore
         self._mm_mask_pos = _mmap("mask_pos",     (self._n_total,))
         self._mm_ctx_pad  = _mmap("ctx_pad_mask", (self._n_total, self._max_ctx))
         return self
@@ -140,9 +140,9 @@ class EmbeddingWriter:
         if not self._active:
             return
 
-        z_enc_np    = z_enc.detach().cpu().float().numpy()
-        z_pred_np   = z_pred.detach().cpu().float().numpy()
-        z_target_np = z_target.detach().cpu().float().numpy()
+        z_enc_np    = z_enc.detach().cpu().half().numpy()
+        z_pred_np   = z_pred.detach().cpu().half().numpy()
+        z_target_np = z_target.detach().cpu().half().numpy()
         mask_np     = mask_pos.detach().cpu().float().numpy()
         pad_np      = ctx_pad_mask.detach().cpu().float().numpy()
 
@@ -195,14 +195,42 @@ class EmbeddingWriter:
         self._mm_z_enc = self._mm_z_pred = self._mm_z_target = None
         self._mm_mask_pos = self._mm_ctx_pad = None
 
-        loaded = {
-            k: np.load(p, mmap_mode="r")[:n].copy()
-            for k, p in tmp_paths.items()
-        }
-        loaded["subject_ids"] = np.array(self._subject_ids, dtype=str)
-
+        # Save each array from memmap without loading fully into RAM.
+        # Write individual .npy files, then combine into .npz via zipfile.
         out_path = self._emb_dir / f"embeddings_{self._epoch}.npz"
-        np.savez(out_path, **loaded)
+        npy_paths: list[tuple[str, Path]] = []
+
+        for k, p in tmp_paths.items():
+            mm = np.load(p, mmap_mode="r")
+            out_dtype = bool if k == "ctx_pad_mask" else mm.dtype
+            sliced_path = self._emb_dir / f"_sliced_{k}_{self._epoch}.npy"
+            # Write slice to a new file chunk-by-chunk to stay memory-friendly
+            out_mm = np.lib.format.open_memmap(
+                sliced_path, mode="w+", dtype=out_dtype, shape=mm[:n].shape)
+            chunk = 4096
+            for i in range(0, n, chunk):
+                j = min(i + chunk, n)
+                out_mm[i:j] = mm[i:j].astype(out_dtype)
+            out_mm.flush()
+            del mm, out_mm
+            npy_paths.append((k, sliced_path))
+
+        # subject_ids
+        sid_path = self._emb_dir / f"_sliced_subject_ids_{self._epoch}.npy"
+        np.save(sid_path, np.array(self._subject_ids, dtype=str))
+        npy_paths.append(("subject_ids", sid_path))
+
+        import zipfile
+        with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_LZMA) as zf:
+            for k, p in npy_paths:
+                zf.write(p, arcname=f"{k}.npy")
+
+        # Cleanup sliced intermediates
+        for _, p in npy_paths:
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
         # Cleanup intermediates
         for p in tmp_paths.values():
@@ -396,10 +424,12 @@ class TrainingLogger:
             for k, v in metrics.items():
                 cli_pp[k] = self._fmt(v)
 
-        # -- loig to CLI
-        cli = [f"Ep {self.epoch}"] + [f"{k}={self._fmt(v)}" for k, v in cli_pp.items() if k != "wall_sec"]
-        cli.append(f"[{round(wall_time, 1):f}s]")
-        print(" | ".join(cli))
+        # -- log to CLI
+        print(" | ".join(
+            [f"[{self.epoch}]"] + 
+            [f"{k}={self._fmt(v)}" for k, v in cli_pp.items() if k != "wall_sec"] + 
+            [f"[{round(wall_time, 1):f}s]"]
+        ))
 
         # -- log to CSV
         if self._log_csv:
@@ -407,6 +437,9 @@ class TrainingLogger:
 
         # -- log to Tensorboard
         if self._log_tb:
+            self._tb_writer.add_scalar("mem/allocated", torch.cuda.memory_allocated() / 1e9, self.epoch)
+            self._tb_writer.add_scalar("mem/reserved", torch.cuda.memory_reserved() / 1e9, self.epoch)
+            self._tb_writer.add_scalar("mem/peak", torch.cuda.max_memory_allocated() / 1e9, self.epoch)
             if lr is not None:
                 self._tb_writer.add_scalar("epoch/lr", lr, self.epoch)
             for key, value in ep_metrics.items():
@@ -472,6 +505,11 @@ class DriftMonitor:
     This means the prediction residual P - T = predictor(f_θ(ctx)) - f_ξ(x_t)
     conflates (1) true prediction error and (2) encoder drift f_θ(x_t) - f_ξ(x_t).
     This monitor quantifies (2) so the confound can be reported and bounded.
+    
+    the ratio drift_over_pred tells us what fraction of the prediction residual is 
+    actually encoder drift. A single frozen cpu batch is measured to ensure 
+    trajectories are are comparable. If this ratio is >0.05, the the P - T confound
+    is not bounded and residual based cliams need strong caveats.
     """
 
     def __init__(self):

@@ -11,6 +11,8 @@ Architecture
 """
 from contextlib import nullcontext
 from os import environ
+
+from sklearn.inspection import partial_dependence
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import gc
@@ -36,6 +38,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- optimization
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
+    patience    = opt_params.get("patience", 8)
     ema         = opt_params["ema"]
     accum_steps = opt_params.get("accumulation_steps", 1)
     grad_clip   = opt_params.get("grad_clip", 5.0)
@@ -108,16 +111,11 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     def momentum_at(step: int, m0: float, m1: float) -> float:
         return m0 + (m1 - m0) * (step / total_steps)
     
-    # --- training utility
-    logger = TrainingLogger(
-        run_dir,
-        epoch=start_epoch - 1,
-        global_step=start_step,
-        loss_history=loss_history,
-        embed_every=save_emb_every,
-        total_epochs=epochs,
-    )
+    # ------------------------------------------------------------------
+    # --- TRAINING LOOP ------------------------------------------------
+    # ------------------------------------------------------------------
     
+    # --- for padding saved z_enc
     n_total = len(dataset)
     if max_encounters is not None:
         max_ctx = max_encounters - 1
@@ -125,25 +123,33 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         max_ctx = max(len(s["context"]) for s in dataset.samples)
     embed_dim = model_params["embed_dim"]
     
-    # Drift monitoring: the ratio drift_over_pred tells us what fraction of the
-    # prediction residual is actually encoder drift. A single frozen cpu batch
-    # is measured to ensure trajectories are are comparable.
-    # For a well-defensible residual analysis, this ratio should be <0.05 at 
-    # convergence. If it stays high, the P - T confound is not bounded and 
-    # residual-based claims need stronger caveats.
-    drift_mon = DriftMonitor()
-    drift_mon.set_probe(next(iter(loader)))
-    
     # -- conditional autocast
     autocast_ctx = (
         torch.autocast("cuda", dtype=torch.bfloat16)
         if use_bfloat16 and device.type == "cuda"
-        else nullcontext()
-    )
+        else nullcontext())
 
-    # ------------------------------------------------------------------
-    # --- TRAINING LOOP ------------------------------------------------
-    # ------------------------------------------------------------------
+    # --- early stopping: using predictor L2 norm mean, pred error should rise to start,
+    #     then descend as model learns. only early stop once metric clearly turns over.
+    peak_metric = 0.0
+    peak_epoch = 0
+    is_descending = False
+    best_metric, best_epoch, best_state = float("inf"), 0, None
+    ep_since_imprvd = 0
+    
+    # --- training monitors
+    logger = TrainingLogger(
+        run_dir,
+        epoch=start_epoch - 1,
+        global_step=start_step,
+        loss_history=loss_history,
+        embed_every=save_emb_every,
+        total_epochs=epochs
+    )
+    drift_mon = DriftMonitor()
+    drift_mon.set_probe(next(iter(loader)))
+    
+    
     print(f"Training for {epochs} epochs ({len(loader)} batches of {batch_size})")
 
     for epoch in range(start_epoch, epochs + 1):
@@ -199,26 +205,56 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
                 # --- step-level collapse early warning
                 if logger.global_step % 20 == 0:
-                    logger.log_step_scalar(
-                        "step/z_target_std_min",
-                        z_target.std(0).min().item(),
-                    )
+                    logger.log_step_scalar("step/z_target_std_min", 
+                                           z_target.std(0).min().item())
 
                 # --- stat logging
                 logger.log_batch(loss.item(), len(batch))
                 n_batches += 1
 
-        # --- after the `with` block, the writer has closed and saved ---
+        # --- eval -----------------------------------------------------
         model.eval()
-
-        if epoch % save_ckpt_every == 0 or epoch == epochs:
-            save_checkpoint(model, model_params,
-                            optimizer, scheduler,
-                            epoch, logger.global_step, logger.loss_history,
-                            ckpt_dir, seed=seed)
-
         drift_metrics = drift_mon.compute(model, device)
         logger.log_epoch(lr=optimizer.param_groups[0]["lr"], **drift_metrics)
+        
+        # --- save events
+        cur_metric = drift_metrics["pred_err_l2_mean"]
+        
+        # Track climb
+        if cur_metric > peak_metric:
+            peak_metric = cur_metric
+            peak_epoch = epoch
+            
+        # Descent roughly confirmed: 2% drop below peak
+        if not is_descending and (cur_metric < peak_metric * 0.98) and (epoch > peak_epoch + 3):
+            is_descending = True
+            print(f"Descent confirmed at epoch {epoch} (peak was {peak_metric:.4f} @ ep{peak_epoch})")
+            # Reset best tracking - we only care about the descent phase
+            best_metric = cur_metric
+            best_epoch = epoch
+            ep_since_imprvd = 0
+            
+        # Only track best and patience once descending
+        if is_descending:
+            if cur_metric < best_metric - 0.005:
+                best_metric = cur_metric
+                best_epoch = epoch
+                ep_since_imprvd = 0
+                best_state = { k: v.detach().cpu().clone() for k, v in model.state_dict().items() }
+            else:
+                ep_since_imprvd += 1
+                
+            cycle_save = (epoch % save_ckpt_every == 0 or epoch == epochs)
+            im_done = epoch > 30 and ep_since_imprvd >= patience
+            if cycle_save or im_done:
+                print(f"Early stopping at epoch {epoch}, best pred_err_l2_mean={best_metric:.4f} @ ep{best_epoch}")
+                if best_state is not None:
+                    save_checkpoint(best_state, model_params,
+                                    optimizer, scheduler,
+                                    best_epoch, logger.global_step, logger.loss_history,
+                                    ckpt_dir, seed=seed)
+                if im_done:
+                    break
 
     # ------------------------------------------------------------------
     # --- DONE ---------------------------------------------------------

@@ -7,7 +7,7 @@ def LinearDecay(
     optimizer, 
     num_epochs: int, 
     ipe: int,
-    min_lr_ratio: float = 0.0,
+    min_lr_ratio: float = 1e-5,
 ):
     """ Linear decay from base_lr to (min_lr_ratio * base_lr) over total_steps """
     total_steps = ipe*num_epochs
@@ -19,7 +19,14 @@ def LinearDecay(
 
 class WarmupCosineAnnealing:
     """ Linear warmup from min_lr to base_lr, then cosine decay back to min_lr."""
-    def __init__(self, optimizer, warmup_steps: int, total_steps: int, min_lr: float = 1e-6, log=False):
+    def __init__(
+        self, 
+        optimizer, 
+        warmup_steps: int, 
+        total_steps: int, 
+        min_lr: float = 1e-5, 
+        log=False
+    ):
         self.optimizer    = optimizer
         self.warmup_steps = max(0, warmup_steps)
         self.total_steps  = total_steps

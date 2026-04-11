@@ -32,7 +32,7 @@ def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | JEPAStop
 
 
 def save_checkpoint(
-    model: JEPA_EMA | JEPAStopGrad | SupervisedTransformer,
+    state_dict: dict,
     model_params: dict,
     optimizer,
     scheduler,
@@ -46,7 +46,7 @@ def save_checkpoint(
     file = save_dir / f"checkpoint_{epoch}.pt"
 
     torch.save({
-        "model":        model.state_dict(),
+        "model":        state_dict,
         "model_params": model_params,
         "seed":         seed,
         "optimizer":    None if optimizer is None else optimizer.state_dict(),

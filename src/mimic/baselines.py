@@ -80,7 +80,7 @@ def _drop_cols_for_label(X, feature_names: list[str], label_key: str):
     """Remove columns that leak information about the target label.
 
     Always drops ALL label columns (don't let label_30d predict escalation
-    either — they may be correlated). Then drops label-specific exclusions
+    either - they may be correlated). Then drops label-specific exclusions
     (escalation-derived features, temporal proxies, etc.).
     """
     exclude: set[str] = set()

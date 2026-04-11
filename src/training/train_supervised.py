@@ -180,7 +180,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         model.eval()
 
         if (epoch % save_ckpt_every == 0 or epoch == epochs):
-            save_checkpoint(model, model_params,
+            save_checkpoint(model.state_dict(), model_params,
                             optimizer, scheduler,
                             epoch, logger.global_step, logger.loss_history,
                             ckpt_dir, seed=seed)

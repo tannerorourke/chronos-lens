@@ -30,7 +30,13 @@ class Predictor(nn.Module):
             for _ in range(num_layers)
         ])
         self.norm        = nn.LayerNorm(predictor_embed_dim)
-        self.output_proj = nn.Linear(predictor_embed_dim, embed_dim)
+        # projection back to embed dim deserves real expressivity
+        self.output_proj = nn.Sequential(
+            nn.Linear(predictor_embed_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+            nn.LayerNorm(embed_dim)
+        )
 
         nn.init.trunc_normal_(self.mask_token, std=0.02)
 
@@ -43,14 +49,13 @@ class Predictor(nn.Module):
         B, C, _ = z_enc.shape
 
         # -- Project to predictor dim (B, C, D_pred) --
-        h = self.input_proj(z_enc)  # (B, C, D_pred)
+        h = self.input_proj(z_enc)
 
         # -- Build context position indices: range(C+1) minus mask_pos per sample
         #    Original sequence had C+1 encounters; context skips the masked one --
         all_pos       = torch.arange(C + 1, device=z_enc.device).unsqueeze(0).expand(B, -1) # (B, C+1)
         keep          = all_pos != mask_pos.unsqueeze(1)
         ctx_positions = all_pos[keep].view(B, C)
-
         ctx_pos_emb = self.pos_embedding(ctx_positions.clamp(max=self.max_seq_len - 1)) # (B, C, D_pred)
         h = h + ctx_pos_emb
 
@@ -58,20 +63,19 @@ class Predictor(nn.Module):
         mask_pos_emb = self.pos_embedding(mask_pos.clamp(max=self.max_seq_len - 1)) # (B, D_pred)
         mask_tokens  = self.mask_token.expand(B, 1, -1) + mask_pos_emb.unsqueeze(1) # (B, 1, D_pred)
 
-        # -- Concatenate context encounters + mask token -> (B, C+1, D_pred) --
+        # -- Concat context encounters + mask token -> (B, C+1, D_pred)
         h = torch.cat([h, mask_tokens], dim=1)
 
         # -- Extend key_padding_mask (mask token is never padding)
         mask_tok_pad = torch.zeros(B, 1, dtype=torch.bool, device=z_enc.device)
         key_pad      = torch.cat([ctx_pad_mask, mask_tok_pad], dim=1)  # (B, C+1)
 
-        # -- Run layers and norm
         for layer in self.layers:
             h = layer(h, key_pad)
         h = self.norm(h)
 
-        # -- Extract mask token output (B, 1, D_pred) --
+        # -- Extract mask token output (B, 1, D_pred)
         z_pred_hidden = h[:, C, :]
 
-        # -- Project back to encoder dim --
+        # -- Project back to encoder dim
         return self.output_proj(z_pred_hidden)

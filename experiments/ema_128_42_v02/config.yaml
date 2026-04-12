@@ -1,0 +1,34 @@
+model:
+    embed_dim: 128
+    num_heads: 8
+    num_layers: 4
+    ffn_dim: 512
+    max_seq_len: 128
+    predictor_embed_dim: 96
+    predictor_depth: 3
+    architecture: ema
+optimization:
+    epochs: 100
+    warmup_epochs: 10
+    patience: 15
+    base_lr: 6e-4 # v01: same
+    min_lr: 1e-5
+    schedule: "warmup_cosine"
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    grad_clip: 2.0 # v01: 2.0
+    ema: [0.996, 0.9995] # v01: same
+data:
+    batch_size: 128 # v01: same
+    accumulation_steps: 2
+    n_patients: 0
+    max_encounters: null
+    pin_mem: true
+    num_workers: 0
+meta:
+    seed: 42
+    use_bfloat16: True
+    tag: "jepa_ema_42_v01"
+    description: "v01 settings + larger predictor, predictor nonlinearity head, no emb saving. seed 42"
+    resume_from: null
+    save_ckpt_every: 5

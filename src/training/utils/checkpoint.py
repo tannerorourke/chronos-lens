@@ -18,6 +18,23 @@ from src.models.supervised_transformer import SupervisedTransformer
 from src.utils.seed import _restore_rng
 
 
+def update_best(current, best, delta, since_best):
+    """ helper to calc lowest so far for metric"""
+    if current < best - delta:
+        return current, 0, True   # new_best, reset counter, improved
+    return best, since_best + 1, False
+
+
+def update_best_max(current, best, delta, since_best):
+    """ helper to calc highest so far for metric"""
+    if current > best + delta:
+        return current, 0, True
+    return best, since_best + 1, False
+
+def snapshot(model):
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
 def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | JEPAStopGrad | SupervisedTransformer:
     arch = model_params.get("architecture", "")
 

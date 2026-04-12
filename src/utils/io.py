@@ -19,7 +19,7 @@ EXPERIMENTS_DIR = ROOT / "experiments"
 
 
 # ============================================================================
-# JSON / Serialization
+# JSON / Serialization / npz helpers
 # ============================================================================
 
 def _serialize(obj):
@@ -43,7 +43,6 @@ def _serialize(obj):
         return str(obj)
     return obj
 
-
 def save_json(data, path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,18 +50,13 @@ def save_json(data, path):
         json.dump(_serialize(data), f, indent=2, default=str)
     print(f"    Saved: {path.name}")
     
-    
 def load_json(p: Path):
     if not p.exists():
         print(f"    WARNING: {p.name} not found")
         return None
     with open(p) as f:
         return json.load(f)
-
-# ============================================================================
-# npz/npy
-# ============================================================================
-
+    
 def save_npz(path, **arrays):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,74 +68,6 @@ def load_npz_dict(path: Path) -> dict:
     npz = np.load(path, allow_pickle=True)
     npz = dict(npz)
     return { k: npz[k] for k in npz }
-
-
-def save_embedding_vecs(
-    model_records: dict[str, list[np.ndarray]],
-    epoch: int | None = None,
-    save_dir: Path | None = None,
-) -> dict[str, np.ndarray]:
-    records: dict[str, np.ndarray] = {}
-    for k, v in model_records.items():
-        # print(k, [a.shape for a in v[:3]])
-        if k == "subject_ids":
-            records[k] = np.array(v, dtype=str)
-        elif k in ("z_encs", "ctx_pad_mask"):
-            max_c = max(arr.shape[1] for arr in v)
-            padded = []
-            for arr in v:
-                pad_width = [(0,0)] * arr.ndim
-                pad_width[1] = (0, max_c - arr.shape[1])
-                padded.append(np.pad(arr, pad_width))
-            records[k] = np.concatenate(padded, axis=0)
-        else:
-            records[k] = np.concatenate(v, axis=0)
-    
-    if save_dir is not None:
-        ep_str = f"_{epoch}" if epoch is not None else ""
-        file = (save_dir / f"embeddings{ep_str}").with_suffix(".npz")
-        save_dict = {
-            "z_encs":      records["z_encs"],
-            "z_pred":      records["z_pred"],
-            "z_target":    records["z_target"],
-            "subject_ids": records["subject_ids"],
-            "mask_pos":    records["mask_pos"],
-        }
-        if "ctx_pad_mask" in records:
-            save_dict["ctx_pad_mask"] = records["ctx_pad_mask"]
-        np.savez(file, **save_dict)  # type: ignore[arg-type]
-        print(f"    Saved embeddings -> {file.name} (epoch {epoch})")
-
-    return records
-
-
-def load_embeddings(model_dir, embeddings_arg=None) -> Tuple[dict, Path]:
-    """Find embeddings npz in model directory. If not found, choose the last one"""
-    def _embedding_epoch(path):
-        stem = path.stem  # "embeddings_40"
-        parts = stem.rsplit("_", 1)
-        if len(parts) == 2 and parts[1].isdigit():
-            return int(parts[1])
-        return -1
-    
-    if embeddings_arg:
-        name = embeddings_arg if embeddings_arg.endswith(".npz") else f"{embeddings_arg}.npz"
-        path = model_dir / name
-        if not path.exists(): # try recursive search
-            matches = list(model_dir.glob(f"**/{name}"))
-            if matches:
-                return dict(np.load(matches[0], allow_pickle=True)), matches[0]
-            raise FileNotFoundError(f"Embeddings file not found: {path}")
-        return dict(np.load(path, allow_pickle=True)), path
-
-    candidates = list(model_dir.glob("**/embeddings*.npz"))
-    if not candidates:
-        candidates = list(model_dir.glob("**/embedding*.npz"))
-    if not candidates:
-        raise FileNotFoundError(f"No embeddings .npz found in {model_dir}. Run scripts/evaluate.py to extract.")
-    # Sort by epoch number (highest last), fall back to name for ties
-    candidates.sort(key=lambda p: (_embedding_epoch(p), p.name))
-    return dict(np.load(candidates[-1], allow_pickle=True)), candidates[-1]
 
 # =============================================================================
 # Sequences
@@ -215,14 +141,15 @@ def save_metadata(
 # config IO
 # =============================================================================
 
-def get_model_config(args: Namespace) -> tuple[Path, dict]:
-    exp = args.exp
+def get_model_config(exp: str | Path, command: str = "model", target: str = None, exists_ok: bool = False) -> tuple[Path, dict]:
+    exp = Path(exp)
     exp_dir = EXPERIMENTS_DIR / exp
     if not exp_dir.exists():
-        raise FileNotFoundError(f"Model directory not found: experiments/{exp}")
+        if not (EXPERIMENTS_DIR / exp.parts[-1]).exists():
+            raise FileNotFoundError(f"Model directory not found: experiments/{str(exp)}")
+        exp_dir = EXPERIMENTS_DIR / exp.parts[-1]
     
     params: dict = {}
-    command = args.command
     assert command in ["model", "sae"], f"Invalid command: {command}"
     
     with open(exp_dir / "config.yaml", 'r') as y_file:
@@ -238,9 +165,9 @@ def get_model_config(args: Namespace) -> tuple[Path, dict]:
             "sae_config missing required keys: 'n_features', 'top_k', 'epochs', 'lr', 'batch_size'"
         params = params["sae_config"]
         
-        assert args.target in SAE_TARGETS, \
+        assert target in SAE_TARGETS, \
             f"config['sae_config'] child must be one of {SAE_TARGETS}"
-        params = params[args.target]
+        params = params[target]
         
         return exp_dir, params
     
@@ -251,6 +178,77 @@ def get_model_config(args: Namespace) -> tuple[Path, dict]:
         f"parameter 'seed' missing in config.yaml['meta']"
     
     if any((exp_dir / sub).exists() and any((exp_dir / sub).iterdir()) for sub in ["checkpoints", "logs"]):
-        raise FileExistsError(f"   'experiments/{exp}' already exists with artifacts. Run with config['meta']['resume_from'] to resume training.")
+        if not exists_ok:
+            raise FileExistsError(f"   'experiments/{exp}' already exists with artifacts. Run with config['meta']['resume_from'] to resume training.")
     
     return exp_dir, params
+
+# ============================================================================
+# Embedding IO
+# ============================================================================
+
+def save_embedding_vecs(
+    model_records: dict[str, list[np.ndarray]],
+    epoch: int | None = None,
+    save_dir: Path | None = None,
+) -> dict[str, np.ndarray]:
+    records: dict[str, np.ndarray] = {}
+    for k, v in model_records.items():
+        # print(k, [a.shape for a in v[:3]])
+        if k == "subject_ids":
+            records[k] = np.array(v, dtype=str)
+        elif k in ("z_encs", "ctx_pad_mask"):
+            max_c = max(arr.shape[1] for arr in v)
+            padded = []
+            for arr in v:
+                pad_width = [(0,0)] * arr.ndim
+                pad_width[1] = (0, max_c - arr.shape[1])
+                padded.append(np.pad(arr, pad_width))
+            records[k] = np.concatenate(padded, axis=0)
+        else:
+            records[k] = np.concatenate(v, axis=0)
+    
+    if save_dir is not None:
+        ep_str = f"_{epoch}" if epoch is not None else ""
+        file = (save_dir / f"embeddings{ep_str}").with_suffix(".npz")
+        save_dict = {
+            "z_encs":      records["z_encs"],
+            "z_pred":      records["z_pred"],
+            "z_target":    records["z_target"],
+            "subject_ids": records["subject_ids"],
+            "mask_pos":    records["mask_pos"],
+        }
+        if "ctx_pad_mask" in records:
+            save_dict["ctx_pad_mask"] = records["ctx_pad_mask"]
+        np.savez(file, **save_dict)  # type: ignore[arg-type]
+        print(f"    Saved embeddings -> {file.name} (epoch {epoch})")
+
+    return records
+
+def load_embeddings(model_dir, embeddings_arg=None) -> Tuple[dict, Path]:
+    """Find embeddings npz in model directory. If not found, choose the last one"""
+    def _embedding_epoch(path):
+        stem = path.stem  # "embeddings_40"
+        parts = stem.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            return int(parts[1])
+        return -1
+    
+    if embeddings_arg:
+        name = embeddings_arg if embeddings_arg.endswith(".npz") else f"{embeddings_arg}.npz"
+        path = model_dir / name
+        if not path.exists(): # try recursive search
+            matches = list(model_dir.glob(f"**/{name}"))
+            if matches:
+                return dict(np.load(matches[0], allow_pickle=True)), matches[0]
+            raise FileNotFoundError(f"Embeddings file not found: {path}")
+        return dict(np.load(path, allow_pickle=True)), path
+
+    candidates = list(model_dir.glob("**/embeddings*.npz"))
+    if not candidates:
+        candidates = list(model_dir.glob("**/embedding*.npz"))
+    if not candidates:
+        raise FileNotFoundError(f"No embeddings .npz found in {model_dir}. Run scripts/evaluate.py to extract.")
+    # Sort by epoch number (highest last), fall back to name for ties
+    candidates.sort(key=lambda p: (_embedding_epoch(p), p.name))
+    return dict(np.load(candidates[-1], allow_pickle=True)), candidates[-1]

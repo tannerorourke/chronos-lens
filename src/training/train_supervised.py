@@ -14,6 +14,7 @@ environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import gc
 from pathlib import Path
 from typing import Dict
+from contextlib import nullcontext
 
 import numpy as np
 import torch
@@ -83,13 +84,20 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     seed            = meta_p["seed"]
     use_bfloat16    = meta_p["use_bfloat16"]
     save_ckpt_every = meta_p["save_ckpt_every"] or epochs
-    save_emb_every  = meta_p["save_emb_every"] or epochs
+    m_tag           = meta_p.get("tag", None)
+    m_desc          = meta_p.get("description", None)
     ckpt_dir = run_dir / "checkpoints"
     emb_dir = run_dir / "embeddings"
+    
+    print(f"Starting {m_tag if m_tag else 'up'}..")
+    if m_desc:
+        print(f"  -- {params['meta'].get('description', '')}")
 
     # --- build sequences, vocab, dataset, loader
     patients = load_sequences(n=n_patients)
+    print(f"Patients: {len(patients)}")
     vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=False)
+    print(f"Vocab: {len(vocab)} tokens")
 
     dataset = SupervisedDataset(patients, vocab, data_params, pad_idx=0, max_encounters=max_encounters)
     del patients; gc.collect()
@@ -99,8 +107,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         shuffle=True, collate_fn=supervised_collate_fn, drop_last=False,
         num_workers=num_workers, persistent_workers=num_workers > 0,
         pin_memory=pin_memory)
-
-    
 
     # --- model
     model_params = params["model"]
@@ -129,26 +135,34 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
           f"Total: {(sum(p.numel() for p in model.parameters()) / 1e6):.2f}M",
           f"Trainable: {(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6):.2f}M")
 
+    # ------------------------------------------------------------------
+    # --- TRAINING LOOP ------------------------------------------------
+    # ------------------------------------------------------------------
+    
+    criterion = nn.BCEWithLogitsLoss()
+    
+    cond_autocast_ctx = (
+        torch.autocast("cuda", dtype=torch.bfloat16)
+        if use_bfloat16 and device.type == "cuda"
+        else nullcontext())
+    
     logger = TrainingLogger(
         run_dir,
         epoch=start_epoch - 1,
         global_step=global_step,
         loss_history=loss_history,
-        embed_every=save_emb_every,
         total_epochs=epochs,
     )
-    criterion = nn.BCEWithLogitsLoss()
+    
 
-    # ------------------------------------------------------------------
-    # --- TRAINING LOOP ------------------------------------------------
-    # ------------------------------------------------------------------
+    
     print(f"Training for {len(loader)} batches (size: {batch_size}) for {epochs} epochs")
     print(f"Description: {params['meta']['tag']}: {params['meta']['description']}")
 
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         
-        save_this_epoch = (epoch % save_emb_every == 0 or epoch == epochs)
+        save_this_epoch = (epoch % save_ckpt_every == 0 or epoch == epochs)
         z_c, sids = [], []
 
         for batch in tqdm(loader, leave=False, total=len(loader), unit="batch", desc=f"[epoch {epoch}/{epochs}]"):
@@ -157,8 +171,9 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 for k, v in batch.items()
             }
 
-            z_enc_pooled, logits = model(batch_dev)
-            loss = criterion(logits, batch_dev["labels"].float())
+            with cond_autocast_ctx:
+                z_enc_pooled, logits = model(batch_dev)
+                loss = criterion(logits, batch_dev["labels"].float())
             loss.backward()
             
             pre_clip = nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -179,13 +194,11 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         # --- EVAL -----------------------------------------------------
         model.eval()
 
-        if (epoch % save_ckpt_every == 0 or epoch == epochs):
+        if save_this_epoch:
             save_checkpoint(model.state_dict(), model_params,
                             optimizer, scheduler,
                             epoch, logger.global_step, logger.loss_history,
                             ckpt_dir, seed=seed)
-        if save_this_epoch:
-            save_supervised_embeddings(z_c, sids, epoch, emb_dir)
         
         logger.log_epoch(lr=optimizer.param_groups[0]["lr"])
 

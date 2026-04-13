@@ -15,7 +15,7 @@ import torch
 from src.models.jepa_stopgrad import JEPAStopGrad
 from src.models.jepa_ema import JEPA_EMA
 from src.models.supervised_transformer import SupervisedTransformer
-from src.utils.seed import _restore_rng
+from src.utils.seed import SEED, _restore_rng
 
 
 def count_improvement(current, best, since_best, delta=0.0, gt=False):
@@ -45,8 +45,7 @@ def save_checkpoint(
     epoch: int,
     global_step: int,
     loss_history: list,
-    save_dir: Path,
-    seed: int | None = None,
+    save_dir: Path
 ) -> None:
     save_dir.mkdir(parents=True, exist_ok=True)
     file = save_dir / f"checkpoint_{epoch}.pt"
@@ -54,7 +53,7 @@ def save_checkpoint(
     torch.save({
         "model":        state_dict,
         "model_params": model_params,
-        "seed":         seed,
+        "seed":         SEED,
         "optimizer":    None if optimizer is None else optimizer.state_dict(),
         "scheduler":    None if scheduler is None else scheduler.state_dict(),
         "epoch":        epoch,

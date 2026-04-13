@@ -31,7 +31,7 @@ vicreg:
     on_tgt: False
     on_pred: False
 data:
-    batch_size: 64 # v01: same
+    batch_size: 64
     accumulation_steps: 3
     n_patients: 0
     max_encounters: 20

@@ -1,9 +1,12 @@
 from pathlib import Path
 import json
+import random
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
+
+from src.utils.seed import SEED
     
 # =============================================================================
 # Utilities
@@ -48,11 +51,9 @@ def encode_encounter(
         return [PAD_IDX]
     return enc_toks
 
-
 # =============================================================================
-# Primary JEPA Dataset
+# Dataset
 # =============================================================================
-
 
 class MimicDataset(Dataset):
     """One sample per (patient, masked-encounter-index).
@@ -73,7 +74,7 @@ class MimicDataset(Dataset):
         vocab: dict[str, int], 
         data_params: dict, 
         pad_idx: int = 0,
-        max_enc: int | None = 100, 
+        max_enc: int | None = 20, 
         is_supervised: bool = False,
         label_key: str | None = None,
         use_np_int32: bool = True
@@ -81,11 +82,9 @@ class MimicDataset(Dataset):
         self.is_supervised = is_supervised
         self.label_key = (data_params.get("label_key", label_key)
                           if self.is_supervised else None)
-        
-        max_enc = data_params.get("max_encounters", max_enc)
-        
         self.samples: list[dict] = []
         self.pad_idx = pad_idx
+        max_enc = data_params.get("max_encounters", max_enc)
         for p in patients:
             encs = p.get("encounters", [])
             if len(encs) < 3:
@@ -109,6 +108,7 @@ class MimicDataset(Dataset):
                     assert label_key in p, f"[MimicDataset] label key missing for patient: {label_key}"
                     s["label"] = p[label_key]
                 self.samples.append(s)
+        self.sample_lengths = [len(s["context"]) for s in self.samples]
 
     def __len__(self):
         return len(self.samples)
@@ -172,3 +172,65 @@ class MimicDataset(Dataset):
             batch_out["tgt_labels"] = labels
 
         return batch_out
+
+# =============================================================================
+# Sampler
+# =============================================================================
+
+class NoisyBucketedSampler(Sampler[list[int]]):
+    """Batch sampler that groups samples of similar context length together.
+
+    Sorts indices by length with a bit of noise, then chunks into batches.
+    Each batch has samples of roughly equal length → minimal padding waste.
+    Batches are shuffled across epochs so order is still stochastic.
+    """
+    def __init__(
+        self,
+        lengths: list[int],
+        batch_size: int,
+        shuffle: bool = True,
+        noise: int = 2,   # jitter on sort key; 0 = strict sort
+        drop_last: bool = False,
+    ):
+        self.lengths    = lengths
+        self.batch_size = batch_size
+        self.shuffle    = shuffle
+        self.noise      = noise
+        self.drop_last  = drop_last
+        self.epoch      = 0
+
+    def __len__(self):
+        n = len(self.lengths)
+        if self.drop_last:
+            return n // self.batch_size
+        return (n + self.batch_size - 1) // self.batch_size
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def __iter__(self):
+        rng = random.Random(SEED + self.epoch)
+        indices = list(range(len(self.lengths)))
+
+        # Noisy sort: sort by (length + random perturbation)
+        if self.shuffle and self.noise > 0:
+            keyed = [(self.lengths[i] + rng.uniform(-self.noise, self.noise), i)
+                     for i in indices]
+        else:
+            keyed = [(self.lengths[i], i) for i in indices]
+        keyed.sort(key=lambda x: x[0])
+        sorted_indices = [i for _, i in keyed]
+
+        # Chunk into batches
+        batches = [
+            sorted_indices[i : i + self.batch_size]
+            for i in range(0, len(sorted_indices), self.batch_size)
+        ]
+        if self.drop_last and len(batches[-1]) < self.batch_size:
+            batches = batches[:-1]
+
+        # Shuffle batch order so training doesn't see shortest-to-longest monotonically
+        if self.shuffle:
+            rng.shuffle(batches)
+
+        yield from batches

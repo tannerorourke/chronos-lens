@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 from src.models.jepa_ema import JEPA_EMA
 from src.training.utils.vicreg import VicRegLoss
 
-from src.training.utils.datasets import MimicDataset, build_vocab
+from src.training.utils.datasets import MimicDataset, NoisyBucketedSampler, build_vocab
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import TrainingLogger, DriftMonitor
 from src.training.utils.checkpoint import (
@@ -55,7 +55,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
     # --- meta
     meta_p          = params["meta"]
-    seed            = meta_p["seed"]
     use_bfloat16    = meta_p["use_bfloat16"]
     save_cycle      = meta_p.get("save_cycle", epochs)
     m_tag           = meta_p.get("tag", None)
@@ -72,12 +71,24 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=False)
     print(f"Vocab: {len(vocab)} tokens")
 
-    ds = MimicDataset(patients, vocab, data_params, pad_idx=0, max_enc=max_encounters)
-    del patients; gc.collect()
-    
-    loader = DataLoader(ds, batch_size, collate_fn=ds.mimic_collate,
-        shuffle=True, drop_last=False, pin_memory=pin_memory,
-        num_workers=num_workers, persistent_workers=num_workers > 0)
+    ds = MimicDataset(
+        patients, 
+        vocab, 
+        data_params,  
+        max_enc=max_encounters)
+    sampler = NoisyBucketedSampler(
+        lengths=ds.sample_lengths,
+        batch_size=data_params["batch_size"],
+        shuffle=True, 
+        drop_last=False,
+        noise=2)
+    loader = DataLoader(ds, 
+        collate_fn=ds.mimic_collate,
+        batch_sampler=sampler, 
+        pin_memory=pin_memory,
+        num_workers=num_workers, 
+        persistent_workers=num_workers > 0)
+    del patients, ds, sampler; gc.collect()
 
     # --- model
     model_params = params["model"]
@@ -218,10 +229,12 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             # -- check for recent best, save, reset best
             if (epoch % save_cycle == 0 or epoch == epochs):
                 if b_state is not None:
-                    save_checkpoint(b_state, model_params,
-                                    optimizer, scheduler,
-                                    b_epoch, logger.global_step, logger.loss_history,
-                                    ckpt_dir, seed=seed)
+                    save_checkpoint(
+                        b_state, model_params,
+                        optimizer, scheduler,
+                        b_epoch, logger.global_step, 
+                        logger.loss_history,
+                        ckpt_dir)
                     b_state, b_epoch = None, 0
                 else:
                     print(f"  Checked for recent best - none to save.")

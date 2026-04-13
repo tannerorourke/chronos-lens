@@ -41,7 +41,7 @@ def main(
     if output_dir.exists(): i = 2
     while output_dir.exists():
         output_dir = exp_dir / f"sae_{target}_v{i}"; i += 1
-    print(f"  Output directory: {output_dir.parts[-3]}")
+    print(f"  Output directory: {'/'.join(output_dir.parts[-3:])}")
 
     # --- Load target vector
     if target == "z_enc":

@@ -1,11 +1,15 @@
 model:
     embed_dim: 128
-    num_heads: 8
-    num_layers: 4
-    ffn_dim: 512
-    max_seq_len: 128
+    encoder_heads: 8
+    encoder_depth: 4
+    encoder_ffn_dim: 512
+    token_enc_heads: 2
+    token_enc_depth: 2
+    token_enc_ffn_dim: 256
     predictor_embed_dim: 96
+    predictor_heads: 4
     predictor_depth: 3
+    # predictor_ffn_dim: 4x embed_dim (default)
     architecture: ema
 optimization:
     epochs: 100

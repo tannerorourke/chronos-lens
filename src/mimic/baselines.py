@@ -402,7 +402,7 @@ if __name__ == "__main__":
     # -- Load metadata - if not available, compute from sequences --
     try:
         from src.utils.io import load_metadata
-        print(f"  Loaded metadata from {data_dir.parts[-3]}")
+        print(f"  Loaded metadata from ../{'/'.join(data_dir.parts[-3])}")
         metadata, feature_names, patient_ids = load_metadata(data_dir)
         print(f"    - {metadata.shape[0]} patients x {metadata.shape[1]} features")
     except FileNotFoundError:
@@ -412,7 +412,7 @@ if __name__ == "__main__":
         patient_ids = np.array([s["subject_id"] for s in sequences], dtype=str)
 
     # -- load vocab --
-    print(f"  Loaded metadata from {data_dir.parts[-3]}")
+    print(f"  Loaded metadata from {'/'.join(data_dir.parts[-3])}")
     vocab = load_json(data_dir / "vocab.json")
 
     # -- Extract labels --

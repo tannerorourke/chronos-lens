@@ -9,7 +9,7 @@ from matplotlib.patches import FancyBboxPatch
 import matplotlib.colors as mcolors
 
 from src.utils.constants import ESCALATION_CRITERIA
-from src.utils.io import EXPERIMENTS_DIR
+from src.utils.io import DATA_DIR, EXPERIMENTS_DIR
 
 
 C_POS = "#F97316"  # escalation positive
@@ -63,6 +63,27 @@ def show_or_savefig(
             plt.close(fig)
     else:
         plt.show()
+        
+        
+def plot_pat_enc_histogram(
+    sequences: list[dict],
+    min_enc: int = 0,
+    max_enc: int = 20,
+    show: bool = False, save: bool = True,
+    fig_dir: Path = DATA_DIR,
+    fig_name: str = "pat_enc_histogram",
+    title: str = "Patient-Encounter Sequence Length",
+):
+    fig, ax = plt.subplots(figsize=(8, 4), dpi=300)
+    d = [len(s) for s in sequences if (min_enc < len(s) and len(s) < max_enc)]
+    
+    ax.hist(d, bins=20)
+    ax.set_xticklabels(ax.get_xticks(), rotation=45, ha="right", fontsize=_TICK_PT)
+    ax.set_ylabel("Count")
+    ax.set_title(title, fontsize=_TITLE_PT)
+    
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=fig_dir / fig_name if save else None)
         
         
 def plot_loss_curve(

@@ -23,10 +23,10 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.models.supervised_transformer import SupervisedTransformer
-from src.training.utils.datasets import SupervisedDataset, supervised_collate_fn, build_vocab
+from src.training.utils.datasets import MimicDataset, build_vocab
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import TrainingLogger
-from src.training.utils.checkpoint import build_model, save_checkpoint, load_model_checkpoint
+from src.training.utils.checkpoint import build_model, save_checkpoint, sync_model_checkpoint
 from src.utils.io import load_sequences, EXPERIMENTS_DIR
 
 # =============================================================================
@@ -65,7 +65,6 @@ def save_supervised_embeddings(
 # =============================================================================
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:
-
     # --- optimization
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
@@ -87,7 +86,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     m_tag           = meta_p.get("tag", None)
     m_desc          = meta_p.get("description", None)
     ckpt_dir = run_dir / "checkpoints"
-    emb_dir = run_dir / "embeddings"
     
     print(f"Starting {m_tag if m_tag else 'up'}..")
     if m_desc:
@@ -99,14 +97,16 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=False)
     print(f"Vocab: {len(vocab)} tokens")
 
-    dataset = SupervisedDataset(patients, vocab, data_params, pad_idx=0, max_encounters=max_encounters)
+    ds = MimicDataset(patients, vocab, data_params, pad_idx=0, max_enc=max_encounters,
+                           is_supervised=True, label_key=label_key)
     del patients; gc.collect()
     
     loader = DataLoader(
-        dataset, batch_size,
-        shuffle=True, collate_fn=supervised_collate_fn, drop_last=False,
-        num_workers=num_workers, persistent_workers=num_workers > 0,
-        pin_memory=pin_memory)
+        ds, batch_size, shuffle=True, 
+        collate_fn=ds.mimic_collate, drop_last=False,
+        num_workers=num_workers, pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+    )
 
     # --- model
     model_params = params["model"]
@@ -125,7 +125,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     if params.get("resume_from"):
         ckpt_path = EXPERIMENTS_DIR / params["resume_from"]
         model, model_params, optimizer, scheduler, start_epoch, global_step, loss_history = \
-            load_model_checkpoint(
+            sync_model_checkpoint(
                 model,
                 optimizer, scheduler,
                 ckpt_path, device, restore_rng=True
@@ -153,8 +153,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         loss_history=loss_history,
         total_epochs=epochs,
     )
-    
-
     
     print(f"Training for {len(loader)} batches (size: {batch_size}) for {epochs} epochs")
     print(f"Description: {params['meta']['tag']}: {params['meta']['description']}")
@@ -188,7 +186,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 z_c.append(z_enc_pooled.detach().cpu().numpy())
                 sids.extend(batch["subject_ids"])
             
-            logger.update_embed_health_single(z_enc_pooled)
+            logger.update_embed_health_supv(z_enc_pooled, batch_dev["ctx_pad_mask"])
             logger.log_batch(loss.item(), len(batch["subject_ids"]))
 
         # --- EVAL -----------------------------------------------------

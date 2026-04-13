@@ -23,12 +23,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from src.models.jepa_ema import JEPA_EMA
-from src.training.utils.datasets import MimicDataset, collate_fn, build_vocab
+from src.training.utils.datasets import MimicDataset, build_vocab
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import TrainingLogger, DriftMonitor
 from src.training.utils.checkpoint import (
     build_model, 
-    save_checkpoint, load_model_checkpoint,
+    save_checkpoint, sync_model_checkpoint,
     update_best, update_best_max
 )
 from src.utils.io import load_sequences, EXPERIMENTS_DIR
@@ -72,12 +72,12 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=False)
     print(f"Vocab: {len(vocab)} tokens")
 
-    dataset = MimicDataset(patients, vocab, data_params, pad_idx=0, max_encounters=max_encounters)
+    ds = MimicDataset(patients, vocab, data_params, pad_idx=0, max_enc=max_encounters)
     del patients; gc.collect()
     
     loader = DataLoader(
-        dataset, batch_size,
-        shuffle=True, collate_fn=collate_fn, drop_last=False,
+        ds, batch_size,
+        shuffle=True, collate_fn=ds.mimic_collate, drop_last=False,
         num_workers=num_workers, persistent_workers=num_workers > 0,
         pin_memory=pin_memory)
 
@@ -98,7 +98,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     if params.get("resume_from"):
         ckpt_path = EXPERIMENTS_DIR / params["resume_from"]
         model, model_params, optimizer, scheduler, start_epoch, start_step, loss_history = \
-            load_model_checkpoint(
+            sync_model_checkpoint(
                 model, 
                 optimizer, scheduler, 
                 ckpt_path, device, restore_rng=True)

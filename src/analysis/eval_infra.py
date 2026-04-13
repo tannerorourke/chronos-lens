@@ -1,12 +1,70 @@
 import json
 from pathlib import Path
 
-import torch
 import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+from src.models.jepa_ema import JEPA_EMA
+from src.models.supervised_transformer import SupervisedTransformer
+
 
 # =============================================================================
 # Live Inference
 # =============================================================================
+
+def load_scaffolding(
+    ckpt_name: str, 
+    exp_name: str,
+    device: torch.device, 
+) -> tuple[JEPA_EMA | SupervisedTransformer, DataLoader, Path, tuple[dict, dict], tuple]:
+    from src.training.utils.datasets import MimicDataset
+    from src.training.utils.checkpoint import load_model_checkpoint
+    from src.utils.io import get_model_config, load_json, load_sequences
+    from src.utils.seed import set_global_seed
+    from src.utils.tensors import set_cuda_precision
+    
+    exp_dir, config = get_model_config(exp_name, exists_ok=True)
+    ckpt_path = exp_dir / "checkpoints" / ckpt_name
+    
+    # --- data
+    data_params     = config["data"]
+    batch_size      = data_params["batch_size"]
+    n_patients      = data_params["n_patients"]
+    max_encounters  = data_params.get("max_encounters", None)
+    pin_memory      = data_params.get("pin_mem", True) and device.type == "cuda"
+    num_workers     = data_params.get("num_workers", 0)
+    
+    # --- meta
+    meta_p          = config["meta"]
+    seed            = meta_p["seed"]
+    use_bfloat16    = meta_p["use_bfloat16"]
+    is_supervised   = config["model"]["architecture"] == "supervised_transformer"
+    label_key       = (meta_p.get("label_key", "label_escalation_per_enc") 
+                       if is_supervised else None)
+    
+    set_global_seed(seed)
+    if device.type == "cuda": set_cuda_precision(use_bfloat16)
+    
+    # --- load stuff
+    model, ckpt = load_model_checkpoint(ckpt_path, device, restore_rng=True)
+    model.eval()
+    
+    patients = load_sequences(n=n_patients)
+    vocab = load_json(exp_dir / "vocab.json")
+    assert vocab is not None, f"vocab.json not found in {exp_name}"
+    
+    ds = MimicDataset(patients, vocab, data_params, pad_idx=0,
+                      max_enc=max_encounters, is_supervised=is_supervised,
+                      label_key=label_key)
+    loader = DataLoader(
+        ds, batch_size,
+        shuffle=True, collate_fn=ds.mimic_collate, drop_last=False,
+        num_workers=num_workers, persistent_workers=num_workers > 0,
+        pin_memory=pin_memory)
+    
+    return model, loader, exp_dir, (ckpt, config), (ds, is_supervised, label_key, vocab)
+    
 
 def extract_jepa_embeddings(model, loader, device) -> dict:
     """Run JEPA model inference and collect embeddings.
@@ -117,23 +175,51 @@ def broadcast_to_samples(patient_data, patient_ids, subject_ids) -> np.ndarray:
 # Label loading
 # =============================================================================
 
+def load_label_30d_at_k(
+    patients_dict: dict[str, dict],
+    subject_ids: np.ndarray,
+    mask_pos: np.ndarray,
+) -> np.ndarray:
+    """Load per-sample causal 30d readmission label at each sample's mask position.
+
+    Reads patient["label_30d_per_enc"][k] for each (subject_id, mask_pos=k) pair.
+    """
+    labels = np.zeros(len(subject_ids), dtype=np.int64)
+    for i, (sid, pos) in enumerate(zip(subject_ids, mask_pos)):
+        patient = patients_dict[str(sid)]
+        per_enc = patient.get("label_30d_per_enc", [])
+        pos = int(pos)
+        if pos < len(per_enc):
+            labels[i] = per_enc[pos]
+    return labels
+
+
 def load_label(
     patients_dict: dict[str, dict],
     subject_ids: np.ndarray,
-    label_key: str
+    label_key: str,
+    mask_pos: np.ndarray | None = None,
 ) -> np.ndarray:
-    """ Load per-sample binary label from patients_dict.
-        - patients_dict -> "label_30d" - 30-day F-code readmission labels.
-        - patients_dict -> "label_escalation" - escalation labels at each sample's mask position.
+    """Load per-sample binary label from patients_dict.
+
+    For per-encounter labels (label_30d, label_escalation), mask_pos is required
+    to select the correct encounter position.
     """
     if label_key == "label_30d":
-        return np.array([ patients_dict[str(sid)].get("label_30d", 0)
-                          for sid in subject_ids
-                        ], dtype=np.int64)
+        if mask_pos is not None:
+            return load_label_30d_at_k(patients_dict, subject_ids, mask_pos)
+        # Fallback for patient-level callers (e.g. supervised): use last encounter
+        return np.array([
+            patients_dict[str(sid)].get("label_30d_per_enc", [0])[-1]
+            for sid in subject_ids
+        ], dtype=np.int64)
     elif label_key == "label_escalation":
-        return np.array([ patients_dict.get(str(pid), {}).get("label_30d", 0)
-                          for pid in subject_ids
-                        ], dtype=np.int64)
+        if mask_pos is not None:
+            return load_escalation_labels(patients_dict, subject_ids, mask_pos)
+        return np.array([
+            patients_dict[str(sid)].get("label_escalation", 0)
+            for sid in subject_ids
+        ], dtype=np.int64)
     else:
         raise ValueError(f"[load_label] Unknown label key: {label_key}")
     
@@ -167,7 +253,7 @@ def compute_escalation_criterions(
     Returns dict mapping criterion_name -> (N,) binary int64 array.
     """
     from src.utils.constants import ESCALATION_CRITERIA
-    from src.mimic.labels import _check_escalation, _update_state
+    from src.mimic.labels import _check_enc_escalation, _update_state
     from src.mimic.helper import get_encounter_f_codes
     
     
@@ -183,6 +269,10 @@ def compute_escalation_criterions(
             continue
 
         # Build prior state from encounters 0 .. pos-1
+        # Causal assertion: only encounters [0:pos+1] are accessed
+        assert pos < len(encs), (
+            f"mask_pos {pos} >= n_encounters {len(encs)} for patient {sid}")
+
         prior_subcats: dict[str, int] = {}
         prior_f_codes: set[str] = set()
         prior_drug_classes: set[str] = set()
@@ -195,10 +285,10 @@ def compute_escalation_criterions(
                 f_codes, meds, prior_subcats, prior_f_codes, prior_drug_classes)
             has_prior_psych_meds = has_prior_psych_meds or had_meds
 
-        # Check escalation at mask_pos
+        # Check escalation at mask_pos (encounter at pos only — no future data)
         f_codes = get_encounter_f_codes(encs[pos], full=True)
         meds = [m.lower() for m in encs[pos].get("meds", [])]
-        fired = _check_escalation(
+        fired = _check_enc_escalation(
             f_codes, meds,
             prior_subcats, prior_f_codes, prior_drug_classes,
             has_prior_psych_meds,

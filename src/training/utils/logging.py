@@ -2,6 +2,7 @@ import time
 import csv
 from pathlib import Path
 import statistics as stats
+from typing import Literal
 
 import torch
 import numpy as np
@@ -105,7 +106,9 @@ class TrainingLogger:
         log_csv: bool = True,
         log_tb: bool = True,
         verbose: bool = False,
+        arch: Literal["jepa", "sup_tf"] = "jepa",
     ):
+        self.arch = arch
         self._closed = False
         self._verbose = verbose
         self._total_epochs = total_epochs
@@ -120,9 +123,12 @@ class TrainingLogger:
         self.grad_norms: list[float] = []
 
         # Embedding health trackers (updated p/batch, p/epoch)
-        self.embed_tracker_z_enc    = EmbeddingTracker()
-        self.embed_tracker_z_pred   = EmbeddingTracker()
-        self.embed_tracker_z_target = EmbeddingTracker()
+        if self.arch == "jepa":
+            self.embed_tracker_z_enc    = EmbeddingTracker()
+            self.embed_tracker_z_pred   = EmbeddingTracker()
+            self.embed_tracker_z_target = EmbeddingTracker()
+        else:
+            self.embed_tracker_z_enc        = EmbeddingTracker()
 
         # CSV/TB
         self._log_csv = log_csv
@@ -167,10 +173,15 @@ class TrainingLogger:
         self.grad_norms.append(float(grad_norm))
         self.log_step_scalar("step/grad_norm", grad_norm)
 
-    def update_embed_health_single(self, z_enc_pooled: torch.Tensor) -> None:
-        # z_enc_pooled is already (B, D), no per-encounter pooling needed
-        z_np = z_enc_pooled.detach().cpu().float().numpy()
-        self.embed_tracker_z_enc.update(z_np)
+    def update_embed_health_supv(self, z_enc: torch.Tensor, ctx_pad_mask: torch.Tensor) -> None:
+        """vec must be (B, D) -- (pooled or not with ctx dim)"""
+        z_enc_np = z_enc.detach().cpu().float().numpy()
+        pad_np   = ctx_pad_mask.detach().cpu().float().numpy()
+        
+        valid     = (pad_np == 0).astype(np.float32)
+        valid_sum = valid.sum(axis=1, keepdims=True).clip(min=1)
+        z_enc_pooled = (z_enc_np * valid[..., None]).sum(axis=1) / valid_sum
+        self.embed_tracker_z_enc.update(z_enc_pooled)
 
     def update_embed_health(
         self,
@@ -356,8 +367,8 @@ class DriftMonitor:
         model.eval()
         
         # Online and target encoder outputs on the same target tokens
-        z_online = model.encoder(batch["tgt_tokens"], batch["tgt_tok_mask"])
-        z_target = model.target_encoder(batch["tgt_tokens"], batch["tgt_tok_mask"])
+        z_online = model.encoder(batch["tgt_tokens"], batch["tgt_tok_mask"], batch["tgt_times"])
+        z_target = model.target_encoder(batch["tgt_tokens"], batch["tgt_tok_mask"], batch["tgt_times"])
         
         # Full forward pass for prediction residual
         _, z_pred, z_t = model(batch)

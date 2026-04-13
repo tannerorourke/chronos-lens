@@ -18,7 +18,6 @@ from sklearn.metrics import (
     average_precision_score, f1_score, 
     roc_auc_score, brier_score_loss)
 
-from src.models.jepa_stopgrad import JEPAStopGrad
 from src.models.jepa_ema import JEPA_EMA
 from analysis.eval_infra import (
     flatten_valid_encounters, 
@@ -31,7 +30,7 @@ from src.utils.seed import SEED
 # =============================================================================
 
 def extract_layer_representations(
-    model: JEPA_EMA | JEPAStopGrad,
+    model: JEPA_EMA | torch.nn.Module,
     loader: DataLoader,
     device: torch.device,
 ) -> dict:

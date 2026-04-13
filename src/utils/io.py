@@ -1,7 +1,6 @@
 from pathlib import Path
 import json
 from typing import Tuple
-from argparse import Namespace
 
 import yaml
 import numpy as np
@@ -135,7 +134,7 @@ def save_metadata(
     with open(p / "patient_ids.json", "w") as f:
         json.dump([str(pid) for pid in patient_ids], f, indent=2)
         
-    print(f"\nMetadata saved to ../{p.parts[-2]} ({metadata.shape[0]} patients x {metadata.shape[1]} features)")
+    print(f"\nMetadata saved to ../{'/'.join(p.parts[-2:])} ({metadata.shape[0]} patients x {metadata.shape[1]} features)")
 
 # =============================================================================
 # config IO

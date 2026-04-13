@@ -13,7 +13,6 @@ import numpy as np
 import torch
 
 from src.models.jepa_ema import JEPA_EMA
-from src.models.jepa_stopgrad import JEPAStopGrad
 from src.models.supervised_transformer import SupervisedTransformer
 from src.utils.seed import _restore_rng
 
@@ -35,16 +34,12 @@ def snapshot(model):
     return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
 
-def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | JEPAStopGrad | SupervisedTransformer:
+def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | SupervisedTransformer:
     arch = model_params.get("architecture", "")
-
-    if arch == "stopgrad":
-        return JEPAStopGrad(**model_params).to(device)
-    elif arch == "ema":
+    if arch == "ema":
         return JEPA_EMA(**model_params).to(device)
     elif arch == "supervised":
         return SupervisedTransformer(**model_params).to(device)
-
     raise ValueError(f"Unknown architecture: '{arch}'")
 
 
@@ -81,11 +76,19 @@ def save_checkpoint(
     print(f"   Checkpoint saved: {save_dir.name}/{file.name} (epoch {epoch})")
 
 
-def load_model_notrain(
-    path: Path,
+def load_model_checkpoint(
+    path: Path | None,
     device: torch.device,
     restore_rng: bool = True,
-) -> tuple[JEPA_EMA | JEPAStopGrad | SupervisedTransformer, dict]:
+    exp_dir: Path | None = None,
+    ckpt_name: str | None = None
+) -> tuple[JEPA_EMA | SupervisedTransformer, dict]:
+    if path is None:
+        assert exp_dir is not None and ckpt_name is not None
+        path = exp_dir / "checkpoints" / ckpt_name
+    if exp_dir is not None and exp_dir.exists() and ckpt_name is not None:
+        path = exp_dir / "checkpoints" / ckpt_name
+    
     checkpoint = torch.load(path, map_location=device, weights_only=False)
 
     model_params = checkpoint["model_params"]
@@ -99,7 +102,7 @@ def load_model_notrain(
     return model, checkpoint
 
 
-def load_model_checkpoint(
+def sync_model_checkpoint(
     model,
     optimizer,
     scheduler,
@@ -113,6 +116,7 @@ def load_model_checkpoint(
     model_dict = checkpoint["model"]
     model.load_state_dict(model_dict)
     print(f"loaded {model.architecture} model from epoch {epoch}")
+    
     
     optimizer_dict = checkpoint["optimizer"]
     optimizer.load_state_dict(optimizer_dict)

@@ -37,7 +37,7 @@ from src.mimic.helper import parse_dt, has_drug_in_class
 
 
 def _preprocess(patient: dict) -> dict:
-    """Pre-compute encounter-level aggregates used by multiple tiers."""
+    """Pre-compute encounter-level aggregates per patient """
     encs = patient["encounters"]
     all_icds = [str(c) for enc in encs for c in enc.get("icd_codes", [])]
     all_meds = [str(m).lower() for enc in encs for m in enc.get("meds", [])]
@@ -48,7 +48,7 @@ def _preprocess(patient: dict) -> dict:
 # =============================================================================
 # =============================================================================
 
-def _1_summary(patient: dict) -> list[tuple[str, float]]:
+def _pat_summary(patient: dict) -> list[tuple[str, float]]:
     """Summary statistics over the encounter sequence."""
     encs = patient["encounters"]
     all_icds = patient["all_icds"]
@@ -74,27 +74,25 @@ def _1_summary(patient: dict) -> list[tuple[str, float]]:
         ("f_code_ratio",       float(encs_with_f / n_enc) if n_enc > 0 else 0.0),
     ]
 
-
 # =============================================================================
+# Binary Indicators
 # =============================================================================
 
-def _2_fcode_indicators(patient: dict, top_f_codes: list[str]) -> list[tuple[str, float]]:
-    """Binary indicators for the most frequent F-code subcategories."""
+def _pat_fcode_freq(patient: dict, top_f_codes: list[str]) -> list[tuple[str, float]]:
     patient_f_set = set(c.upper() for c in patient["f_codes"])
-    return [(f"has_{fc}", 1.0 if fc in patient_f_set else 0.0) for fc in top_f_codes]
-
-
-# =============================================================================
-# =============================================================================
-
-def _3_med_indicators(patient: dict, top_meds: list[str]) -> list[tuple[str, float]]:
-    """Binary indicators for the most frequent medications."""
+    return [
+        ( f"has_{fc}", 1.0 if fc in patient_f_set else 0.0 ) 
+        for fc in top_f_codes
+    ]
+    
+def _pat_med_freq(patient: dict, top_meds: list[str]) -> list[tuple[str, float]]:
     patient_med_set = set(patient["all_meds"])
-    return [(f"med_{med}", 1.0 if med in patient_med_set else 0.0) for med in top_meds]
+    return [
+        ( f"med_{med}", 1.0 if med in patient_med_set else 0.0 ) 
+        for med in top_meds
+    ]
 
-
-def _3_drug_classes(patient: dict) -> list[tuple[str, float]]:
-    """Binary indicators for drug class presence."""
+def _pat_drug_cls_presence(patient: dict) -> list[tuple[str, float]]:
     all_meds = patient["all_meds"]
     return [
         (f"has_{cls}", 1.0 if has_drug_in_class(all_meds, drug_list) else 0.0)
@@ -105,7 +103,7 @@ def _3_drug_classes(patient: dict) -> list[tuple[str, float]]:
 # =============================================================================
 # =============================================================================
 
-def _4_temporal(patient: dict) -> list[tuple[str, float]]:
+def _pat_temporal_patterns(patient: dict) -> list[tuple[str, float]]:
     """Temporal patterns across the encounter sequence."""
     encs = patient["encounters"]
     n_enc = len(encs)
@@ -150,26 +148,21 @@ def _4_temporal(patient: dict) -> list[tuple[str, float]]:
 # =============================================================================
 # =============================================================================
 
-def _5_escalation(patient: dict) -> list[tuple[str, float]]:
-    """Escalation labels and criteria indicators.
-
-    Requires label_escalation, label_escalation_per_enc, and
-    escalation_criteria_fired on the patient dict (from labels.py).
-    """
+def _pat_escalation(patient: dict) -> list[tuple[str, float]]:
+    """Escalation labels and criteria indicators. """
     label_esc = patient.get("label_escalation", 0)
     per_enc = patient.get("label_escalation_per_enc", [])
     criteria = set(patient.get("escalation_criteria_fired", []))
     n_enc = len(patient["encounters"])
 
-    n_events = sum(per_enc)
-
+    n_esc_events = sum(per_enc)
     first_pos = 0.0
-    if n_events > 0 and n_enc > 0:
+    if n_esc_events > 0 and n_enc > 0:
         first_idx = next(i for i, v in enumerate(per_enc) if v)
         first_pos = first_idx / n_enc
 
     esc_rate = 0.0
-    if n_events > 0 and n_enc > 1:
+    if n_esc_events > 0 and n_enc > 1:
         first_idx = next(i for i, v in enumerate(per_enc) if v)
         remaining = per_enc[first_idx + 1:]
         if remaining:
@@ -177,7 +170,7 @@ def _5_escalation(patient: dict) -> list[tuple[str, float]]:
 
     pairs: list[tuple[str, float]] = [
         ("label_escalation",        float(label_esc)),
-        ("n_escalation_events",     float(n_events)),
+        ("n_escalation_events",     float(n_esc_events)),
         ("first_escalation_position", first_pos),
         ("escalation_rate",         esc_rate),
     ]
@@ -190,7 +183,7 @@ def _5_escalation(patient: dict) -> list[tuple[str, float]]:
 # =============================================================================
 # =============================================================================
 
-def _6_trajectory(patient: dict) -> list[tuple[str, float]]:
+def _pat_trajectory(patient: dict) -> list[tuple[str, float]]:
     """Trajectory features capturing diagnostic broadening over time."""
     encs = patient["encounters"]
 
@@ -233,6 +226,7 @@ def extract_metadata(
     subject_ids: np.ndarray | None = None,
     top_n_f_codes: int = 20,
     top_n_meds: int = 25,
+    label_metadata: dict = {}
 ) -> tuple:
     """
     Build a rich metadata matrix from patient sequences. When subject_ids is
@@ -268,7 +262,7 @@ def extract_metadata(
     else:
         ordered_pids = list(patients.keys())
 
-    # -- First pass: preprocess patients + count cohort frequencies -----------
+    # -- First pass: preprocess patients aggregates + count cohort frequencies
     preprocessed: dict[str, dict] = {}
     f_code_counter: Counter = Counter()
     med_counter: Counter = Counter()
@@ -284,18 +278,18 @@ def extract_metadata(
     top_f_codes = [code for code, _ in f_code_counter.most_common(top_n_f_codes)]
     top_meds = [med for med, _ in med_counter.most_common(top_n_meds)]
 
-    # -- Tier function list (cohort-level params bound via closures) ----------
+    # -- Tier function list (cohort-level params bound via closures)
     tiers: list[tuple[str, Callable]] = [
-        ("summary",    _1_summary),
-        ("f-code",     lambda ctx: _2_fcode_indicators(ctx, top_f_codes)),
-        ("med",        lambda ctx: _3_med_indicators(ctx, top_meds)),
-        ("drug-class", _3_drug_classes),
-        ("temporal",   _4_temporal),
-        ("escalation", _5_escalation),
-        ("trajectory", _6_trajectory),
+        ("summary",    _pat_summary),
+        ("f-code",     lambda ctx: _pat_fcode_freq(ctx, top_f_codes)),
+        ("med",        lambda ctx: _pat_med_freq(ctx, top_meds)),
+        ("drug-class", _pat_drug_cls_presence),
+        ("temporal",   _pat_temporal_patterns),
+        ("escalation", _pat_escalation),
+        ("trajectory", _pat_trajectory),
     ]
 
-    # -- Feature names (derived from first patient) --------------------------
+    # -- Feature names (derived from first patient)
     first_ctx = preprocessed[ordered_pids[0]]
     feature_names: list[str] = []
     tier_sizes: list[tuple[str, int]] = []
@@ -335,22 +329,3 @@ def extract_metadata(
         print(f"    {fname:20s}: mean={vals.mean():.2f}, median={np.median(vals):.1f}")
     
     return metadata, feature_names, patient_ids
-
-
-# =============================================================================
-# CLI
-# =============================================================================
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Extract metadata features from sequences.jsonl")
-    parser.add_argument("--sequences", type=str,
-                        default=str(DATA_DIR / "sequences.jsonl"),
-                        help="Path to sequences.jsonl")
-    parser.add_argument("--output", type=str,
-                        default=str(DATA_DIR),
-                        help="Output directory for metadata files")
-    args = parser.parse_args()
-
-    sequences = load_sequences(path=args.sequences)
-    metadata, feature_names, patient_ids = extract_metadata(sequences, subject_ids=None)
-    save_metadata(metadata, feature_names, patient_ids, path=args.output)

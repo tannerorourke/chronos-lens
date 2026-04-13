@@ -36,19 +36,10 @@ def encode_encounter(
     enc: dict, 
     vocab: dict[str, int], 
     PAD_IDX: int,
-    modality: str = "all",
     use_np_int32: bool = True,
 ) -> list[int] | np.ndarray:
-    """Return a list of token indices for one encounter dict.
-
-       modality : "all" | "icd_only" | "meds_only"
-    """
-    if modality == "icd_only":
-        codes = enc.get("icd_codes", [])
-    elif modality == "meds_only":
-        codes = enc.get("meds", [])
-    else:
-        codes = enc.get("icd_codes", []) + enc.get("meds", [])
+    """Return a list of token indices for one encounter dict. """
+    codes = enc.get("icd_codes", []) + enc.get("meds", [])
     enc_toks = [vocab[c] for c in codes if c in vocab]
     
     if use_np_int32:
@@ -66,10 +57,14 @@ def encode_encounter(
 class MimicDataset(Dataset):
     """One sample per (patient, masked-encounter-index).
 
-    For patient with N encounters, N-1 samples are created. Each sample 
-    uses encounters [0..mask_pos-1] as causal context and encounter 
-    [mask_pos] as the prediction target. Patients with fewer than 2 
-    encounters are skipped.
+    For patient with N encounters, N-2 samples are created. patients
+    have 3 encounters minimum (see 'src/mimic). Each sample uses 
+    encounters [0..mask_pos-1] as causal context and encounter [mask_pos] 
+    as prediction target.
+    
+    In the non-supervised case, "tgt_x" is applied to target encoder.
+    In the supervised setting, "tgt_labels" is added. and the rest
+    are used to maintain subject reference.
     """
 
     def __init__(
@@ -78,129 +73,42 @@ class MimicDataset(Dataset):
         vocab: dict[str, int], 
         data_params: dict, 
         pad_idx: int = 0,
-        max_encounters: int | None = None, 
+        max_enc: int | None = 100, 
+        is_supervised: bool = False,
+        label_key: str | None = None,
         use_np_int32: bool = True
     ):
-        max_encounters = data_params.get("max_encounters", None)
-        modality       = data_params.get("modality", "all")
+        self.is_supervised = is_supervised
+        self.label_key = (data_params.get("label_key", label_key)
+                          if self.is_supervised else None)
+        
+        max_enc = data_params.get("max_encounters", max_enc)
         
         self.samples: list[dict] = []
         self.pad_idx = pad_idx
         for p in patients:
             encs = p.get("encounters", [])
-            if len(encs) < 2:
+            if len(encs) < 3:
                 continue
-            if max_encounters is not None:
-                encs = encs[:max_encounters]
+            if max_enc is not None:
+                encs = encs[:max_enc]
             sid    = str(p["subject_id"])
-            tokens = [encode_encounter(e, vocab, self.pad_idx, modality, use_np_int32) 
+            tokens = [encode_encounter(e, vocab, self.pad_idx, use_np_int32) 
                       for e in encs]
+            times  = [e.get("days_since_first", 0) for e in encs]
 
-            for mask_pos in range(len(encs)):
-                self.samples.append({
-                    "context":    tokens[:mask_pos],
-                    "target":     tokens[mask_pos],
-                    "mask_pos":   mask_pos,
-                    "subject_id": sid,
-                })
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        return self.samples[idx]
-
-
-def collate_fn(batch: list[dict]) -> dict:
-    """Pad variable-length encounter sequences and token lists for batching."""
-    B = len(batch)
-
-    # Determine maximum context length and max tokens-per-encounter
-    max_ctx = max(len(item["context"]) for item in batch)
-    all_enc_lens = [
-        len(enc)
-        for item in batch for enc in item["context"]
-    ] + [len(item["target"]) for item in batch]
-    max_tok = max(all_enc_lens) if all_enc_lens else 1
-
-    # ctx_tokens[b, c, t] - token indices for context encounter c in batch b
-    ctx_tokens   = torch.zeros(B, max_ctx, max_tok, dtype=torch.long)
-    # ctx_tok_mask[b, c, t] - True where a real token exists (for mean-pool)
-    ctx_tok_mask = torch.zeros(B, max_ctx, max_tok, dtype=torch.bool)
-    # ctx_pad_mask[b, c] - True where encounter slot c is padding (for attn)
-    ctx_pad_mask = torch.ones(B, max_ctx, dtype=torch.bool)
-
-    tgt_tokens   = torch.zeros(B, max_tok, dtype=torch.long)
-    tgt_tok_mask = torch.zeros(B, max_tok, dtype=torch.bool)
-
-    for i, item in enumerate(batch):
-        for j, enc in enumerate(item["context"]):
-            n = len(enc)
-            ctx_tokens[i, j, :n]   = torch.tensor(enc, dtype=torch.long)
-            ctx_tok_mask[i, j, :n] = True
-            ctx_pad_mask[i, j]     = False # this slot is a real encounter
-
-        n = len(item["target"])
-        tgt_tokens[i, :n]   = torch.tensor(item["target"], dtype=torch.long)
-        tgt_tok_mask[i, :n] = True
-
-    mask_pos   = torch.tensor([item["mask_pos"] for item in batch], dtype=torch.long)
-    subject_ids = [item["subject_id"] for item in batch]
-
-    return {
-        "ctx_tokens":    ctx_tokens,     # (B, max_ctx, max_tok)
-        "ctx_tok_mask":  ctx_tok_mask,   # (B, max_ctx, max_tok)
-        "ctx_pad_mask":  ctx_pad_mask,   # (B, max_ctx) True=padding slot
-        "tgt_tokens":    tgt_tokens,     # (B, max_tok)
-        "tgt_tok_mask":  tgt_tok_mask,   # (B, max_tok)
-        "mask_pos":      mask_pos,       # (B,)
-        "subject_ids":   subject_ids,
-    }
-
-
-# =============================================================================
-# Supervised Dataset
-# =============================================================================
-
-class SupervisedDataset(Dataset):
-    """One sample per patient using all encounters. Includes label=label_key
-       for loss computation. Unlike MimicDataset which creates N samples per 
-       patient (one per masked encounter), this creates exactly one sample with 
-       all encounters as context and the patient label as the target.
-    
-       Used by the supervised transformer.
-    """
-
-    def __init__(
-        self, 
-        patients: list[dict], 
-        vocab: dict[str, int],
-        data_params: dict,
-        pad_idx: int = 0, 
-        max_encounters: int | None = None
-    ):
-        max_encounters = data_params["max_encounters"]
-        modality       = data_params.get("modality", "all")
-        label_key      = data_params.get("label_key", "label_30d")
-
-        self.samples: list[dict] = []
-        self.pad_idx = pad_idx
-        for p in patients:
-            encs = p.get("encounters", [])
-            if len(encs) < 2:
-                continue
-            if max_encounters is not None:
-                encs = encs[:max_encounters]
-            label  = int(p.get(label_key, 0))
-            sid    = str(p["subject_id"])
-            tokens = [encode_encounter(e, vocab, pad_idx, modality) for e in encs]
-            
-            self.samples.append({
-                "context":    tokens,
-                "subject_id": sid,
-                "label":      label,
-            })
-        assert len(self.samples) > 0, "[SupervisedDataset] No training samples produced"
+            for mask_pos in range(2, len(encs)):
+                s = {
+                    "context":       tokens[:mask_pos],
+                    "context_times": times[:mask_pos],
+                    "target":        tokens[mask_pos],
+                    "target_time":   times[mask_pos],
+                    "subject_id":    sid,
+                }
+                if self.is_supervised:
+                    assert label_key in p, f"[MimicDataset] label key missing for patient: {label_key}"
+                    s["label"] = p[label_key]
+                self.samples.append(s)
 
     def __len__(self):
         return len(self.samples)
@@ -208,33 +116,59 @@ class SupervisedDataset(Dataset):
     def __getitem__(self, idx):
         return self.samples[idx]
 
+    def mimic_collate(self, batch: list[dict]) -> dict:
+        """Pad variable-length encounter sequences and token lists for batching."""
+        B = len(batch)
 
-def supervised_collate_fn(batch: list[dict]) -> dict:
-    """Pad variable-length encounter sequences for batching (no target split)."""
-    B = len(batch)
+        # Determine maximum context length and max tokens-per-encounter
+        max_ctx = max(len(item["context"]) for item in batch)
+        all_enc_lens = [len(enc) for item in batch for enc in item["context"]]
+        if not self.is_supervised:
+            all_enc_lens += [len(item["target"]) for item in batch]
+        max_tok = max(all_enc_lens) if all_enc_lens else 1
 
-    max_enc = max(len(item["context"]) for item in batch)
-    all_enc_lens = [len(enc) for item in batch for enc in item["context"]]
-    max_tok = max(all_enc_lens) if all_enc_lens else 1
+        # [b, c, t] - token t for context encounter c in batch b
+        ctx_tokens   = torch.zeros(B, max_ctx, max_tok, dtype=torch.long)
+        # [b, c, t] - True t where token exists
+        ctx_tok_mask = torch.zeros(B, max_ctx, max_tok, dtype=torch.bool)
+        # [b, c]    - True c where encounter slot c is padding (for attn)
+        ctx_pad_mask = torch.ones(B, max_ctx, dtype=torch.bool)
+        # [b, c]    - days since last admission for encounter c in batch b
+        ctx_times    = torch.zeros(B, max_ctx, dtype=torch.long)
 
-    ctx_tokens   = torch.zeros(B, max_enc, max_tok, dtype=torch.long)
-    ctx_tok_mask = torch.zeros(B, max_enc, max_tok, dtype=torch.bool)
-    ctx_pad_mask = torch.ones(B, max_enc, dtype=torch.bool)
+        tgt_tokens   = torch.zeros(B, max_tok, dtype=torch.long)
+        tgt_tok_mask = torch.zeros(B, max_tok, dtype=torch.bool)
 
-    for i, item in enumerate(batch):
-        for j, enc in enumerate(item["context"]):
-            n = len(enc)
-            ctx_tokens[i, j, :n]   = torch.tensor(enc, dtype=torch.long)
-            ctx_tok_mask[i, j, :n] = True
-            ctx_pad_mask[i, j]     = False
+        for s, sample in enumerate(batch):
+            for e, enc in enumerate(sample["context"]):
+                n = len(enc)
+                ctx_tokens[s, e, :n]   = torch.tensor(enc, dtype=torch.long)
+                ctx_tok_mask[s, e, :n] = True
+                ctx_pad_mask[s, e]     = False
 
-    labels      = torch.tensor([item["label"] for item in batch], dtype=torch.long)
-    subject_ids = [item["subject_id"] for item in batch]
+            ct = sample["context_times"]
+            ctx_times[s, :len(ct)] = torch.tensor(ct, dtype=torch.long)
 
-    return {
-        "ctx_tokens":   ctx_tokens,
-        "ctx_tok_mask": ctx_tok_mask,
-        "ctx_pad_mask": ctx_pad_mask,
-        "labels":       labels,
-        "subject_ids":  subject_ids,
-    }
+            n = len(sample["target"])
+            tgt_tokens[s, :n]   = torch.tensor(sample["target"], dtype=torch.long)
+            tgt_tok_mask[s, :n] = True
+
+        tgt_times   = torch.tensor([sample["target_time"] for sample in batch], dtype=torch.long)
+        subject_ids = [item["subject_id"] for item in batch]
+        
+        batch_out = {
+            "ctx_tokens":        ctx_tokens,
+            "ctx_tok_mask":      ctx_tok_mask,
+            "ctx_pad_mask":      ctx_pad_mask,
+            "ctx_times":         ctx_times,
+            "tgt_tokens":        tgt_tokens,
+            "tgt_tok_mask":      tgt_tok_mask,
+            "tgt_times":         tgt_times,
+            "subject_ids":       subject_ids,
+        }
+        
+        if self.is_supervised:
+            labels = torch.tensor([sample["label"] for sample in batch], dtype=torch.long)
+            batch_out["tgt_labels"] = labels
+
+        return batch_out

@@ -278,6 +278,7 @@ def build_admission_active_meds(
 def build_patient_sequences(
     encounters: pd.DataFrame,
     min_encounters: int,
+    max_encounters: int
 ) -> list[dict]:
     print("\nBuilding final sequences..")
     print("    Applying cohort filters...")
@@ -298,26 +299,32 @@ def build_patient_sequences(
     encounters = encounters.sort_values(["subject_id", "admittime"]).reset_index(drop=True)
     print(f"        Total encounters: {len(encounters):,}")
 
-    # Filter to minimum encounters per patient
+    # Filter to between min/max encounters per patient
     enc_per_patient = encounters.groupby("subject_id").size()
-    qualifying = set(enc_per_patient[enc_per_patient >= min_encounters].index)
-    print(f"        Patients with >= {min_encounters} encounters: {len(qualifying):,}")
+    qual_min = set(enc_per_patient[enc_per_patient >= min_encounters].index)
+    qual_max = set(enc_per_patient[enc_per_patient <= max_encounters].index)
+    qualifying = qual_min & qual_max
     encounters = encounters[encounters["subject_id"].isin(qualifying)]
+    print(f"        Patients with >= {min_encounters} encounters: {len(qual_min):,}")
+    print(f"        Patients with <= {max_encounters} encounters: {len(qual_max):,}")
+    print(f"        Qualifying: {len(encounters):,} encounters, {encounters['subject_id'].nunique():,} patients")
     print(f"        Final: {len(encounters):,} encounters, {encounters['subject_id'].nunique():,} patients")
 
     # --- Assemble sequences ---
     sequences = []
     for subject_id, group in encounters.groupby("subject_id"):
         rows = group.sort_values("admittime").to_dict("records")
-
+        
+        ref = rows[0]["admittime"]
         enc_list = [{
-            "hadm_id":       int(row["hadm_id"]),
-            "admittime":     row["admittime"],
-            "dischtime":     row["dischtime"],
-            "icd_codes":     row["icd_codes"],
-            "icd_codes_full": row["icd_codes_full"],
-            "meds":          row["meds"],
-        } for row in rows]
+            "hadm_id":          int(row["hadm_id"]),
+            "admittime":        row["admittime"],
+            "dischtime":        row["dischtime"],
+            "days_since_first":  int((row["admittime"] - ref).days) if i > 0 else 0,
+            "icd_codes":        row["icd_codes"],
+            "icd_codes_full":   row["icd_codes_full"],
+            "meds":             row["meds"],
+        } for i, row in enumerate(rows)]
 
         sequences.append({
             "subject_id": str(subject_id),

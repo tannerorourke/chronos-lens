@@ -28,4 +28,4 @@ meta:
     tag: "supervised_v01"
     description: "Supervised Transformer baseline for JEPA comparison"
     resume_from: null # provide path to .pt checkpoint. tag must match.
-    save_ckpt_every: 5 # null = once at end
+    save_cycle: 5 # null = once at end

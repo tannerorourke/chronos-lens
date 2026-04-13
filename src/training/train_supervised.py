@@ -51,7 +51,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     meta_p          = params["meta"]
     seed            = meta_p["seed"]
     use_bfloat16    = meta_p["use_bfloat16"]
-    save_ckpt_every = meta_p.get("save_ckpt_every", epochs)
+    save_cycle      = meta_p.get("save_cycle", epochs)
     m_tag           = meta_p.get("tag", None)
     m_desc          = meta_p.get("description", None)
     ckpt_dir = run_dir / "checkpoints"
@@ -173,7 +173,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         else:
             since_imprv += 1
         
-        if epoch % save_ckpt_every == 0 or epoch == epochs:
+        if epoch % save_cycle == 0 or epoch == epochs:
             if b_state is not None:
                 save_checkpoint(b_state, model_params,
                                 optimizer, scheduler,

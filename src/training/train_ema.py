@@ -23,6 +23,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from src.models.jepa_ema import JEPA_EMA
+from src.training.utils.vicreg import VicRegLoss
+
 from src.training.utils.datasets import MimicDataset, build_vocab
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import TrainingLogger, DriftMonitor
@@ -41,6 +43,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     ema         = opt_params["ema"]
     accum_steps = opt_params.get("accumulation_steps", 1)
     grad_clip   = opt_params.get("grad_clip", 5.0)
+    assert params.get("vicreg"), "VICReg loss params not specified"
 
     # --- data
     data_params     = params["data"]
@@ -54,7 +57,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     meta_p          = params["meta"]
     seed            = meta_p["seed"]
     use_bfloat16    = meta_p["use_bfloat16"]
-    save_ckpt_every = meta_p.get("save_ckpt_every", epochs)
+    save_cycle      = meta_p.get("save_cycle", epochs)
     m_tag           = meta_p.get("tag", None)
     m_desc          = meta_p.get("description", None)
     ckpt_dir = run_dir / "checkpoints"
@@ -130,11 +133,11 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         epoch=start_epoch - 1,
         global_step=start_step,
         loss_history=loss_history,
-        total_epochs=epochs
-    )
+        total_epochs=epochs)
     drift_mon = DriftMonitor()
     drift_mon.set_probe(next(iter(loader)))
     
+    vic_reg_loss = VicRegLoss(**params["vicreg"])
 
     for epoch in range(start_epoch, epochs + 1):
         model.train()
@@ -150,7 +153,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
             with cond_autocast_ctx:
                 z_enc, z_pred, z_target = model(batch_dev)
-                loss = nn.functional.smooth_l1_loss(z_pred, z_target)
+                loss, _ = vic_reg_loss(z_enc, z_pred, z_target, batch_dev["ctx_pad_mask"], 
+                                       projector=model.projector)
             loss.backward()
 
             # --- grad accumulation
@@ -170,13 +174,14 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
             # --- stat logging
             logger.log_batch(loss.item(), len(batch))
-            logger.update_embed_health(z_enc, z_pred, z_target, ctx_pad_mask=batch_dev["ctx_pad_mask"])
+            logger.update_embed_health(z_enc, z_pred, z_target, batch_dev["ctx_pad_mask"])
             n_batches += 1
 
         # --------------------------------------------------------------
         model.eval()
-        drift_metrics = drift_mon.compute(model, device)
-        ep_metrics = logger.log_epoch(lr=optimizer.param_groups[0]["lr"], **drift_metrics)
+        drift_log = drift_mon.compute(model, device)
+        vr_log = vic_reg_loss.compute_accum(n_batches)
+        ep_metrics = logger.log_epoch(lr=optimizer.param_groups[0]["lr"], **drift_log, **vr_log)
         
         # --- early stopping
         pem = ep_metrics["pred_err_l2_mean"]
@@ -211,7 +216,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 b_state = { k:v.detach().cpu().clone() for k,v in model.state_dict().items() }
             
             # -- check for recent best, save, reset best
-            if (epoch % save_ckpt_every == 0 or epoch == epochs):
+            if (epoch % save_cycle == 0 or epoch == epochs):
                 if b_state is not None:
                     save_checkpoint(b_state, model_params,
                                     optimizer, scheduler,

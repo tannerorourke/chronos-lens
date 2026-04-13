@@ -69,7 +69,7 @@ class EmbeddingTracker:
         self._norm_sq_sum += float((norms ** 2).sum())
 
     def get_metrics(self) -> dict:
-        """Return 4 scalars. Empty dict if fewer than 2 samples."""
+        """std_mean, std_min, norm_mean, norm_std: Empty dict if fewer than 2 samples."""
         if self._n < 2 or self._mean is None or self._M2 is None:
             return {}
         std_per_dim = np.sqrt(self._M2 / (self._n - 1))
@@ -109,7 +109,7 @@ class TrainingLogger:
         verbose: bool = False,
         arch: ARCHITECTURES = "ema",
     ):
-        self.is_jepa = arch in ["ema", "jepa"]
+        self.is_jepa = arch in ["ema", "stopgrad"]
         self._closed = False
         self._verbose = verbose
         self._total_epochs = total_epochs
@@ -206,9 +206,8 @@ class TrainingLogger:
         self.embed_tracker_z_pred.update(z_pred_np)
         self.embed_tracker_z_target.update(z_target_np)
         
-        # additional step-level collapse early warning
-        if self.global_step % 20 == 0:
-            self.log_step_scalar("step/z_target_std_min", z_target.std(0).min().item())
+        pred_err_l2 = np.linalg.norm(z_pred - z_target, axis=-1)
+        self.log_step_scalar("step/z_pred_err_l2_mean", pred_err_l2.mean().item())
 
     # --- Final logging
     def log_epoch(self, lr: float | None = None, **metrics) -> dict:
@@ -361,18 +360,18 @@ class DriftMonitor:
         """Run one forward pass on the probe and return drift metrics."""
         if self._probe_batch is None:
             return {}
-        batch = {
+        pb = {
             k: v.to(device) if isinstance(v, torch.Tensor) else v
             for k, v in self._probe_batch.items()
         }
         model.eval()
         
         # Online and target encoder outputs on the same target tokens
-        z_online = model.encoder(batch["tgt_tokens"], batch["tgt_tok_mask"], batch["tgt_times"])
-        z_target = model.target_encoder(batch["tgt_tokens"], batch["tgt_tok_mask"], batch["tgt_times"])
+        z_online = model.encoder(pb["tgt_tokens"], pb["tgt_tok_mask"], pb["tgt_times"])
+        z_target = model.target_encoder(pb["tgt_tokens"], pb["tgt_tok_mask"], pb["tgt_times"])
         
         # Full forward pass for prediction residual
-        _, z_pred, z_t = model(batch)
+        _, z_pred, z_t = model(pb)
         model.train()
 
         # calculate drift

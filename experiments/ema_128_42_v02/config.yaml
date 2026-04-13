@@ -35,4 +35,4 @@ meta:
     tag: "jepa_ema_42_v01"
     description: "v01 settings + larger predictor, predictor nonlinearity head, no emb saving. seed 42"
     resume_from: null
-    save_ckpt_every: 5
+    save_cycle: 5

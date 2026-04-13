@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from src.models.encoder import EncounterEncoder
 from src.models.predictor import Predictor
+from src.training.utils.vicreg import Projector
 
 
 class JEPAStopGrad(nn.Module):
@@ -28,17 +29,19 @@ class JEPAStopGrad(nn.Module):
     def __init__(
         self,
         vocab_size: int,
-        embed_dim: int           = 128,
-        encoder_heads: int       = 8,
-        encoder_depth: int       = 4,
-        encoder_ffn_dim: int     = 256,
-        token_enc_heads: int     = 2,
-        token_enc_depth: int     = 2,
-        token_enc_ffn_dim: int | None = None,
-        predictor_embed_dim: int = 64,
-        predictor_heads: int     = 2,
-        predictor_depth: int     = 2,
-        architecture: str        = "stopgrad",
+        embed_dim: int                  = 128,
+        encoder_heads: int              = 8,
+        encoder_depth: int              = 4,
+        encoder_ffn_dim: int            = 256,
+        token_enc_heads: int            = 2,
+        token_enc_depth: int            = 2,
+        token_enc_ffn_dim: int | None   = None,
+        predictor_embed_dim: int        = 64,
+        predictor_heads: int            = 2,
+        predictor_depth: int            = 2,
+        predictor_ffn_dim: int          = 128,
+        projector_dim: int | None       = None,
+        architecture: str               = "stopgrad",
     ):
         super().__init__()
         self.architecture        = architecture
@@ -53,6 +56,8 @@ class JEPAStopGrad(nn.Module):
         self.predictor_embed_dim = predictor_embed_dim
         self.predictor_heads     = predictor_heads
         self.predictor_depth     = predictor_depth
+        _proj_dim = projector_dim if projector_dim is not None else 2*embed_dim
+        self.projector = Projector(embed_dim, _proj_dim, _proj_dim)
         
         self.encoder = EncounterEncoder(vocab_size, embed_dim,
             encoder_heads, encoder_depth, encoder_ffn_dim,
@@ -60,7 +65,7 @@ class JEPAStopGrad(nn.Module):
             pad_idx=0
         )
         self.predictor = Predictor(embed_dim,
-            predictor_embed_dim, predictor_heads, predictor_depth
+            predictor_embed_dim, predictor_heads, predictor_depth, predictor_ffn_dim
         )
         # No target encoder is created - predictor and target paths share the same encoder. 
         # The target path blocks gradient flow via torch.no_grad() + detach() for full symmetry.

@@ -216,9 +216,9 @@ class TransformerEncoder(nn.Module):
 
 
 class EncounterEncoder(nn.Module):
-    """Map raw encounter tokens to z in R^d.  Wraps token embedding, a
-       token-level [CLS] transformer, and the encounter-level transformer.
-       target encoder deepcopy's this.
+    """Map raw encounter tokens to z in R^d (target encoder deepcopy's this)
+       - shared token embedding
+       - token-level [CLS] transformer and the encounter-level transformer
     """
     def __init__(
         self,

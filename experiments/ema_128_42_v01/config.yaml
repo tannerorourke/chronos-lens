@@ -31,5 +31,5 @@ meta:
     tag: "jepa_ema_42_v01"
     description: "EMA JEPA, testing larger batches, relaxed EMA, min_lr, seed 42"
     resume_from: null # provide path to .pt checkpoint. tag must match.
-    save_ckpt_every: 10 # null = once at end
+    save_cycle: 10 # null = once at end
     save_emb_every: 10 # null = once at end; Embeddings are sent to tb every epoch

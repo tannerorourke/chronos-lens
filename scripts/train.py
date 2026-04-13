@@ -54,9 +54,11 @@ def main():
         from src.training.train_sae import main as train_main
         train_main(params, exp_dir, args.target, args.embeddings, device)
     else:
-        arch = params["model"].get("architecture", "ema")
+        arch = params["model"].get("architecture", "")
         if arch == "ema":
-            from src.training.train import main as train_main
+            from src.training.train_ema import main as train_main
+        elif arch == "stopgrad":
+            from src.training.train_sg import main as train_main
         elif arch == "supervised":
             from src.training.train_supervised import main as train_main
         else:

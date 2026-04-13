@@ -2,11 +2,12 @@ import time
 import csv
 from pathlib import Path
 import statistics as stats
-from typing import Literal
 
 import torch
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
+
+from src.utils.constants import ARCHITECTURES
 
 
 class CsvWriter:
@@ -106,9 +107,9 @@ class TrainingLogger:
         log_csv: bool = True,
         log_tb: bool = True,
         verbose: bool = False,
-        arch: Literal["jepa", "sup_tf"] = "jepa",
+        arch: ARCHITECTURES = "ema",
     ):
-        self.arch = arch
+        self.is_jepa = arch in ["ema", "jepa"]
         self._closed = False
         self._verbose = verbose
         self._total_epochs = total_epochs
@@ -123,12 +124,12 @@ class TrainingLogger:
         self.grad_norms: list[float] = []
 
         # Embedding health trackers (updated p/batch, p/epoch)
-        if self.arch == "jepa":
+        if self.is_jepa:
             self.embed_tracker_z_enc    = EmbeddingTracker()
             self.embed_tracker_z_pred   = EmbeddingTracker()
             self.embed_tracker_z_target = EmbeddingTracker()
         else:
-            self.embed_tracker_z_enc        = EmbeddingTracker()
+            self.embed_tracker_z_enc    = EmbeddingTracker()
 
         # CSV/TB
         self._log_csv = log_csv
@@ -241,11 +242,11 @@ class TrainingLogger:
         self.grad_norms.clear()
 
         # -- always-on: embed health
-        for tag, tracker in [
-            ("z_enc",    self.embed_tracker_z_enc),
-            ("z_pred",   self.embed_tracker_z_pred),
-            ("z_target", self.embed_tracker_z_target),
-        ]:
+        trackers = [("z_enc", self.embed_tracker_z_enc)]
+        if self.is_jepa:
+            trackers.append(("z_pred", self.embed_tracker_z_pred))
+            trackers.append(("z_target", self.embed_tracker_z_target))
+        for tag, tracker in trackers:
             m = tracker.get_metrics()
             for k, v in m.items():
                 raw_metrics[f"embed_{tag}_{k}"] = v

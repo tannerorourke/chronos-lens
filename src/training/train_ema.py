@@ -29,14 +29,11 @@ from src.training.utils.logging import TrainingLogger, DriftMonitor
 from src.training.utils.checkpoint import (
     build_model, 
     save_checkpoint, sync_model_checkpoint,
-    update_best, update_best_max
-)
+    count_improvement)
 from src.utils.io import load_sequences, EXPERIMENTS_DIR
 
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:
-    
-    # --- most params are sent to respective functions
     # --- optimization
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
@@ -75,11 +72,9 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     ds = MimicDataset(patients, vocab, data_params, pad_idx=0, max_enc=max_encounters)
     del patients; gc.collect()
     
-    loader = DataLoader(
-        ds, batch_size,
-        shuffle=True, collate_fn=ds.mimic_collate, drop_last=False,
-        num_workers=num_workers, persistent_workers=num_workers > 0,
-        pin_memory=pin_memory)
+    loader = DataLoader(ds, batch_size, collate_fn=ds.mimic_collate,
+        shuffle=True, drop_last=False, pin_memory=pin_memory,
+        num_workers=num_workers, persistent_workers=num_workers > 0)
 
     # --- model
     model_params = params["model"]
@@ -87,7 +82,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     model = build_model(model_params, device)
     assert type(model) == JEPA_EMA
     
-    # --- init optimizer / scheduler / no scaler necessary
+    # --- init optimizer / scheduler
     optimizer, scheduler = init_optimizers(
         model, opt_params,
         ipe=len(loader),
@@ -125,13 +120,13 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     #     the encoder stalling and the pred_err stalling after peaking
     pred_err_peak, pred_err_peak_epoch = 0.0, 0
     is_descending = False
-    zem_high, ep_since_zem_imprv = float("-inf"), 0
-    pem_low, ep_since_p_err_imprv = float("inf"), 0
-    best_epoch, best_state = 0, None
+    zem_high, since_zem_imprv = float("-inf"), 0
+    pem_low, since_pem_imprv = float("inf"), 0
+    b_epoch, b_state = 0, None
     
     # --- training monitors
     logger = TrainingLogger(
-        run_dir,
+        run_dir, arch=model_params["architecture"],
         epoch=start_epoch - 1,
         global_step=start_step,
         loss_history=loss_history,
@@ -140,17 +135,14 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     drift_mon = DriftMonitor()
     drift_mon.set_probe(next(iter(loader)))
     
-    
-    print(f"Training for {epochs} epochs ({len(loader)} batches of {batch_size})")
 
     for epoch in range(start_epoch, epochs + 1):
         model.train()
         logger.lap()
-        
         n_batches = 0
-        for i, batch in tqdm(enumerate(loader), leave=False,
-                             total=len(loader), colour="green", unit="batch",
-                             desc=f"[epoch {epoch}/{epochs}]"):
+        
+        for i, batch in tqdm(enumerate(loader), leave=False, total=len(loader),
+                             unit="b", desc=f"[epoch {epoch}/{epochs}]"):
             batch_dev = {
                 k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
@@ -176,74 +168,69 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                     for param_q, param_k in zip(model.encoder.parameters(), model.target_encoder.parameters()):
                         param_k.data.mul_(m).add_((1. - m) * param_q.detach().data)
 
-            # --- embedding health
-            logger.update_embed_health(
-                z_enc=z_enc,
-                z_pred=z_pred,
-                z_target=z_target,
-                ctx_pad_mask=batch_dev["ctx_pad_mask"],
-            )
-
             # --- stat logging
             logger.log_batch(loss.item(), len(batch))
+            logger.update_embed_health(z_enc, z_pred, z_target, ctx_pad_mask=batch_dev["ctx_pad_mask"])
             n_batches += 1
 
-        # --- eval -----------------------------------------------------
+        # --------------------------------------------------------------
         model.eval()
         drift_metrics = drift_mon.compute(model, device)
         ep_metrics = logger.log_epoch(lr=optimizer.param_groups[0]["lr"], **drift_metrics)
         
-        # --- save events
+        # --- early stopping
         pem = ep_metrics["pred_err_l2_mean"]
         zem = ep_metrics["embed_z_enc_std_mean"]
         zes_min = ep_metrics["embed_z_enc_std_min"]
+        dop = ep_metrics["drift_over_pred"]
         if zes_min < 0.25:
             print(f"  WARNING: z_enc_std_min={zes_min:.4f} - possible dim collapse")
+        if dop < 0.1 and zes_min < 0.4:
+            print(f"  WARNING: drift_over_pred={dop:.4f} - possible partial collapse")
         
-        # Track climb
+        # Only look for save points if prediction error is falling
         if pem > pred_err_peak:
             pred_err_peak, pred_err_peak_epoch = pem, epoch
             
-        # Descent roughly confirmed: 3% drop below peak
-        if not is_descending and (pem < pred_err_peak * 0.97) and (epoch > pred_err_peak_epoch + 3):
+        pred_down = (pem < pred_err_peak * 0.97)
+        pred_lag = (epoch > pred_err_peak_epoch + 3)
+        if not is_descending and pred_down and pred_lag:
             is_descending = True
-            print(f"Descent confirmed at epoch {epoch}, predictor is picking up.")
-            pem_low, best_epoch = pem, epoch
-            ep_since_p_err_imprv = 0
-            
-        # Only track best and check patience once prediction error peaks
+            pem_low, b_epoch = pem, epoch
+            since_pem_imprv = 0
+            print(f"Predictor descending at epoch {epoch}.")
+        
+        # Track best or cycle save once prediction error peaks
         if is_descending:
-            pem_low, ep_since_p_err_imprv, pem_imprvd = \
-                update_best(pem, pem_low, 0.005, ep_since_p_err_imprv)
+            zem_high, since_zem_imprv, _ = \
+                count_improvement(zem, zem_high, since_zem_imprv, delta=0.003)
+            pem_low, since_pem_imprv, pem_imprvd = \
+                count_improvement(pem, pem_low, since_pem_imprv, delta=0.005)
             if pem_imprvd:
-                best_epoch = epoch
-                best_state = { k:v.detach().cpu().clone() for k,v in model.state_dict().items() }
+                b_epoch = epoch
+                b_state = { k:v.detach().cpu().clone() for k,v in model.state_dict().items() }
             
-            zem_high, ep_since_zem_imprv, _ = \
-                update_best_max(zem, zem_high, 0.003, ep_since_zem_imprv)
-                
-        if (
-            is_descending and epoch >= 40
-            and ep_since_p_err_imprv >= patience
-            and ep_since_zem_imprv >= patience + 3
-        ):
+            # -- check for recent best, save, reset best
+            if (epoch % save_ckpt_every == 0 or epoch == epochs):
+                if b_state is not None:
+                    save_checkpoint(b_state, model_params,
+                                    optimizer, scheduler,
+                                    b_epoch, logger.global_step, logger.loss_history,
+                                    ckpt_dir, seed=seed)
+                    b_state, b_epoch = None, 0
+                else:
+                    print(f"  Checked for recent best - none to save.")
+            
+        # -- stop conditions
+        no_enc_imp = not is_descending and since_zem_imprv >= 75
+        pred_imprv_ends = (is_descending and epoch >= 30 and 
+                           since_pem_imprv >= patience and 
+                           since_zem_imprv >= patience + 3)
+        if (no_enc_imp or pred_imprv_ends):
             print(f"Early stopping at epoch {epoch}.")
-            if best_state is not None:
-                save_checkpoint(best_state, model_params,
-                                optimizer, scheduler,
-                                best_epoch, logger.global_step, logger.loss_history,
-                                ckpt_dir, seed=seed)
             break
-                
-        # cycle save
-        if (epoch % save_ckpt_every == 0 or epoch == epochs):
-            if best_state is not None:
-                save_checkpoint(best_state, model_params,
-                                optimizer, scheduler,
-                                best_epoch, logger.global_step, logger.loss_history,
-                                ckpt_dir, seed=seed)
+        
 
     # ------------------------------------------------------------------
     # --- DONE ---------------------------------------------------------
-
     logger.finalize()

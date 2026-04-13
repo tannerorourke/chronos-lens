@@ -29,45 +29,14 @@ from src.training.utils.logging import TrainingLogger
 from src.training.utils.checkpoint import build_model, save_checkpoint, sync_model_checkpoint
 from src.utils.io import load_sequences, EXPERIMENTS_DIR
 
-# =============================================================================
-# Embedding extraction
-# =============================================================================
-
-@torch.no_grad()
-def save_supervised_embeddings(
-    all_z_c: list[np.ndarray],
-    all_sids: list[str],
-    epoch: int,
-    save_dir: Path,
-) -> None:
-    """Save supervised encoder outputs (z_enc_pooled -> (N, 1, D)),
-    pooled context vector unsqueezed to match the JEPA per-encounter 
-    layout. z_pred and z_target are zeros.
-    """
-    z_enc_pooled   = np.concatenate(all_z_c) # (N, D)
-    subject_ids = np.array(all_sids, dtype=str)
-    N           = z_enc_pooled.shape[0]
-
-    file = (save_dir / f"embeddings_{epoch}").with_suffix(".npz")
-    np.savez(
-        file,
-        z_encs=z_enc_pooled[:, np.newaxis, :], # (N, 1, D)
-        z_pred=np.zeros_like(z_enc_pooled),
-        z_target=np.zeros_like(z_enc_pooled),
-        subject_ids=subject_ids,
-        mask_pos=np.full(N, -1, dtype=np.int64),
-    )
-    print(f"   Embeddings saved: {save_dir.name}/{file.name} (epoch {epoch})")
-
-
-# =============================================================================
-# Training loop
-# =============================================================================
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- optimization
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
+    patience    = opt_params.get("patience", 8)
+    accum_steps = opt_params.get("accumulation_steps", 1)
+    grad_clip   = opt_params.get("grad_clip", 5.0)
 
     # --- data
     data_params     = params["data"]
@@ -82,7 +51,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     meta_p          = params["meta"]
     seed            = meta_p["seed"]
     use_bfloat16    = meta_p["use_bfloat16"]
-    save_ckpt_every = meta_p["save_ckpt_every"] or epochs
+    save_ckpt_every = meta_p.get("save_ckpt_every", epochs)
     m_tag           = meta_p.get("tag", None)
     m_desc          = meta_p.get("description", None)
     ckpt_dir = run_dir / "checkpoints"
@@ -98,15 +67,12 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     print(f"Vocab: {len(vocab)} tokens")
 
     ds = MimicDataset(patients, vocab, data_params, pad_idx=0, max_enc=max_encounters,
-                           is_supervised=True, label_key=label_key)
+                      is_supervised=True, label_key=label_key)
     del patients; gc.collect()
     
-    loader = DataLoader(
-        ds, batch_size, shuffle=True, 
-        collate_fn=ds.mimic_collate, drop_last=False,
-        num_workers=num_workers, pin_memory=pin_memory,
-        persistent_workers=num_workers > 0,
-    )
+    loader = DataLoader(ds, batch_size, collate_fn=ds.mimic_collate,
+        shuffle=True, drop_last=False, pin_memory=pin_memory,
+        num_workers=num_workers, persistent_workers=num_workers > 0)
 
     # --- model
     model_params = params["model"]
@@ -121,15 +87,14 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         num_epochs=epochs)
 
     start_epoch, global_step, loss_history = 1, 1, []
-    # --- load checkpoint? ----------------------------------------------
+    # --- load checkpoint?
     if params.get("resume_from"):
         ckpt_path = EXPERIMENTS_DIR / params["resume_from"]
         model, model_params, optimizer, scheduler, start_epoch, global_step, loss_history = \
             sync_model_checkpoint(
                 model,
                 optimizer, scheduler,
-                ckpt_path, device, restore_rng=True
-            )
+                ckpt_path, device, restore_rng=True)
 
     print("Params:",
           f"Total: {(sum(p.numel() for p in model.parameters()) / 1e6):.2f}M",
@@ -146,24 +111,24 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         if use_bfloat16 and device.type == "cuda"
         else nullcontext())
     
+    # --- early stopping
+    b_state, b_loss, b_epoch, since_imprv = None, 0.0, 0, 0
+    
     logger = TrainingLogger(
-        run_dir,
+        run_dir, arch=model_params["architecture"],
         epoch=start_epoch - 1,
         global_step=global_step,
         loss_history=loss_history,
         total_epochs=epochs,
     )
-    
-    print(f"Training for {len(loader)} batches (size: {batch_size}) for {epochs} epochs")
-    print(f"Description: {params['meta']['tag']}: {params['meta']['description']}")
 
     for epoch in range(start_epoch, epochs + 1):
         model.train()
-        
-        save_this_epoch = (epoch % save_ckpt_every == 0 or epoch == epochs)
-        z_c, sids = [], []
+        logger.lap()
+        history = []
 
-        for batch in tqdm(loader, leave=False, total=len(loader), unit="batch", desc=f"[epoch {epoch}/{epochs}]"):
+        for i, batch in tqdm(enumerate(loader), leave=False, total=len(loader),
+                             unit="b", desc=f"[epoch {epoch}/{epochs}]"):
             batch_dev = {
                 k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
@@ -174,31 +139,53 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 loss = criterion(logits, batch_dev["labels"].float())
             loss.backward()
             
-            pre_clip = nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            logger.log_grad_norm(pre_clip.item())
+            # --- grad accumulation
+            if (i + 1) % accum_steps == 0:
+                pre_clip = nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                logger.log_grad_norm(pre_clip.item())
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                if scheduler is not None:
+                    scheduler.step()
             
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            if scheduler is not None:
-                scheduler.step()
-                
-            if save_this_epoch:
-                z_c.append(z_enc_pooled.detach().cpu().numpy())
-                sids.extend(batch["subject_ids"])
-            
+            # --- stat logging
+            history.append((loss.item(), len(batch)))
+            logger.log_batch(loss.item(), len(batch))
             logger.update_embed_health_supv(z_enc_pooled, batch_dev["ctx_pad_mask"])
-            logger.log_batch(loss.item(), len(batch["subject_ids"]))
+            
+            
 
-        # --- EVAL -----------------------------------------------------
+        # --------------------------------------------------------------
         model.eval()
-
-        if save_this_epoch:
-            save_checkpoint(model.state_dict(), model_params,
-                            optimizer, scheduler,
-                            epoch, logger.global_step, logger.loss_history,
-                            ckpt_dir, seed=seed)
+        t_loss = sum([l[0] for l in history])
+        metrics = {
+            "total_loss": t_loss,
+            "loss_p_batch": t_loss / len(history),
+            "loss_p_sample": t_loss / sum([l[1] for l in history])
+        }
+        logger.log_epoch(lr=optimizer.param_groups[0]["lr"], **metrics)
         
-        logger.log_epoch(lr=optimizer.param_groups[0]["lr"])
+        # --- early stopping
+        if t_loss < b_loss:
+            b_loss, b_epoch = t_loss, epoch
+            b_state = model.state_dict()
+            since_imprv = 0
+        else:
+            since_imprv += 1
+        
+        if epoch % save_ckpt_every == 0 or epoch == epochs:
+            if b_state is not None:
+                save_checkpoint(b_state, model_params,
+                                optimizer, scheduler,
+                                b_epoch, logger.global_step, logger.loss_history,
+                                ckpt_dir, seed=seed)
+                b_state, b_epoch = None, 0
+            else:
+                print(f"  Checked for recent best - none to save.")
+        
+        if since_imprv >= patience:
+            print(f"Early stopping at epoch {epoch}")
+            break
 
     # ------------------------------------------------------------------
     # --- DONE ---------------------------------------------------------

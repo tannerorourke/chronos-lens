@@ -23,9 +23,9 @@ class JEPA_EMA(nn.Module):
     
     Returns
     -------
-    z_enc : (B, D) encoded representation (differentiable)
-    z_pred    : (B, D) predictor output (differentiable)
-    z_target  : (B, D) EMA target encoding (no grad)
+    z_enc: (B, D) encoded representation
+    z_pred: (B, D) predictor output
+    z_target: (B, D) EMA target encoding
     """
     
     def __init__(
@@ -38,7 +38,7 @@ class JEPA_EMA(nn.Module):
         token_enc_heads: int     = 2,
         token_enc_depth: int     = 2,
         token_enc_ffn_dim: int | None = None,
-        predictor_embed_dim: int = 48,
+        predictor_embed_dim: int = 64,
         predictor_heads: int     = 2,
         predictor_depth: int     = 2,
         architecture: str        = "ema",
@@ -57,13 +57,14 @@ class JEPA_EMA(nn.Module):
         self.predictor_heads     = predictor_heads
         self.predictor_depth     = predictor_depth
         
-        self.encoder = EncounterEncoder(
-            vocab_size, embed_dim, 
+        self.encoder = EncounterEncoder(vocab_size, embed_dim, 
             encoder_heads, encoder_depth, encoder_ffn_dim,
             token_enc_heads, token_enc_depth, token_enc_ffn_dim,
-            pad_idx=0)
-        self.predictor = Predictor(
-            embed_dim, predictor_embed_dim, predictor_heads, predictor_depth)
+            pad_idx=0
+        )
+        self.predictor = Predictor(embed_dim,
+            predictor_embed_dim, predictor_heads, predictor_depth
+        )
         self.target_encoder = copy.deepcopy(self.encoder)
         for p in self.target_encoder.parameters():
             p.requires_grad_(False)
@@ -78,12 +79,12 @@ class JEPA_EMA(nn.Module):
         tgt_times    = batch["tgt_times"]    # (B,)
 
         # --- Encode context -> (B, C, D)
-        z_enc = self.encoder(ctx_tokens, ctx_tok_mask, ctx_times, ctx_pad_mask)
+        z_enc = self.encoder(ctx_tokens, ctx_tok_mask, ctx_times, ctx_pad_mask, pool=False)
 
         # -- Predict masked encounters -> (B, D)
         z_pred = self.predictor(z_enc, ctx_times, tgt_times, ctx_pad_mask)
 
-        # -- Target path (no grad) -> # (B, D) (pooled)
+        # -- Target path (no grad) -> (B, D)
         with torch.no_grad():
             z_target = self.target_encoder(tgt_tokens, tgt_tok_mask, tgt_times, pool=True) 
 

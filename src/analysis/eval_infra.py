@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from src.models.jepa_stopgrad import JEPAStopGrad
 from src.models.jepa_ema import JEPA_EMA
 from src.models.supervised_transformer import SupervisedTransformer
 
@@ -17,7 +18,7 @@ def load_scaffolding(
     ckpt_name: str, 
     exp_name: str,
     device: torch.device, 
-) -> tuple[JEPA_EMA | SupervisedTransformer, DataLoader, Path, tuple[dict, dict], tuple]:
+) -> tuple[JEPA_EMA | JEPAStopGrad | SupervisedTransformer, DataLoader, Path, tuple[dict, dict], tuple]:
     from src.training.utils.datasets import MimicDataset
     from src.training.utils.checkpoint import load_model_checkpoint
     from src.utils.io import get_model_config, load_json, load_sequences

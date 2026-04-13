@@ -12,32 +12,26 @@ import random
 import numpy as np
 import torch
 
+from src.models.jepa_stopgrad import JEPAStopGrad
 from src.models.jepa_ema import JEPA_EMA
 from src.models.supervised_transformer import SupervisedTransformer
 from src.utils.seed import _restore_rng
 
 
-def update_best(current, best, delta, since_best):
+def count_improvement(current, best, since_best, delta=0.0, gt=False):
     """ helper to calc lowest so far for metric"""
-    if current < best - delta:
-        return current, 0, True   # new_best, reset counter, improved
-    return best, since_best + 1, False
-
-
-def update_best_max(current, best, delta, since_best):
-    """ helper to calc highest so far for metric"""
-    if current > best + delta:
+    condition = (current < best - delta) if gt else (current > best + delta)
+    if condition:
         return current, 0, True
     return best, since_best + 1, False
 
-def snapshot(model):
-    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
-
-def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | SupervisedTransformer:
+def build_model(model_params: dict, device: torch.device) -> JEPA_EMA | JEPAStopGrad | SupervisedTransformer:
     arch = model_params.get("architecture", "")
     if arch == "ema":
-        return JEPA_EMA(**model_params).to(device)
+        return JEPA_EMA(**model_params).to(device) 
+    elif arch == "stopgrad":
+        return JEPAStopGrad(**model_params).to(device)
     elif arch == "supervised":
         return SupervisedTransformer(**model_params).to(device)
     raise ValueError(f"Unknown architecture: '{arch}'")
@@ -82,7 +76,7 @@ def load_model_checkpoint(
     restore_rng: bool = True,
     exp_dir: Path | None = None,
     ckpt_name: str | None = None
-) -> tuple[JEPA_EMA | SupervisedTransformer, dict]:
+) -> tuple[JEPA_EMA | JEPAStopGrad | SupervisedTransformer, dict]:
     if path is None:
         assert exp_dir is not None and ckpt_name is not None
         path = exp_dir / "checkpoints" / ckpt_name
@@ -110,6 +104,7 @@ def sync_model_checkpoint(
     device: torch.device,
     restore_rng: bool = True,
 ) -> tuple:
+    """ Sync created model and optimizers to checkpoint. """
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     epoch = checkpoint["epoch"]
     

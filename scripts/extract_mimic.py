@@ -36,7 +36,7 @@ parser.add_argument("--seq-path",           default=None, type=str,
                     help="Path to existing sequences.jsonl. Skips to labeling and metadata")
 parser.add_argument("--min-encounters",     default=3, type=int,
                     help="Minimum encounters per patient (default: 3)")
-parser.add_argument("--max-encounters",     default=100, type=int,
+parser.add_argument("--max-encounters",     default=250, type=int,
                     help="Maximum encounters per patient (default: 20)")
 parser.add_argument("--dry-run",            default=False, action="store_true",
                     help="Skip saving to disk")
@@ -144,13 +144,13 @@ def main():
 
     # -- Compute labels
     sequences, label_meta = compute_labels(sequences, LABEL_ICD10_PREFIX)
-    validate_sequences(sequences, args.min_encounters)
+    validate_sequences(sequences, args.min_encounters, args.max_encounters)
 
     # -- Extract/save metadata (from in-memory)
     metadata, feature_names, patient_ids = extract_metadata(sequences, subject_ids=None,
                                                             label_metadata=label_meta)
     
-    plot_pat_enc_histogram(sequences, min_enc=args.min_encounters, max_enc=args.max_encounters)
+    plot_pat_enc_histogram(sequences, label_meta["encounters_per_patient"])
     
     # -- Save
     if not args.dry_run:

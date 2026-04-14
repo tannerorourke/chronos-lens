@@ -67,20 +67,45 @@ def show_or_savefig(
         
 def plot_pat_enc_histogram(
     sequences: list[dict],
-    min_enc: int = 0,
-    max_enc: int = 20,
+    enc_data: dict,
     show: bool = False, save: bool = True,
     fig_dir: Path = DATA_DIR,
     fig_name: str = "pat_enc_histogram",
     title: str = "Patient-Encounter Sequence Length",
 ):
-    fig, ax = plt.subplots(figsize=(8, 4), dpi=300)
-    d = [len(s) for s in sequences if (min_enc < len(s) and len(s) < max_enc)]
+    mean_val = enc_data["mean"]
+    median_val = enc_data["median"]
+    min_enc = enc_data["min"]
     
-    ax.hist(d, bins=20)
-    ax.set_xticklabels(ax.get_xticks(), rotation=45, ha="right", fontsize=_TICK_PT)
-    ax.set_ylabel("Count")
-    ax.set_title(title, fontsize=_TITLE_PT)
+    enc_lengths = [len(s["encounters"]) for s in sequences]
+    p99 = int(np.percentile(enc_lengths, 99))
+    d = [x for x in enc_lengths if min_enc < x <= p99]
+    bin_edges = np.arange(min_enc, p99 + 1) - 0.5
+    
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=300)
+    ax.hist(d, bins=bin_edges, color="#4C72B0", edgecolor="white", linewidth=0.4, alpha=0.9) # type: ignore
+    ax.set_xticks(np.arange(min_enc + 1, p99 + 1))
+    ax.xaxis.set_major_locator(plt.MultipleLocator(3)) # type: ignore
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(1))  # type: ignore
+    ax.tick_params(axis="x", which="major", length=6)
+    ax.tick_params(axis="x", which="minor", length=3)
+    ax.set_xlabel("Number of Encounters", fontsize=12)
+    
+    ax.yaxis.set_minor_locator(plt.MultipleLocator(2))  # type: ignore
+    ax.tick_params(axis="y", which="minor", length=3)
+    ax.set_ylabel("Number of Patients",   fontsize=12)
+    
+    ax.axvline(mean_val,   color="#DD4444", linewidth=1.8, linestyle="--", label=f"Mean = {mean_val:.2f}")
+    ax.axvline(median_val, color="#22AA66", linewidth=1.8, linestyle="-",  label=f"Median = {median_val:.2f}")
+    ax.legend(fontsize=10, framealpha=0.85)
+    ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
+
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.annotate(
+        f"Tail clipped at 99th percentile (>{p99} encounters, n={len(d):,} patients)",
+        xy=(0.99, 0.97), xycoords="axes fraction",
+        ha="right", va="top", fontsize=8, color="gray"
+    )
     
     fig.tight_layout()
     show_or_savefig(fig, show, save_path=fig_dir / fig_name if save else None)

@@ -91,7 +91,7 @@ def get_psych_drug_classes(meds: list[str]) -> set[str]:
 # Sequence data
 # =============================================================================
 
-def validate_sequences(sequences: list[dict], min_encounters: int):
+def validate_sequences(sequences: list[dict], min_encounters: int, max_encounters: int):
     print("\nValidating sequences..")
 
     assert len(sequences) > 0, "FAIL: no sequences produced"
@@ -100,7 +100,7 @@ def validate_sequences(sequences: list[dict], min_encounters: int):
     assert min_enc >= min_encounters, f"FAIL: found sequence with {min_enc} encounters"
     
     nmax_enc = max(len(s["encounters"]) for s in sequences)
-    assert nmax_enc <= min_encounters, f"FAIL: found sequence with {nmax_enc} encounters"
+    assert nmax_enc <= max_encounters, f"FAIL: found sequence with {nmax_enc} encounters"
 
     for seq in sequences:
         times = [enc["admittime"] for enc in seq["encounters"]]

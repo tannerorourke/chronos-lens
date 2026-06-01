@@ -18,7 +18,6 @@ optimization:
     patience: 15
     base_lr: 6e-4
     min_lr: 1e-5
-    schedule: "warmup_cosine"
     weight_decay: 0.05
     betas: [0.9, 0.95]
     grad_clip: 2.0

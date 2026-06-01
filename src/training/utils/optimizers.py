@@ -1,21 +1,5 @@
 import math
 import torch.optim as optim
-from torch.amp import GradScaler # type: ignore
-
-
-def LinearDecay(
-    optimizer, 
-    num_epochs: int, 
-    ipe: int,
-    min_lr_ratio: float = 1e-5,
-):
-    """ Linear decay from base_lr to (min_lr_ratio * base_lr) over total_steps """
-    total_steps = ipe*num_epochs
-    return optim.lr_scheduler.LambdaLR(
-            optimizer,
-            lr_lambda=lambda step: max(min_lr_ratio, 
-                                       1.0 - (1.0 - min_lr_ratio) * step / total_steps))
-
 
 class WarmupCosineAnnealing:
     """ Linear warmup from min_lr to base_lr, then cosine decay back to min_lr."""
@@ -39,14 +23,14 @@ class WarmupCosineAnnealing:
         self.log = log
         self.non_warmup_steps = max(0, total_steps - warmup_steps)
         self.T_max = max(1, self.non_warmup_steps)
-        self._apply(self.min_lr)
+        self._apply(self._get_lr(0))
         
         if log:
             print(f"[WCA] initialized with: "
                   f"   warmup_steps={self.warmup_steps} total_steps={self.total_steps}"
                   f"   min_lr={self.min_lr} base_lr={self.base_lr}")
 
-    def _compute_lr(self, step: int) -> float:
+    def _get_lr(self, step: int) -> float:
         if step <= self.warmup_steps:
             return self.min_lr + (self.base_lr - self.min_lr) * (step / max(1, self.warmup_steps))
         t = min(step - self.warmup_steps, self.non_warmup_steps)
@@ -58,16 +42,14 @@ class WarmupCosineAnnealing:
             group["lr"] = lr
 
     def step(self) -> None:
+        lr = self._get_lr(self._step)
         self._step += 1
-        lr = self._compute_lr(self._step)
+        
         self._last_lr = [lr]
         self._apply(lr)
         
         if self.log:
             print(f"[WCA] new step={self._step} new lr={lr}")
-
-    def get_last_lr(self) -> list[float]:
-        return self._last_lr
 
     def state_dict(self) -> dict:
         return {"_step": self._step, "_last_lr": self._last_lr}
@@ -76,10 +58,6 @@ class WarmupCosineAnnealing:
         self._step    = sd["_step"]
         self._last_lr = sd["_last_lr"]
         self._apply(self._last_lr[0])
-
-    @property
-    def last_epoch(self) -> int:
-        return self._step
 
 
 def init_optimizers(
@@ -100,30 +78,18 @@ def init_optimizers(
             nodecay_params.append(p)
         else:
             decay_params.append(p)
+            
     optimizer = optim.AdamW([
         {"params": decay_params, "weight_decay": wd},
         {"params": nodecay_params, "weight_decay": 0.0},
     ], lr=base_lr, betas=(b1, b2))
     
-    sched_type = opt_params.get("schedule", "")
-    if sched_type == "warmup_cosine":
-        scheduler = WarmupCosineAnnealing(
-            optimizer,
-            warmup_steps=ipe*opt_params.get("warmup_epochs", 0),
-            total_steps=ipe*num_epochs,
-            min_lr=opt_params.get("min_lr", 0.0)
-        )
-    elif sched_type == "linear_decay":
-        min_lr_ratio = opt_params.get("min_lr_ratio", 0.0)
-        
-        scheduler = LinearDecay(
-            optimizer,
-            num_epochs=num_epochs,
-            ipe=ipe,
-            min_lr_ratio=min_lr_ratio
-        )
-    else:
-        scheduler = None
+    scheduler = WarmupCosineAnnealing(
+        optimizer,
+        warmup_steps=ipe*opt_params.get("warmup_epochs", 0),
+        total_steps=ipe*num_epochs,
+        min_lr=opt_params.get("min_lr", 0.0)
+    )
     
     # No scaler is needed for bf16/fp32
     

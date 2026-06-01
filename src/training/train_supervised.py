@@ -145,15 +145,12 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 logger.log_grad_norm(pre_clip.item())
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                if scheduler is not None:
-                    scheduler.step()
+                scheduler.step()
             
             # --- stat logging
             history.append((loss.item(), len(batch)))
             logger.log_batch(loss.item(), len(batch))
             logger.update_embed_health_supv(z_enc_pooled, batch_dev["ctx_pad_mask"])
-            
-            
 
         # --------------------------------------------------------------
         model.eval()
@@ -178,7 +175,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 save_checkpoint(b_state, model_params,
                                 optimizer, scheduler,
                                 b_epoch, logger.global_step, logger.loss_history,
-                                ckpt_dir, seed=seed)
+                                ckpt_dir)
                 b_state, b_epoch = None, 0
             else:
                 print(f"  Checked for recent best - none to save.")

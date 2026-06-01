@@ -168,8 +168,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 logger.log_grad_norm(pre_clip.item())
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                if scheduler is not None:
-                    scheduler.step()
+                scheduler.step()
 
             # --- stat logging
             logger.log_batch(loss.item(), len(batch))

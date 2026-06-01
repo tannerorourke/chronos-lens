@@ -109,21 +109,13 @@ def sync_model_checkpoint(
     
     model_dict = checkpoint["model"]
     model.load_state_dict(model_dict)
-    print(f"loaded {model.architecture} model from epoch {epoch}")
     
-    
-    optimizer_dict = checkpoint["optimizer"]
-    optimizer.load_state_dict(optimizer_dict)
-    print(f"loaded optimizer from epoch {epoch}")
-    
-    scheduler_dict = checkpoint["scheduler"]
-    if scheduler is not None and scheduler_dict is not None:
-        scheduler.load_state_dict(checkpoint["scheduler"])
-        print(f"loaded scheduler from epoch {epoch}")
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    scheduler.load_state_dict(checkpoint["scheduler"])
     
     if restore_rng:
         _restore_rng(checkpoint)
-
+    
     model_params = checkpoint["model_params"]
     global_step = checkpoint["global_step"]
     loss_hist = checkpoint.get("loss_history", [])

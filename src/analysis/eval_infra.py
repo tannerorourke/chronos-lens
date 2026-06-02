@@ -9,63 +9,15 @@ from src.models.jepa_stopgrad import JEPAStopGrad
 from src.models.jepa_ema import JEPA_EMA
 from src.models.supervised_transformer import SupervisedTransformer
 
+# ``load_scaffolding`` (model+loader reconstruction) now lives on the training
+# side at ``src.training.utils.inference``; analysis depends on training infra,
+# not the reverse. Re-export here for backwards-compatible imports.
+from src.training.utils.inference import load_scaffolding  # noqa: F401
+
 
 # =============================================================================
 # Live Inference
 # =============================================================================
-
-def load_scaffolding(
-    ckpt_name: str, 
-    exp_name: str,
-    device: torch.device, 
-) -> tuple[JEPA_EMA | JEPAStopGrad | SupervisedTransformer, DataLoader, Path, tuple[dict, dict], tuple]:
-    from src.training.utils.datasets import MimicDataset
-    from src.training.utils.checkpoint import load_model_checkpoint
-    from src.utils.io import get_model_config, load_json, load_sequences
-    from src.utils.seed import set_global_seed
-    from src.utils.tensors import set_cuda_precision
-    
-    exp_dir, config = get_model_config(exp_name, exists_ok=True)
-    ckpt_path = exp_dir / "checkpoints" / ckpt_name
-    
-    # --- data
-    data_params     = config["data"]
-    batch_size      = data_params["batch_size"]
-    n_patients      = data_params["n_patients"]
-    max_encounters  = data_params.get("max_encounters", None)
-    pin_memory      = data_params.get("pin_mem", True) and device.type == "cuda"
-    num_workers     = data_params.get("num_workers", 0)
-    
-    # --- meta
-    meta_p          = config["meta"]
-    seed            = meta_p["seed"]
-    use_bfloat16    = meta_p["use_bfloat16"]
-    is_supervised   = config["model"]["architecture"] == "supervised_transformer"
-    label_key       = (meta_p.get("label_key", "label_escalation_per_enc") 
-                       if is_supervised else None)
-    
-    set_global_seed(seed)
-    if device.type == "cuda": set_cuda_precision(use_bfloat16)
-    
-    # --- load stuff
-    model, ckpt = load_model_checkpoint(ckpt_path, device, restore_rng=True)
-    model.eval()
-    
-    patients = load_sequences(n=n_patients)
-    vocab = load_json(exp_dir / "vocab.json")
-    assert vocab is not None, f"vocab.json not found in {exp_name}"
-    
-    ds = MimicDataset(patients, vocab, data_params, pad_idx=0,
-                      max_enc=max_encounters, is_supervised=is_supervised,
-                      label_key=label_key)
-    loader = DataLoader(
-        ds, batch_size,
-        shuffle=True, collate_fn=ds.mimic_collate, drop_last=False,
-        num_workers=num_workers, persistent_workers=num_workers > 0,
-        pin_memory=pin_memory)
-    
-    return model, loader, exp_dir, (ckpt, config), (ds, is_supervised, label_key, vocab)
-    
 
 def extract_jepa_embeddings(model, loader, device) -> dict:
     """Run JEPA model inference and collect embeddings.
@@ -118,27 +70,53 @@ def extract_jepa_embeddings(model, loader, device) -> dict:
 
 
 def extract_supervised_embeddings(model, loader, device) -> dict:
-    """Run supervised model inference and collect encoder output.
+    """Run supervised model inference and collect per-encounter encoder output.
 
-    Returns dict with keys: z_enc_pooled, subject_ids.
+    Returns the same shape contract as :func:`extract_jepa_embeddings` (minus
+    z_pred/z_target, which the supervised model lacks): per-encounter ``z_encs``
+    + ``ctx_pad_mask``, so callers derive ``z_enc_pooled`` via
+    :func:`compute_derived_vectors` exactly as for JEPA. Uses the encoder with
+    ``pool=False`` - the same per-encounter representation - rather than the
+    classifier-facing pooled vector.
+
+    Returns dict with keys: z_encs, ctx_pad_mask, subject_ids, mask_pos.
     """
-    all_z_enc_pooled: list[np.ndarray] = []
+    all_z_encs: list[np.ndarray] = []
+    all_ctx_pad_mask: list[np.ndarray] = []
     all_subject_ids: list[str] = []
+    all_mask_pos: list[np.ndarray] = []
 
     model.eval()
     with torch.no_grad():
         for batch in loader:
             batch_dev = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                      for k, v in batch.items()}
-            z_enc_pooled, _ = model(batch_dev)
+            z_enc = model.encode(batch_dev, pool=False)   # (B, C, D)
             del batch_dev
-            
-            all_z_enc_pooled.append(z_enc_pooled.cpu().numpy())
+
+            all_z_encs.append(z_enc.cpu().numpy())
+            all_ctx_pad_mask.append(batch["ctx_pad_mask"].cpu().numpy())
             all_subject_ids.extend(batch["subject_ids"])
+            all_mask_pos.append(batch["mask_pos"].cpu().numpy())
+
+    # Pad z_encs and ctx_pad_mask to uniform context length across batches
+    max_C = max(arr.shape[1] for arr in all_z_encs)
+    D = all_z_encs[0].shape[2]
+    padded_z_encs: list[np.ndarray] = []
+    padded_masks: list[np.ndarray] = []
+    for z, m in zip(all_z_encs, all_ctx_pad_mask):
+        B, C = z.shape[0], z.shape[1]
+        if C < max_C:
+            z = np.concatenate([z, np.zeros((B, max_C - C, D), dtype=z.dtype)], axis=1)
+            m = np.concatenate([m, np.ones((B, max_C - C), dtype=m.dtype)], axis=1)
+        padded_z_encs.append(z)
+        padded_masks.append(m)
 
     return {
-        "z_enc_pooled": np.concatenate(all_z_enc_pooled),   # (N, D)
-        "subject_ids": np.array(all_subject_ids),           # (N,)
+        "z_encs": np.concatenate(padded_z_encs),        # (N, C_max, D)
+        "ctx_pad_mask": np.concatenate(padded_masks),   # (N, C_max)
+        "subject_ids": np.array(all_subject_ids),       # (N,)
+        "mask_pos": np.concatenate(all_mask_pos),       # (N,)
     }
 
 
@@ -286,7 +264,7 @@ def compute_escalation_criterions(
                 f_codes, meds, prior_subcats, prior_f_codes, prior_drug_classes)
             has_prior_psych_meds = has_prior_psych_meds or had_meds
 
-        # Check escalation at mask_pos (encounter at pos only — no future data)
+        # Check escalation at mask_pos (encounter at pos only - no future data)
         f_codes = get_encounter_f_codes(encs[pos], full=True)
         meds = [m.lower() for m in encs[pos].get("meds", [])]
         fired = _check_enc_escalation(

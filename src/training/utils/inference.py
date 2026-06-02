@@ -133,8 +133,16 @@ def extract_embeddings(
                     for k, v in batch.items()
                 }
                 with cond_autocast_ctx:
-                    # (z_enc, z_pred, z_target) if not supervised, else (z_enc, _)
-                    data = model(batch_dev)
+                    if is_supervised:
+                        assert type(model) is SupervisedTransformer, "expected Supervised Transformer model"
+                        # Per-encounter z_enc (B, C, D) - matches the JEPA z_enc
+                        # the EmbeddingWriterSupv expects; the model's own forward
+                        # pools for its classifier, which we bypass here.
+                        data = (model.encode(batch_dev, pool=False), None)
+                    else:
+                        assert type(model) is not SupervisedTransformer, "expected Unsupervised JEPA model"
+                        # (z_enc, z_pred, z_target)
+                        data = model(batch_dev)
 
                 ew.write_batch(
                     data,

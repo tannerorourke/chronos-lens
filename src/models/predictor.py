@@ -15,8 +15,8 @@ class Predictor(nn.Module):
     - Context tokens receive a
     - Sinusoidal temporal encoding of "days since first admission" for all 
       context AND target tokens
-    - STE of the "days since last context encounter" for target tokens, added 
-      to the mask positions
+    - Sinusoidal relative encoding of "days since the most-recent valid context
+      encounter" for the target, added to the mask position
     """
     def __init__(
         self,
@@ -66,11 +66,12 @@ class Predictor(nn.Module):
         h = h + self.temporal_encoding(ctx_times)  # (B, C, D_pred)
 
         # -- Mask token with absolute + relative temporal encoding -> (B, 1, D_pred)
-        rel_to_last_ctx = tgt_times - ctx_times[:, -1]
-        # last non-padded index per row
-        # last_valid = (~ctx_pad_mask).float().cumsum(dim=1).argmax(dim=1)  # (B,)
-        # last_ctx_times = ctx_times.gather(1, last_valid.unsqueeze(1)).squeeze(1)
-        # rel_to_last_ctx = tgt_times - last_ctx_times
+        # ctx_times is RIGHT-padded (collate fills [0:L), pads after, and asserts
+        # valid-first), so ctx_times[:, -1] is PAD for short rows. Gather the
+        # most-recent VALID context time instead -> the true k vs k-1 gap.
+        last_idx = (~ctx_pad_mask).sum(dim=1).sub(1).clamp(min=0)            # (B,)
+        last_ctx_time = ctx_times.gather(1, last_idx.unsqueeze(1)).squeeze(1)  # (B,)
+        rel_to_last_ctx = tgt_times - last_ctx_time
         mask_tokens = (self.mask_token.expand(B, 1, -1)
                        + self.temporal_encoding(tgt_times).unsqueeze(1)
                        + self.relative_encoding(rel_to_last_ctx).unsqueeze(1))

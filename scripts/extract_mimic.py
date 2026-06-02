@@ -118,8 +118,11 @@ def save_dataset(
 
 
 def main():
+    # No seed is set here: this is a deterministic MIMIC ETL (table joins,
+    # cleaning, sequence building, label computation) with no sampling, shuffle,
+    # or random split. Downstream model/analysis entries seed themselves.
     args = parser.parse_args()
-    
+
     print(f"Running data extraction!")
     print(f"  min encounters: {args.min_encounters}")
     print(f"  max encounters: {args.max_encounters}")

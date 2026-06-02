@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""
+Cross-architecture comparison between JEPA and supervised embeddings.
+
+Loads embeddings from both models, matches samples by (subject_id, mask_pos),
+computes geometric, trajectory, probe, and SAE comparison metrics.
+Saves structured results to JSON + NPZ.
+
+Usage
+-----
+  python -m scripts.analyze_comparison \
+      --jepa-exp stopg_42_v01 --jepa-emb embeddings_40.npz \
+      --sup-exp supervised_64_42 --sup-emb embeddings_20.npz \
+      [--jepa-sae sae_pred_error] [--sup-sae sae_z_enc]
+"""
+from os import environ
+environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from src.analysis.eval_infra import (
+    compute_derived_vectors,
+    load_escalation_labels, load_label_30d_at_k,
+    extract_icd_block_targets)
+from src.analysis.geometry import (
+    fit_pca, get_pca_stats, linear_cka, subspace_alignment, label_subspace)
+from src.analysis.trajectories import (
+    extract_trajectories,
+    trajectory_velocity, trajectory_curvature,
+    concept_centroid, prospective_trajectory_probe)
+from src.analysis.sae import load_sae
+from src.utils.io import (
+    RUNS_DIR, DATA_DIR,
+    load_embeddings, load_sequences_dict)
+from src.utils.seed import load_exp_seed, set_global_seed
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+def _find_sae_dir(exp_dir: Path, sae_name: str) -> Path:
+    """Locate SAE directory under experiment. Accepts name or path."""
+    sae_dir = exp_dir / sae_name
+    if sae_dir.is_dir():
+        return sae_dir
+    sae_dir = exp_dir / f"sae_{sae_name}"
+    if sae_dir.is_dir():
+        return sae_dir
+    candidates = list(exp_dir.glob(f"sae_{sae_name}*"))
+    if candidates:
+        candidates.sort()
+        return candidates[0]
+    raise FileNotFoundError(
+        f"SAE directory not found: tried {exp_dir / sae_name} and {exp_dir / f'sae_{sae_name}'}")
+
+
+def _encounter_times(
+    patients_dict: dict[str, dict],
+    subject_ids: np.ndarray,
+    mask_pos: np.ndarray,
+) -> np.ndarray:
+    """Extract days_since_first for each (subject_id, mask_pos) sample."""
+    N = len(subject_ids)
+    times = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        sid = str(subject_ids[i])
+        pos = int(mask_pos[i])
+        encs = patients_dict[sid]["encounters"]
+        if pos < len(encs):
+            times[i] = encs[pos].get("days_since_first", pos)
+        else:
+            times[i] = pos
+    return times
+
+
+def _build_labels_per_step(
+    sample_labels: np.ndarray,
+    subject_ids: np.ndarray,
+    mask_pos: np.ndarray,
+    traj_dict: dict,
+) -> np.ndarray:
+    """Map sample-level labels (N,) into trajectory-aligned (P, T_max) matrix.
+
+    Entries without a matching sample are set to -1 (ignore).
+    """
+    patient_ids = traj_dict["patient_ids"]
+    T_max = traj_dict["trajectories"].shape[1]
+    P = len(patient_ids)
+    pid_to_idx = {str(pid): i for i, pid in enumerate(patient_ids)}
+
+    patient_steps: dict[str, list[tuple[int, int]]] = {}
+    for i in range(len(subject_ids)):
+        sid = str(subject_ids[i])
+        patient_steps.setdefault(sid, []).append((int(mask_pos[i]), i))
+    for sid in patient_steps:
+        patient_steps[sid].sort(key=lambda x: x[0])
+
+    labels_mat = np.full((P, T_max), -1, dtype=int)
+    for sid, steps in patient_steps.items():
+        if sid not in pid_to_idx:
+            continue
+        p = pid_to_idx[sid]
+        for t, (_, sample_idx) in enumerate(steps):
+            if t < T_max:
+                labels_mat[p, t] = int(sample_labels[sample_idx])
+
+    return labels_mat
+
+
+def _label_subspace_alignment(dirs_a: np.ndarray, dirs_b: np.ndarray) -> dict:
+    """Principal angles between two direction matrices (rank, D)."""
+    k = min(dirs_a.shape[0], dirs_b.shape[0])
+    M = dirs_a @ dirs_b.T
+    _, s, _ = np.linalg.svd(M, full_matrices=False)
+    cos_angles = np.clip(s[:k], 0.0, 1.0)
+    return {
+        "cos_principal_angles": cos_angles.tolist(),
+        "mean_alignment": float(cos_angles.mean()),
+        "min_alignment": float(cos_angles.min()),
+    }
+
+
+def _cross_sae_overlap(
+    jepa_sae_path: Path,
+    sup_sae_path: Path,
+    cosine_threshold: float = 0.85,
+    device: str = "cpu",
+) -> dict:
+    """Hungarian matching of decoder directions between two SAEs.
+
+    Adapted from sae_seed_stability in src/analysis/sae.py.
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    jepa_sae = load_sae(jepa_sae_path, torch.device(device))
+    sup_sae = load_sae(sup_sae_path, torch.device(device))
+
+    W_j = jepa_sae.decoder.weight.detach().cpu().float()   # (D, n_features_j)
+    W_s = sup_sae.decoder.weight.detach().cpu().float()     # (D, n_features_s)
+
+    # L2-normalize columns
+    W_j = W_j / W_j.norm(dim=0, keepdim=True).clamp(min=1e-8)
+    W_s = W_s / W_s.norm(dim=0, keepdim=True).clamp(min=1e-8)
+
+    cos_sim = (W_j.T @ W_s).numpy()  # (n_j, n_s)
+    row_idx, col_idx = linear_sum_assignment(1.0 - cos_sim)
+    matched_cosines = cos_sim[row_idx, col_idx]
+
+    stable_mask = matched_cosines > cosine_threshold
+    return {
+        "mean_cosine": float(matched_cosines.mean()),
+        "median_cosine": float(np.median(matched_cosines)),
+        "frac_stable": float(stable_mask.mean()),
+        "n_stable": int(stable_mask.sum()),
+        "n_matched": len(matched_cosines),
+        "matched_cosines": matched_cosines,  # raw array for NPZ
+    }
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Cross-architecture comparison: JEPA vs supervised")
+    parser.add_argument("--jepa-exp", type=str, required=True,
+                        help="JEPA experiment name")
+    parser.add_argument("--sup-exp", type=str, required=True,
+                        help="Supervised experiment name")
+    parser.add_argument("--jepa-emb", type=str, required=True,
+                        help="JEPA embeddings .npz filename")
+    parser.add_argument("--sup-emb", type=str, required=True,
+                        help="Supervised embeddings .npz filename")
+    parser.add_argument("--jepa-sae", type=str, default=None,
+                        help="JEPA SAE directory name (optional)")
+    parser.add_argument("--sup-sae", type=str, default=None,
+                        help="Supervised SAE directory name (optional)")
+    parser.add_argument("--top-k", type=int, default=10,
+                        help="Top-k PCs for subspace analysis (default: 10)")
+    parser.add_argument("--rank", type=int, default=5,
+                        help="Rank for label subspace (default: 5)")
+    parser.add_argument("--cosine-threshold", type=float, default=0.85,
+                        help="SAE feature overlap stability threshold (default: 0.85)")
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    jepa_exp_dir = RUNS_DIR / args.jepa_exp   # run-ids under RUNS_DIR
+    sup_exp_dir = RUNS_DIR / args.sup_exp
+
+    # -- Load embeddings ----------------------------------------------------
+    set_global_seed(load_exp_seed(jepa_exp_dir))
+
+    jepa_emb, jepa_emb_path = load_embeddings(jepa_exp_dir, args.jepa_emb)
+    print(f"JEPA embeddings: {jepa_emb_path}")
+    sup_emb, sup_emb_path = load_embeddings(sup_exp_dir, args.sup_emb)
+    print(f"Supervised embeddings: {sup_emb_path}")
+
+    # Derive z_enc_pooled for JEPA if needed
+    if "z_enc_pooled" not in jepa_emb:
+        jepa_emb = compute_derived_vectors(jepa_emb)
+
+    jepa_z = jepa_emb["z_enc_pooled"]          # (N_j, D)
+    jepa_sids = jepa_emb["subject_ids"]         # (N_j,)
+    jepa_mpos = jepa_emb["mask_pos"]            # (N_j,)
+
+    sup_z = sup_emb["z_enc_pooled"]             # (N_s, D)
+    sup_sids = sup_emb["subject_ids"]           # (N_s,)
+    sup_mpos = sup_emb["mask_pos"]              # (N_s,)
+
+    D = jepa_z.shape[1]
+    print(f"JEPA:       N={len(jepa_sids)}, D={D}")
+    print(f"Supervised: N={len(sup_sids)}, D={sup_z.shape[1]}")
+
+    # -- Match samples by (subject_id, mask_pos) ----------------------------
+    sup_lookup: dict[tuple[str, int], int] = {}
+    for i in range(len(sup_sids)):
+        key = (str(sup_sids[i]), int(sup_mpos[i]))
+        sup_lookup[key] = i
+
+    jepa_idx, sup_idx = [], []
+    for i in range(len(jepa_sids)):
+        key = (str(jepa_sids[i]), int(jepa_mpos[i]))
+        if key in sup_lookup:
+            jepa_idx.append(i)
+            sup_idx.append(sup_lookup[key])
+    jepa_idx = np.array(jepa_idx)
+    sup_idx = np.array(sup_idx)
+
+    N_matched = len(jepa_idx)
+    print(f"Matched samples: {N_matched}")
+    if N_matched == 0:
+        raise ValueError("No matching (subject_id, mask_pos) pairs found")
+
+    z_j = jepa_z[jepa_idx]
+    z_s = sup_z[sup_idx]
+    matched_sids = jepa_sids[jepa_idx]
+    matched_mpos = jepa_mpos[jepa_idx]
+
+    # -- PCA stats ----------------------------------------------------------
+    print("\n--- PCA Stats ---")
+    top_k = args.top_k
+
+    jepa_pca, _, _ = fit_pca(z_j, top_k)
+    sup_pca, _, _ = fit_pca(z_s, top_k)
+    jepa_pca_stats = get_pca_stats(jepa_pca, top_k, N_matched)
+    sup_pca_stats = get_pca_stats(sup_pca, top_k, N_matched)
+
+    print(f"  JEPA eff. dim:       {jepa_pca_stats['effective_dimensionality']:.1f}")
+    print(f"  Supervised eff. dim: {sup_pca_stats['effective_dimensionality']:.1f}")
+
+    # -- CKA ----------------------------------------------------------------
+    print("\n--- CKA ---")
+    cka = linear_cka(z_j, z_s)
+    print(f"  Linear CKA: {cka:.4f}")
+
+    # -- Subspace alignment -------------------------------------------------
+    print("\n--- Subspace Alignment ---")
+    sa = subspace_alignment(jepa_pca, sup_pca, top_k)
+    print(f"  Mean alignment: {sa['mean_alignment']:.4f}")
+    print(f"  Min alignment:  {sa['min_alignment']:.4f}")
+
+    # -- SAE feature overlap ------------------------------------------------
+    sae_overlap_result = None
+    sae_matched_cosines = None
+    if args.jepa_sae and args.sup_sae:
+        print("\n--- SAE Feature Overlap ---")
+        jepa_sae_dir = _find_sae_dir(jepa_exp_dir, args.jepa_sae)
+        sup_sae_dir = _find_sae_dir(sup_exp_dir, args.sup_sae)
+        sae_overlap_result = _cross_sae_overlap(
+            jepa_sae_dir / "sae_checkpoint.pt",
+            sup_sae_dir / "sae_checkpoint.pt",
+            cosine_threshold=args.cosine_threshold,
+            device=str(device))
+        sae_matched_cosines = sae_overlap_result.pop("matched_cosines")
+        print(f"  Mean cosine: {sae_overlap_result['mean_cosine']:.4f}")
+        print(f"  Frac stable: {sae_overlap_result['frac_stable']:.2%}")
+        print(f"  N matched:   {sae_overlap_result['n_matched']}")
+
+    # -- Load labels --------------------------------------------------------
+    print("\n--- Loading labels ---")
+    sequences_path = DATA_DIR / "sequences.jsonl"
+    patients_dict = load_sequences_dict(sequences_path)
+
+    label_esc = load_escalation_labels(patients_dict, matched_sids, matched_mpos)
+    label_30d = load_label_30d_at_k(patients_dict, matched_sids, matched_mpos)
+    icd_targets, icd_chapters = extract_icd_block_targets(
+        sequences_path, matched_sids, matched_mpos)
+
+    labels_dict: dict[str, np.ndarray] = {
+        "escalation": label_esc,
+        "30d_readmit": label_30d,
+    }
+    for ch_idx, ch_name in enumerate(icd_chapters):
+        ch_labels = icd_targets[:, ch_idx]
+        if ch_labels.sum() >= 10:
+            labels_dict[f"icd_{ch_name}"] = ch_labels
+
+    label_names = sorted(labels_dict.keys())
+    print(f"  Labels: {label_names}")
+
+    # -- Trajectory comparison ----------------------------------------------
+    print("\n--- Trajectory Comparison ---")
+    times_matched = _encounter_times(patients_dict, matched_sids, matched_mpos)
+
+    jepa_traj = extract_trajectories(z_j, matched_sids, matched_mpos, times_matched)
+    sup_traj = extract_trajectories(z_s, matched_sids, matched_mpos, times_matched)
+
+    jepa_vel, jepa_vel_mask = trajectory_velocity(jepa_traj)
+    sup_vel, sup_vel_mask = trajectory_velocity(sup_traj)
+    jepa_curv, jepa_curv_mask = trajectory_curvature(jepa_traj)
+    sup_curv, sup_curv_mask = trajectory_curvature(sup_traj)
+
+    # Flatten valid entries for stats and NPZ
+    jv_flat = np.linalg.norm(jepa_vel[jepa_vel_mask], axis=-1)
+    sv_flat = np.linalg.norm(sup_vel[sup_vel_mask], axis=-1)
+    jc_flat = jepa_curv[jepa_curv_mask]
+    sc_flat = sup_curv[sup_curv_mask]
+
+    traj_comparison = {
+        "jepa_velocity_mean": float(jv_flat.mean()) if len(jv_flat) else 0.0,
+        "sup_velocity_mean": float(sv_flat.mean()) if len(sv_flat) else 0.0,
+        "jepa_curvature_mean": float(jc_flat.mean()) if len(jc_flat) else 0.0,
+        "sup_curvature_mean": float(sc_flat.mean()) if len(sc_flat) else 0.0,
+    }
+    print(f"  JEPA vel mean:  {traj_comparison['jepa_velocity_mean']:.4f}")
+    print(f"  Sup  vel mean:  {traj_comparison['sup_velocity_mean']:.4f}")
+    print(f"  JEPA curv mean: {traj_comparison['jepa_curvature_mean']:.4f}")
+    print(f"  Sup  curv mean: {traj_comparison['sup_curvature_mean']:.4f}")
+
+    # -- Prospective probe comparison ---------------------------------------
+    print("\n--- Prospective Probe ---")
+    probe_comparison: dict[str, dict] = {}
+
+    for lname in label_names:
+        lbl = labels_dict[lname]
+
+        # Build trajectory-aligned labels for each model
+        jepa_labels_step = _build_labels_per_step(lbl, matched_sids, matched_mpos, jepa_traj)
+        sup_labels_step = _build_labels_per_step(lbl, matched_sids, matched_mpos, sup_traj)
+
+        # Concept centroid (from JEPA, use positive samples)
+        pos_mask = lbl == 1
+        if pos_mask.sum() < 5:
+            continue
+        centroid = concept_centroid(z_j, lbl)
+
+        try:
+            jepa_probe = prospective_trajectory_probe(
+                jepa_traj, jepa_labels_step, z_j, centroid["mean"])
+            sup_probe = prospective_trajectory_probe(
+                sup_traj, sup_labels_step, z_s, centroid["mean"])
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+
+        probe_comparison[lname] = {
+            "jepa_traj_auroc": float(jepa_probe["traj_auroc"]),
+            "jepa_baseline_auroc": float(jepa_probe["baseline_auroc"]),
+            "sup_traj_auroc": float(sup_probe["traj_auroc"]),
+            "sup_baseline_auroc": float(sup_probe["baseline_auroc"]),
+        }
+        print(f"  {lname}: JEPA traj={jepa_probe['traj_auroc']:.4f}, "
+              f"Sup traj={sup_probe['traj_auroc']:.4f}")
+
+    # -- Label subspace alignment -------------------------------------------
+    print("\n--- Label Subspace Alignment ---")
+    label_sub_alignment: dict[str, dict] = {}
+    jepa_label_dirs: dict[str, np.ndarray] = {}
+    sup_label_dirs: dict[str, np.ndarray] = {}
+
+    for lname in label_names:
+        lbl = labels_dict[lname]
+        if lbl.sum() < 10 or (lbl == 0).sum() < 10:
+            continue
+
+        jepa_sub = label_subspace(z_j, lbl, rank=args.rank)
+        sup_sub = label_subspace(z_s, lbl, rank=args.rank)
+        jepa_label_dirs[lname] = jepa_sub["directions"]
+        sup_label_dirs[lname] = sup_sub["directions"]
+
+        alignment = _label_subspace_alignment(
+            jepa_sub["directions"], sup_sub["directions"])
+        label_sub_alignment[lname] = {
+            "mean_alignment": alignment["mean_alignment"],
+            "min_alignment": alignment["min_alignment"],
+        }
+        print(f"  {lname}: mean={alignment['mean_alignment']:.4f}, "
+              f"min={alignment['min_alignment']:.4f}")
+
+    # Build cross-model alignment matrix (n_labels, n_labels):
+    # entry (i,j) = alignment between label_i subspace in JEPA and
+    # label_j subspace in supervised
+    aligned_labels = sorted(set(jepa_label_dirs.keys()) & set(sup_label_dirs.keys()))
+    n_labels = len(aligned_labels)
+    alignment_matrix = np.zeros((n_labels, n_labels), dtype=np.float64)
+    for i, ln_a in enumerate(aligned_labels):
+        for j, ln_b in enumerate(aligned_labels):
+            aln = _label_subspace_alignment(
+                jepa_label_dirs[ln_a], sup_label_dirs[ln_b])
+            alignment_matrix[i, j] = aln["mean_alignment"]
+
+    # -- Summary table ------------------------------------------------------
+    print(f"\n{'metric':<30s} {'JEPA':>12s} {'Supervised':>12s}")
+    print("-" * 56)
+    print(f"{'eff_dimensionality':<30s} "
+          f"{jepa_pca_stats['effective_dimensionality']:>12.1f} "
+          f"{sup_pca_stats['effective_dimensionality']:>12.1f}")
+    print(f"{'PCs for 90%':<30s} "
+          f"{jepa_pca_stats['components_for_90pct']:>12d} "
+          f"{sup_pca_stats['components_for_90pct']:>12d}")
+    print(f"{'PCs for 95%':<30s} "
+          f"{jepa_pca_stats['components_for_95pct']:>12d} "
+          f"{sup_pca_stats['components_for_95pct']:>12d}")
+    print(f"{'CKA':<30s} {cka:>12.4f} {'-':>12s}")
+    print(f"{'subspace mean alignment':<30s} {sa['mean_alignment']:>12.4f} {'-':>12s}")
+    print(f"{'velocity mean':<30s} "
+          f"{traj_comparison['jepa_velocity_mean']:>12.4f} "
+          f"{traj_comparison['sup_velocity_mean']:>12.4f}")
+    print(f"{'curvature mean':<30s} "
+          f"{traj_comparison['jepa_curvature_mean']:>12.4f} "
+          f"{traj_comparison['sup_curvature_mean']:>12.4f}")
+    if sae_overlap_result:
+        print(f"{'SAE mean cosine':<30s} "
+              f"{sae_overlap_result['mean_cosine']:>12.4f} {'-':>12s}")
+        print(f"{'SAE frac stable':<30s} "
+              f"{sae_overlap_result['frac_stable']:>12.4f} {'-':>12s}")
+
+    # -- Save results -------------------------------------------------------
+    results_dir = jepa_exp_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    json_output = {
+        "jepa_exp": args.jepa_exp,
+        "sup_exp": args.sup_exp,
+        "n_matched": N_matched,
+        "embed_dim": D,
+        "top_k": top_k,
+        "rank": args.rank,
+        "pca_stats": {
+            "jepa": jepa_pca_stats,
+            "supervised": sup_pca_stats,
+        },
+        "cka": cka,
+        "subspace_alignment": sa,
+        "sae_feature_overlap": sae_overlap_result,
+        "trajectory_comparison": traj_comparison,
+        "probe_comparison": probe_comparison,
+        "label_subspace_alignment": label_sub_alignment,
+    }
+
+    json_path = results_dir / "comparison.json"
+    with open(json_path, "w") as f:
+        json.dump(json_output, f, indent=2, default=float)
+    print(f"\nScalar results -> {json_path}")
+
+    # NPZ: arrays for notebook plots
+    npz_data: dict[str, np.ndarray] = {
+        "jepa_velocities": jv_flat,
+        "sup_velocities": sv_flat,
+        "jepa_curvatures": jc_flat,
+        "sup_curvatures": sc_flat,
+        "label_alignment_matrix": alignment_matrix,
+        "label_names": np.array(aligned_labels),
+    }
+    if sae_matched_cosines is not None:
+        npz_data["sae_matched_cosines"] = sae_matched_cosines
+
+    npz_path = results_dir / "comparison.npz"
+    np.savez_compressed(npz_path, **npz_data)
+    print(f"Array results  -> {npz_path}")
+
+
+if __name__ == "__main__":
+    main()

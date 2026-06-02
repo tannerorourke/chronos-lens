@@ -2,7 +2,8 @@
 Geometric analysis of JEPA latent-space vectors.
 
 Operates on raw embedding vectors (no external metadata).
-PCA, divergence, ICC, subspace alignment, and CKA analysis.
+PCA, divergence, ICC, subspace alignment, CKA, and
+label-supervised subspace analysis.
 
 - Plotting from these functions done in 'notebooks/*.ipynb'
 """
@@ -460,3 +461,236 @@ def linear_cka(X: np.ndarray, Y: np.ndarray) -> float:
     if denom < 1e-12:
         return 0.0
     return hsic_xy / denom
+
+
+# =============================================================================
+# Label-supervised subspace analysis
+# =============================================================================
+
+def label_subspace(
+    z_enc: np.ndarray,
+    label: np.ndarray,
+    rank: int = 5,
+) -> dict:
+    """Supervised subspace that separates label classes in z_enc.
+
+    Uses LDA (between-class scatter eigenvectors) for binary labels.
+    Falls back to supervised PCA if LDA is degenerate (singular within-class
+    scatter or fewer than 2 classes with sufficient samples).
+
+    Parameters
+    ----------
+    z_enc : (N, D) embedding matrix
+    label : (N,) binary labels (0/1)
+    rank  : number of top directions to return
+
+    Returns
+    -------
+    dict with:
+        directions          : (rank, D) supervised directions (unit-norm rows)
+        eigenvalues         : (rank,) separation strength per direction
+        explained_separation: fraction of total between-class variance in top rank
+    """
+    label = np.asarray(label, dtype=int)
+    N, D = z_enc.shape
+    rank = min(rank, D)
+
+    classes = np.unique(label)
+    n_classes = len(classes)
+
+    # Global mean
+    mu = z_enc.mean(axis=0)  # (D,)
+
+    # Between-class scatter S_B
+    S_B = np.zeros((D, D), dtype=np.float64)
+    for c in classes:
+        mask = label == c
+        n_c = int(mask.sum())
+        if n_c == 0:
+            continue
+        mu_c = z_enc[mask].mean(axis=0)
+        diff = (mu_c - mu).reshape(-1, 1)  # (D, 1)
+        S_B += n_c * (diff @ diff.T)
+
+    # Within-class scatter S_W
+    S_W = np.zeros((D, D), dtype=np.float64)
+    for c in classes:
+        mask = label == c
+        if mask.sum() == 0:
+            continue
+        X_c = z_enc[mask] - z_enc[mask].mean(axis=0)
+        S_W += X_c.T @ X_c
+
+    # Try LDA: solve S_W^{-1} S_B via generalized eigenvalue problem
+    try:
+        # Regularize S_W for numerical stability
+        S_W_reg = S_W + 1e-6 * np.eye(D) * np.trace(S_W) / D
+        from scipy.linalg import eigh
+        eigenvalues, eigenvectors = eigh(S_B, S_W_reg)
+        # eigh returns ascending order; flip to descending
+        idx = np.argsort(eigenvalues)[::-1]
+        eigenvalues = eigenvalues[idx]
+        eigenvectors = eigenvectors[:, idx]
+    except np.linalg.LinAlgError:
+        # Fallback: supervised PCA on between-class scatter directly
+        eigenvalues, eigenvectors = np.linalg.eigh(S_B)
+        idx = np.argsort(eigenvalues)[::-1]
+        eigenvalues = eigenvalues[idx]
+        eigenvectors = eigenvectors[:, idx]
+
+    # Clamp negative eigenvalues to zero (numerical noise)
+    eigenvalues = np.maximum(eigenvalues, 0.0)
+
+    # Take top rank
+    top_vals = eigenvalues[:rank]
+    top_vecs = eigenvectors[:, :rank].T  # (rank, D)
+
+    # L2-normalize each direction
+    norms = np.linalg.norm(top_vecs, axis=1, keepdims=True)
+    norms = np.clip(norms, 1e-10, None)
+    top_vecs = top_vecs / norms
+
+    total_separation = float(eigenvalues.sum())
+    explained = float(top_vals.sum()) / total_separation if total_separation > 0 else 0.0
+
+    return {
+        "directions": top_vecs,
+        "eigenvalues": top_vals,
+        "explained_separation": explained,
+    }
+
+
+def multi_label_subspace(
+    z_enc: np.ndarray,
+    label_matrix: np.ndarray,
+    rank: int = 5,
+    label_names: list[str] | None = None,
+) -> dict:
+    """CCA directions between z_enc and a multi-label matrix.
+
+    Finds linear directions in z_enc space that are maximally correlated
+    with the label matrix.  Uses SVD of the cross-covariance matrix.
+
+    Parameters
+    ----------
+    z_enc        : (N, D) embedding matrix
+    label_matrix : (N, L) binary label matrix (one column per label)
+    rank         : number of canonical directions
+    label_names  : optional column names for label_matrix
+
+    Returns
+    -------
+    dict with:
+        canonical_directions : (rank, D) CCA directions in z_enc space
+        correlations         : (rank,) canonical correlations
+        label_names          : list[str]
+    """
+    N, D = z_enc.shape
+    L = label_matrix.shape[1]
+    rank = min(rank, D, L)
+
+    if label_names is None:
+        label_names = [f"label_{i}" for i in range(L)]
+
+    # Center both matrices
+    X = z_enc - z_enc.mean(axis=0)
+    Y = label_matrix.astype(np.float64) - label_matrix.mean(axis=0)
+
+    # Covariance matrices
+    C_xx = (X.T @ X) / (N - 1)  # (D, D)
+    C_yy = (Y.T @ Y) / (N - 1)  # (L, L)
+    C_xy = (X.T @ Y) / (N - 1)  # (D, L)
+
+    # Regularize
+    C_xx += 1e-6 * np.eye(D) * np.trace(C_xx) / D
+    C_yy += 1e-6 * np.eye(L) * np.trace(C_yy) / L
+
+    # Whitening transforms
+    from scipy.linalg import sqrtm, inv
+    C_xx_inv_sqrt = np.real(inv(sqrtm(C_xx)))  # (D, D)
+    C_yy_inv_sqrt = np.real(inv(sqrtm(C_yy)))  # (L, L)
+
+    # SVD of whitened cross-covariance
+    M = C_xx_inv_sqrt @ C_xy @ C_yy_inv_sqrt  # (D, L)
+    U, s, _ = np.linalg.svd(M, full_matrices=False)
+
+    # CCA directions in original z_enc space
+    directions = (C_xx_inv_sqrt @ U[:, :rank]).T  # (rank, D)
+
+    # L2-normalize
+    norms = np.linalg.norm(directions, axis=1, keepdims=True)
+    norms = np.clip(norms, 1e-10, None)
+    directions = directions / norms
+
+    correlations = np.clip(s[:rank], 0.0, 1.0)
+
+    return {
+        "canonical_directions": directions,
+        "correlations": correlations,
+        "label_names": list(label_names),
+    }
+
+
+def effective_rank_of_label(
+    z_enc: np.ndarray,
+    label: np.ndarray,
+) -> int:
+    """Intrinsic dimensionality of a label concept in z_enc.
+
+    Number of LDA eigenvalues (from the between-class scatter) above the
+    Marchenko-Pastur noise floor.
+
+    Parameters
+    ----------
+    z_enc : (N, D) embedding matrix
+    label : (N,) binary labels (0/1)
+
+    Returns
+    -------
+    int : number of signal eigenvalues (>= 1 for any non-trivial label)
+    """
+    label = np.asarray(label, dtype=int)
+    N, D = z_enc.shape
+
+    classes = np.unique(label)
+    mu = z_enc.mean(axis=0)
+
+    # Between-class scatter
+    S_B = np.zeros((D, D), dtype=np.float64)
+    for c in classes:
+        mask = label == c
+        n_c = int(mask.sum())
+        if n_c == 0:
+            continue
+        mu_c = z_enc[mask].mean(axis=0)
+        diff = (mu_c - mu).reshape(-1, 1)
+        S_B += n_c * (diff @ diff.T)
+
+    # Within-class scatter
+    S_W = np.zeros((D, D), dtype=np.float64)
+    for c in classes:
+        mask = label == c
+        if mask.sum() == 0:
+            continue
+        X_c = z_enc[mask] - z_enc[mask].mean(axis=0)
+        S_W += X_c.T @ X_c
+
+    # Solve generalized eigenvalue problem
+    try:
+        S_W_reg = S_W + 1e-6 * np.eye(D) * np.trace(S_W) / D
+        from scipy.linalg import eigh
+        eigenvalues, _ = eigh(S_B, S_W_reg)
+        eigenvalues = np.sort(eigenvalues)[::-1]
+    except np.linalg.LinAlgError:
+        eigenvalues, _ = np.linalg.eigh(S_B)
+        eigenvalues = np.sort(eigenvalues)[::-1]
+
+    eigenvalues = np.maximum(eigenvalues, 0.0)
+
+    # Marchenko-Pastur threshold on the between-class scatter eigenvalues
+    trace = float(eigenvalues.sum())
+    if trace < 1e-12:
+        return 0
+    mp_upper = marchenko_pastur_upper(N, D, trace)
+    n_signal = int((eigenvalues > mp_upper).sum())
+    return max(n_signal, 1) if trace > 1e-8 else 0

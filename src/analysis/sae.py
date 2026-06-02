@@ -1,15 +1,21 @@
 """
-SAE analysis utilities - activation extraction, open-ended feature
-inspection, and SAE-cluster cross-reference.
+SAE analysis utilities.
 
-Tier C of the three-tier partial labeling bridge (thesis §5.5).
+Primary workflow: label-driven feature identification, then clinical content
+inspection for interpretation.
 
 Functions
 ---------
-  extract_sae_activations : run a trained SAE on a latent vector -> sparse activations
-  load_sae                : reconstruct a SparseAutoencoder from checkpoint
-  inspect_sae_features    : open-ended enrichment against raw ICD/med vocabulary
-  sae_cluster_crossref    : cross-reference SAE features with HDBSCAN clusters
+  load_sae                    : reconstruct a SparseAutoencoder from checkpoint
+  extract_sae_activations     : run a trained SAE on a latent vector -> sparse activations
+  sae_label_enrichment        : per-feature Fisher exact test + BH FDR correction
+  feature_label_specificity   : (n_features, n_labels) lift matrix
+  sae_coactivation_matrix     : (n_features, n_features) normalized co-activation lift
+  sae_temporal_enrichment     : per-feature temporal correlation and quartile activation
+  inspect_sae_feature_content : clinical content enrichment (secondary, post-identification)
+  sae_cluster_crossref        : cross-reference SAE features with HDBSCAN clusters
+  sae_seed_stability          : dictionary direction stability across seeds
+  decompose_patient           : per-patient SAE decomposition
 """
 
 from pathlib import Path
@@ -57,10 +63,242 @@ def extract_sae_activations(
 
 
 # =========================================================================
-# feature inspection
+# Label-driven feature analysis (primary workflow)
 # =========================================================================
 
-def inspect_sae_features(
+def sae_label_enrichment(
+    activations: np.ndarray,
+    labels: np.ndarray,
+    label_name: str = "",
+) -> list[dict]:
+    """Per-feature Fisher exact test with Benjamini-Hochberg FDR correction.
+
+    For each feature, builds a 2x2 contingency table (feature active/inactive
+    vs label positive/negative) and runs a one-sided Fisher exact test for
+    enrichment among active samples.
+
+    Parameters
+    ----------
+    activations : (N, n_features) sparse activation matrix
+    labels      : (N,) binary labels (0/1)
+    label_name  : optional label name for context
+
+    Returns
+    -------
+    list of dicts (one per feature with activation_frac >= 0.01):
+        feature_idx, odds_ratio, p_value, fdr_q, n_active,
+        n_pos_active, activation_frac
+    """
+    from scipy.stats import fisher_exact
+    N, n_features = activations.shape
+    labels = np.asarray(labels, dtype=int)
+    active_mask = activations != 0  # (N, n_features)
+
+    raw_results: list[tuple] = []
+    for feat_idx in range(n_features):
+        feat_on = active_mask[:, feat_idx]
+        n_active = int(feat_on.sum())
+        activation_frac = n_active / N
+        if activation_frac < 0.01:
+            continue
+
+        a = int((feat_on & (labels == 1)).sum())   # active + pos
+        b = int((feat_on & (labels == 0)).sum())   # active + neg
+        c = int((~feat_on & (labels == 1)).sum())  # inactive + pos
+        d = int((~feat_on & (labels == 0)).sum())  # inactive + neg
+
+        oddsratio, p = fisher_exact([[a, b], [c, d]], alternative="greater")
+        raw_results.append((feat_idx, oddsratio, p, a, n_active, activation_frac))
+
+    # Benjamini-Hochberg FDR
+    raw_results.sort(key=lambda x: x[2])  # sort by p-value ascending
+    m = len(raw_results)
+    fdr_q_vals = np.ones(m)
+    for rank, (_, _, p, _, _, _) in enumerate(raw_results, 1):
+        fdr_q_vals[rank - 1] = p * m / rank
+    # enforce monotonicity (step-up)
+    for i in range(m - 2, -1, -1):
+        fdr_q_vals[i] = min(fdr_q_vals[i], fdr_q_vals[i + 1])
+    fdr_q_vals = np.clip(fdr_q_vals, 0, 1)
+
+    result = []
+    for i, (feat_idx, oddsratio, p, n_pos_active, n_active, act_frac) in enumerate(raw_results):
+        result.append({
+            "feature_idx": feat_idx,
+            "odds_ratio": round(float(oddsratio), 4),
+            "p_value": float(p),
+            "fdr_q": round(float(fdr_q_vals[i]), 6),
+            "n_active": n_active,
+            "n_pos_active": n_pos_active,
+            "activation_frac": round(act_frac, 4),
+        })
+    return result
+
+
+def feature_label_specificity(
+    activations: np.ndarray,
+    labels_dict: dict[str, np.ndarray],
+) -> dict:
+    """Lift matrix: P(label=1 | feature active) / P(label=1).
+
+    Parameters
+    ----------
+    activations : (N, n_features) sparse activation matrix
+    labels_dict : {label_name: (N,) binary array}
+
+    Returns
+    -------
+    dict with:
+        lift_matrix     : (n_features, n_labels) lift values (non-dead features only)
+        label_names     : column order
+        feature_indices : row order (non-dead features only)
+    """
+    N, n_features = activations.shape
+    active_mask = activations != 0
+    label_names = sorted(labels_dict.keys())
+    n_labels = len(label_names)
+
+    # Active features only
+    feat_active_counts = active_mask.sum(axis=0)
+    active_feat_idx = np.where(feat_active_counts > 0)[0]
+    n_active = len(active_feat_idx)
+
+    lift_matrix = np.zeros((n_active, n_labels), dtype=np.float64)
+
+    for j, lname in enumerate(label_names):
+        lbl = np.asarray(labels_dict[lname], dtype=int)
+        p_label = lbl.mean()
+        if p_label < 1e-10:
+            continue
+        for row, feat_idx in enumerate(active_feat_idx):
+            feat_on = active_mask[:, feat_idx]
+            n_on = int(feat_on.sum())
+            p_label_given_active = lbl[feat_on].mean() if n_on > 0 else 0.0
+            lift_matrix[row, j] = p_label_given_active / p_label
+
+    return {
+        "lift_matrix": lift_matrix,
+        "label_names": label_names,
+        "feature_indices": active_feat_idx.tolist(),
+    }
+
+
+def sae_coactivation_matrix(
+    activations: np.ndarray,
+) -> dict:
+    """Normalized co-activation lift between feature pairs.
+
+    Entry (i, j) = P(i active AND j active) / (P(i active) * P(j active)).
+    Values > 1 indicate features that co-fire more than chance.
+
+    Parameters
+    ----------
+    activations : (N, n_features) sparse activation matrix
+
+    Returns
+    -------
+    dict with:
+        lift_matrix     : (n_active, n_active) symmetric lift values, diagonal = 1
+        feature_indices : which original feature indices are included (non-dead)
+    """
+    N, n_features = activations.shape
+    active_mask = (activations != 0).astype(np.float64)
+    feat_freq = active_mask.mean(axis=0)  # P(feature active)
+    active_feat_idx = np.where(feat_freq > 0)[0]
+    n_active = len(active_feat_idx)
+
+    sub = active_mask[:, active_feat_idx]  # (N, n_active)
+    sub_freq = feat_freq[active_feat_idx]  # (n_active,)
+
+    # Co-occurrence matrix: (n_active, n_active)
+    cooccur = (sub.T @ sub) / N  # P(i AND j)
+    expected = np.outer(sub_freq, sub_freq)  # P(i) * P(j)
+    expected = np.clip(expected, 1e-12, None)
+
+    lift_matrix = cooccur / expected
+    np.fill_diagonal(lift_matrix, 1.0)
+
+    return {
+        "lift_matrix": lift_matrix,
+        "feature_indices": active_feat_idx.tolist(),
+    }
+
+
+def sae_temporal_enrichment(
+    activations: np.ndarray,
+    times: np.ndarray,
+    rel_times: np.ndarray,
+) -> list[dict]:
+    """Per-feature temporal enrichment analysis.
+
+    For each non-dead feature (activation_frac >= 0.01), computes correlation
+    of activation magnitude with absolute and relative time, plus activation
+    rates in the first and last quartiles of the time distribution.
+
+    Parameters
+    ----------
+    activations : (N, n_features) sparse activation matrix
+    times       : (N,) absolute encounter times (e.g. days_since_first)
+    rel_times   : (N,) relative times (e.g. days since previous encounter)
+
+    Returns
+    -------
+    list of dicts per feature:
+        feature_idx, time_corr, rel_time_corr,
+        early_activation_frac, late_activation_frac
+    """
+    from scipy import stats
+
+    N, n_features = activations.shape
+    active_mask = activations != 0
+
+    # Quartile boundaries for absolute time
+    t_q1 = np.percentile(times, 25)
+    t_q4 = np.percentile(times, 75)
+    early_mask = times <= t_q1
+    late_mask = times >= t_q4
+
+    results = []
+    for feat_idx in range(n_features):
+        feat_on = active_mask[:, feat_idx]
+        n_active = int(feat_on.sum())
+        if n_active / N < 0.01:
+            continue
+
+        feat_vals = activations[:, feat_idx]
+
+        # Pearson with absolute time
+        if np.std(feat_vals) > 1e-10 and np.std(times) > 1e-10:
+            r_time, _ = stats.pearsonr(feat_vals, times)
+        else:
+            r_time = 0.0
+
+        # Pearson with relative time
+        if np.std(feat_vals) > 1e-10 and np.std(rel_times) > 1e-10:
+            r_rel, _ = stats.pearsonr(feat_vals, rel_times)
+        else:
+            r_rel = 0.0
+
+        # Activation rates in quartiles
+        early_frac = float(feat_on[early_mask].mean()) if early_mask.sum() > 0 else 0.0
+        late_frac = float(feat_on[late_mask].mean()) if late_mask.sum() > 0 else 0.0
+
+        results.append({
+            "feature_idx": feat_idx,
+            "time_corr": round(float(r_time), 4),
+            "rel_time_corr": round(float(r_rel), 4),
+            "early_activation_frac": round(early_frac, 4),
+            "late_activation_frac": round(late_frac, 4),
+        })
+
+    return results
+
+
+# =========================================================================
+# feature content inspection (secondary - "what does this feature detect?")
+# =========================================================================
+
+def inspect_sae_feature_content(
     sae_activations: np.ndarray,
     subject_ids: np.ndarray,
     sequences_path,

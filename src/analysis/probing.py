@@ -7,6 +7,7 @@ Functions
   extract_layer_representations : forward-hook extraction at every encoder layer
   probe_vectors                 : generic binary probe across named vectors
   probe_encounter_level         : per-encounter probing with patient-grouped CV
+  run_probing_sweep             : layer-by-layer probe sweep for signal localization
 """
 import numpy as np
 import torch
@@ -19,9 +20,9 @@ from sklearn.metrics import (
     roc_auc_score, brier_score_loss)
 
 from src.models.jepa_ema import JEPA_EMA
-from analysis.eval_infra import (
-    flatten_valid_encounters, 
-    pool_to_patients, 
+from src.analysis.eval_infra import (
+    flatten_valid_encounters,
+    pool_to_patients,
     compute_all_metrics)
 from src.utils.seed import SEED
 
@@ -46,6 +47,8 @@ def extract_layer_representations(
         layer_0 .. layer_{n-1} : (N, D) mean-pooled per-layer outputs
         final                  : (N, D) mean-pooled z_enc from model output
         subject_ids            : (N,) str array
+        mask_pos               : (N,) int array - target encounter index per
+                                 sample, for aligning causal per-encounter labels
         n_layers               : int
     """
     model.eval()
@@ -67,6 +70,7 @@ def extract_layer_representations(
     all_final = []
     all_sids = []
     all_pad_masks = []
+    all_mask_pos = []
 
     try:
         with torch.no_grad():
@@ -84,21 +88,27 @@ def extract_layer_representations(
                 all_final.append(z_enc_pooled.cpu())
                 all_sids.extend(batch["subject_ids"])
                 all_pad_masks.append(ctx_pad_mask.cpu())
+                all_mask_pos.append(batch["mask_pos"].cpu())
     finally:
         for h in hooks:
             h.remove()
 
-    # Mean-pool each layer's sequence outputs using padding masks
+    # Mean-pool each layer's sequence outputs using padding masks. Pool per
+    # batch *before* concatenating: context length C varies across batches, so
+    # the raw (B, C, D) tensors can't be stacked, but the pooled (B, D) can.
     result = {}
     for i in range(n_layers):
-        layer_seqs = torch.cat(hook_outputs[i], dim=0)  # (N, C, D)
-        pad_masks = torch.cat(all_pad_masks, dim=0)     # (N, C)
-        valid = (~pad_masks).float().unsqueeze(-1)       # (N, C, 1)
-        pooled = (layer_seqs * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1.0)
-        result[f"layer_{i}"] = pooled.numpy()
+        pooled_batches = []
+        for layer_seqs, pad_mask in zip(hook_outputs[i], all_pad_masks):
+            layer_seqs = layer_seqs.cpu()               # (B, C, D)
+            valid = (~pad_mask).float().unsqueeze(-1)    # (B, C, 1)
+            pooled = (layer_seqs * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1.0)
+            pooled_batches.append(pooled)               # (B, D)
+        result[f"layer_{i}"] = torch.cat(pooled_batches, dim=0).numpy()
 
     result["final"] = torch.cat(all_final, dim=0).numpy()
     result["subject_ids"] = np.array(all_sids, dtype=str)
+    result["mask_pos"] = torch.cat(all_mask_pos, dim=0).numpy()
     result["n_layers"] = n_layers
 
     return result
@@ -513,4 +523,86 @@ def evaluate_binary_probe_temporal(
         "positive_rate": round(n_pos / n_test, 4) if n_test > 0 else 0.0,
         "n_train": int(train_mask.sum()),
         "n_test": n_test,
+    }
+
+
+# =============================================================================
+# Layer-wise probing sweep (signal localization)
+# =============================================================================
+
+def run_probing_sweep(
+    layer_representations: dict,
+    labels: np.ndarray,
+    n_splits: int = 5,
+) -> dict:
+    """Probe every transformer layer + the final z_enc to localize signal.
+
+    Runs :func:`evaluate_binary_probe` (stratified k-fold, AUROC/AUPRC/F1/Brier/
+    ECE) on each layer's mean-pooled representation and reports where prediction
+    signal emerges through the encoder.
+
+    Parameters
+    ----------
+    layer_representations : output of :func:`extract_layer_representations` -
+        dict with ``layer_0`` .. ``layer_{n-1}``, ``final``, and ``n_layers``.
+    labels : (N,) binary labels aligned to the representation rows.
+    n_splits : number of stratified CV folds.
+
+    Returns
+    -------
+    dict with:
+        per_layer      : layer key -> evaluate_binary_probe metrics dict
+        summary        : ordered list of (layer_key, mean_auroc, std_auroc)
+        best_layer     : layer key with highest mean AUROC
+        best_auroc     : that layer's mean AUROC
+        interpretation : narrative string on signal localization
+    """
+    n_layers = layer_representations["n_layers"]
+    layer_keys = [f"layer_{i}" for i in range(n_layers)] + ["final"]
+
+    per_layer: dict[str, dict] = {}
+    summary: list[tuple[str, float, float]] = []
+
+    for key in layer_keys:
+        X = layer_representations[key]
+        result = evaluate_binary_probe(X, labels, n_splits=n_splits)
+        per_layer[key] = result
+        summary.append((key, result["mean_auroc"], result["std_auroc"]))
+        print(f"  {key:12s}  AUROC={result['mean_auroc']:.4f} +/- {result['std_auroc']:.4f}  "
+              f"AUPRC={result['mean_auprc']:.4f}  F1={result['mean_f1']:.4f}")
+
+    best_key = max(per_layer, key=lambda k: per_layer[k]["mean_auroc"])
+    best_auroc = per_layer[best_key]["mean_auroc"]
+
+    # Localization: how much does signal grow from the first layer to z_enc?
+    early_auroc = per_layer["layer_0"]["mean_auroc"]
+    final_auroc = per_layer["final"]["mean_auroc"]
+    delta = final_auroc - early_auroc
+
+    if delta < 0.02:
+        interpretation = (
+            f"Signal is already present at layer 0 (AUROC={early_auroc:.3f}) and "
+            f"does not improve substantially through the encoder (final "
+            f"AUROC={final_auroc:.3f}). The token embeddings already separate the "
+            f"classes - attention primarily organizes geometric structure."
+        )
+    elif delta < 0.05:
+        interpretation = (
+            f"Modest signal gain from layer 0 (AUROC={early_auroc:.3f}) to final "
+            f"(AUROC={final_auroc:.3f}). Both embedding-level features and "
+            f"attention-derived structure contribute to separability."
+        )
+    else:
+        interpretation = (
+            f"Substantial signal gain from layer 0 (AUROC={early_auroc:.3f}) to "
+            f"final (AUROC={final_auroc:.3f}), delta={delta:.3f}. Attention is "
+            f"actively building prediction signal through its layers."
+        )
+
+    return {
+        "per_layer": per_layer,
+        "summary": summary,
+        "best_layer": best_key,
+        "best_auroc": best_auroc,
+        "interpretation": interpretation,
     }

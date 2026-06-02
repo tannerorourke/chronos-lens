@@ -1619,6 +1619,573 @@ def plot_f3x_stratified_probing(
     
     
 # =========================================================================
+# SAE Feature Analysis
+# =========================================================================
+
+def plot_lift_heatmap(
+    lift_matrix: np.ndarray,
+    label_names: list[str],
+    feature_indices: list[int],
+    max_features: int = 40,
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """Heatmap of feature-label lift values.
+
+    Rows = SAE features (top by max lift), columns = labels.
+    """
+    n_feat = lift_matrix.shape[0]
+    if n_feat > max_features:
+        row_max = lift_matrix.max(axis=1)
+        top_idx = np.argsort(row_max)[::-1][:max_features]
+        lift_sub = lift_matrix[top_idx]
+        feat_labels = [f"F{feature_indices[i]}" for i in top_idx]
+    else:
+        lift_sub = lift_matrix
+        feat_labels = [f"F{fi}" for fi in feature_indices]
+
+    fig, ax = plt.subplots(figsize=(max(5, len(label_names) * 0.9),
+                                    max(4, len(feat_labels) * 0.28)))
+    im = ax.imshow(lift_sub, aspect="auto", cmap="YlOrRd",
+                   vmin=0, vmax=max(3.0, float(np.percentile(lift_sub, 98))))
+    ax.set_xticks(range(len(label_names)))
+    ax.set_xticklabels(label_names, rotation=45, ha="right", fontsize=_TICK_PT)
+    ax.set_yticks(range(len(feat_labels)))
+    ax.set_yticklabels(feat_labels, fontsize=_TICK_PT)
+    ax.set_xlabel("Label", fontsize=_LABEL_PT)
+    ax.set_ylabel("SAE Feature", fontsize=_LABEL_PT)
+    ax.set_title("Feature–Label Lift Matrix", fontsize=_TITLE_PT)
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+    cbar.set_label("Lift  P(label|active) / P(label)", fontsize=_ANNOT_PT)
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+def plot_coactivation_matrix(
+    lift_matrix: np.ndarray,
+    feature_indices: list[int],
+    max_features: int = 50,
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """Co-activation lift matrix with hierarchical clustering dendrogram."""
+    from scipy.cluster.hierarchy import linkage, dendrogram
+    from scipy.spatial.distance import squareform
+
+    n = lift_matrix.shape[0]
+    if n > max_features:
+        row_max = lift_matrix.max(axis=1)
+        top_idx = np.argsort(row_max)[::-1][:max_features]
+        lift_sub = lift_matrix[np.ix_(top_idx, top_idx)]
+        feat_labels = [f"F{feature_indices[i]}" for i in top_idx]
+    else:
+        lift_sub = lift_matrix
+        feat_labels = [f"F{fi}" for fi in feature_indices]
+
+    # Distance: 1/lift clipped, then hierarchical clustering
+    safe_lift = np.clip(lift_sub, 1e-6, None)
+    dist = 1.0 / safe_lift
+    np.fill_diagonal(dist, 0)
+    dist = (dist + dist.T) / 2  # ensure symmetry
+    condensed = squareform(dist, checks=False)
+    Z = linkage(condensed, method="average")
+
+    fig, (ax_dendro, ax_heat) = plt.subplots(
+        1, 2, figsize=(max(8, len(feat_labels) * 0.22 + 3),
+                       max(6, len(feat_labels) * 0.2)),
+        gridspec_kw={"width_ratios": [1, 4]})
+
+    dn = dendrogram(Z, orientation="left", ax=ax_dendro,
+                    labels=feat_labels, leaf_font_size=_TICK_PT,
+                    no_labels=True, color_threshold=0)
+    ax_dendro.set_xticks([])
+    ax_dendro.spines["top"].set_visible(False)
+    ax_dendro.spines["right"].set_visible(False)
+    ax_dendro.spines["bottom"].set_visible(False)
+
+    # Reorder by dendrogram leaves
+    order = dn["leaves"]
+    ordered = lift_sub[np.ix_(order, order)]
+    ordered_labels = [feat_labels[i] for i in order]
+
+    im = ax_heat.imshow(ordered, aspect="auto", cmap="YlOrRd",
+                        vmin=0, vmax=max(3.0, float(np.percentile(ordered, 98))))
+    ax_heat.set_xticks(range(len(ordered_labels)))
+    ax_heat.set_xticklabels(ordered_labels, rotation=90, fontsize=max(4, _TICK_PT - 1))
+    ax_heat.set_yticks(range(len(ordered_labels)))
+    ax_heat.set_yticklabels(ordered_labels, fontsize=max(4, _TICK_PT - 1))
+    ax_heat.set_title("Co-Activation Lift (hierarchically clustered)", fontsize=_TITLE_PT)
+    fig.colorbar(im, ax=ax_heat, shrink=0.6, pad=0.02, label="Lift")
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+def plot_composition_rules(
+    composition_results: dict[str, dict],
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """Text visualization of boolean composition rules per label.
+
+    One panel per label showing decision rules, compositional gap, etc.
+    """
+    label_names = list(composition_results.keys())
+    n_labels = len(label_names)
+    fig, axes = plt.subplots(n_labels, 1,
+                             figsize=(8, max(3, n_labels * 2.5)),
+                             squeeze=False)
+
+    for idx, label_name in enumerate(label_names):
+        ax = axes[idx, 0]
+        ax.axis("off")
+        comp = composition_results[label_name]
+
+        header = (f"{label_name}    "
+                  f"tree={comp['tree_auroc']:.3f}  "
+                  f"single={comp['best_single_feature_auroc']:.3f}  "
+                  f"gap={comp['compositional_gap']:+.3f}  "
+                  f"features_used={comp['n_features_used']}")
+        ax.text(0.02, 0.92, header, transform=ax.transAxes,
+                fontsize=8, fontweight="bold", va="top", family="monospace")
+
+        rules = comp.get("rules", [])
+        y = 0.75
+        for ri, rule in enumerate(rules[:5]):
+            conds = rule["conditions"]
+            cond_strs = []
+            for c in conds:
+                dir_str = "active" if c["direction"] == ">" else "inactive"
+                cond_strs.append(f"F{c['feature']} {dir_str}")
+            rule_str = (f"  R{ri}: {' AND '.join(cond_strs)}  →  "
+                        f"prec={rule['precision']:.3f}  "
+                        f"recall={rule['recall']:.3f}  "
+                        f"n={rule['support']}")
+            ax.text(0.02, y, rule_str, transform=ax.transAxes,
+                    fontsize=_ANNOT_PT, va="top", family="monospace")
+            y -= 0.18
+
+    fig.suptitle("Boolean Composition Rules (positive-class paths)",
+                 fontsize=_TITLE_PT, y=1.01)
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+def plot_minimal_feature_curves(
+    minimal_results: dict[str, dict],
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """AUROC curve as features are added, one line per label."""
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+
+    cmap = plt.cm.tab10
+    for i, (label_name, mfs) in enumerate(minimal_results.items()):
+        curve = mfs["auroc_curve"]
+        if not curve:
+            continue
+        ax.plot(range(1, len(curve) + 1), curve,
+                marker="o", markersize=4, linewidth=1.5,
+                color=cmap(i % 10), label=f"{label_name} (n={mfs['n_features_needed']})")
+
+    ax.set_xlabel("Number of features", fontsize=_LABEL_PT)
+    ax.set_ylabel("AUROC", fontsize=_LABEL_PT)
+    ax.set_title("Minimal Feature Set: AUROC vs Feature Count", fontsize=_TITLE_PT)
+    ax.axhline(0.5, color="gray", ls="--", lw=0.7, alpha=0.5)
+    ax.legend(fontsize=_ANNOT_PT, loc="lower right")
+    ax.grid(True, alpha=0.3)
+    ax.tick_params(labelsize=_TICK_PT)
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+def plot_temporal_enrichment(
+    temporal_results: list[dict],
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """Scatter of early vs late activation fraction per feature."""
+    if not temporal_results:
+        return
+
+    early = np.array([t["early_activation_frac"] for t in temporal_results])
+    late = np.array([t["late_activation_frac"] for t in temporal_results])
+    time_corr = np.array([abs(t["time_corr"]) for t in temporal_results])
+    feat_idx = [t["feature_idx"] for t in temporal_results]
+
+    fig, ax = plt.subplots(figsize=(6, 5.5))
+    sc = ax.scatter(early, late, c=time_corr, cmap="viridis",
+                    s=20, alpha=0.7, edgecolors="white", linewidths=0.3)
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.8, pad=0.02)
+    cbar.set_label("|time_corr|", fontsize=_ANNOT_PT)
+
+    # Diagonal reference
+    lim_max = max(early.max(), late.max()) * 1.1
+    ax.plot([0, lim_max], [0, lim_max], "k--", lw=0.7, alpha=0.4)
+
+    # Annotate outliers (far from diagonal)
+    diff = np.abs(late - early)
+    outlier_idx = np.argsort(diff)[-5:]
+    for oi in outlier_idx:
+        if diff[oi] > 0.02:
+            ax.annotate(f"F{feat_idx[oi]}", (early[oi], late[oi]),
+                        fontsize=_ANNOT_PT, xytext=(4, 4),
+                        textcoords="offset points")
+
+    ax.set_xlabel("Early activation fraction (Q1 times)", fontsize=_LABEL_PT)
+    ax.set_ylabel("Late activation fraction (Q4 times)", fontsize=_LABEL_PT)
+    ax.set_title("Temporal Enrichment: Early vs Late Activation", fontsize=_TITLE_PT)
+    ax.tick_params(labelsize=_TICK_PT)
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+# =========================================================================
+# Compositional decomposition plots
+# =========================================================================
+
+def plot_residual_curves(
+    decomposition: dict[str, dict],
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """Residual (1 - coverage) vs number of SAE features per label.
+
+    Parameters
+    ----------
+    decomposition : {label_name: {"principal_angles": [...], "n_features_needed": int, "residual": float}}
+    """
+    cmap = plt.cm.tab10
+    fig, ax = plt.subplots(figsize=(6, 4))
+
+    for i, (label_name, decomp) in enumerate(sorted(decomposition.items())):
+        angles = decomp["principal_angles"]
+        if not angles:
+            continue
+        residuals = [1.0 - a for a in angles]
+        x = list(range(1, len(residuals) + 1))
+        color = cmap(i % 10)
+        ax.plot(x, residuals, "o-", markersize=4, color=color,
+                label=label_name, linewidth=1.5)
+
+    ax.set_xlabel("Number of SAE features", fontsize=_LABEL_PT)
+    ax.set_ylabel("Residual  (1 − coverage)", fontsize=_LABEL_PT)
+    ax.set_title("Compositional Decomposition: Residual vs Features", fontsize=_TITLE_PT)
+    ax.axhline(0.2, color="gray", linestyle="--", linewidth=0.8, alpha=0.6)
+    ax.set_ylim(bottom=-0.02)
+    ax.legend(fontsize=_ANNOT_PT, loc="upper right")
+    ax.tick_params(labelsize=_TICK_PT)
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+def plot_label_alignment_heatmap(
+    alignment_matrix: np.ndarray,
+    label_names: list[str],
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """Heatmap of mean principal-angle cosine between label subspaces.
+
+    Parameters
+    ----------
+    alignment_matrix : (n_labels, n_labels) symmetric, diagonal = 1.0
+    label_names      : row/column labels
+    """
+    n = len(label_names)
+    fig, ax = plt.subplots(figsize=(max(4, n * 0.7), max(4, n * 0.6)))
+    im = ax.imshow(alignment_matrix, cmap="YlGnBu", vmin=0, vmax=1, aspect="auto")
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(label_names, rotation=45, ha="right", fontsize=_TICK_PT)
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(label_names, fontsize=_TICK_PT)
+
+    # Annotate cells
+    for i in range(n):
+        for j in range(n):
+            val = alignment_matrix[i, j]
+            color = "white" if val > 0.6 else "black"
+            ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                    fontsize=_ANNOT_PT, color=color)
+
+    ax.set_title("Label Subspace Alignment", fontsize=_TITLE_PT)
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+    cbar.set_label("Mean cos(principal angle)", fontsize=_ANNOT_PT)
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+def plot_feature_label_table(
+    decomposition: dict[str, dict],
+    feature_cards: list[dict] | None = None,
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """Text table mapping each label → selected SAE features → content labels.
+
+    Parameters
+    ----------
+    decomposition : {label_name: {"selected_features": [int, ...], ...}}
+    feature_cards : list of dicts from inspect_sae_feature_content (optional)
+    """
+    # Build feature → content label lookup
+    card_lookup: dict[int, str] = {}
+    if feature_cards:
+        for card in feature_cards:
+            idx = card["feature_idx"]
+            label = None
+            enriched = card.get("top_enriched_icd", [])
+            if enriched:
+                label = enriched[0].get("code", "")
+            if not label:
+                enriched_meds = card.get("top_enriched_meds", [])
+                if enriched_meds:
+                    label = enriched_meds[0].get("med", "")
+            card_lookup[idx] = label or ""
+
+    sorted_labels = sorted(decomposition.keys())
+    n_rows = len(sorted_labels)
+
+    fig_height = max(2.5, n_rows * 0.45 + 0.8)
+    fig, ax = plt.subplots(figsize=(10, fig_height))
+    ax.axis("off")
+
+    # Header
+    header = ["Label", "Features (greedy order)", "Content"]
+    col_x = [0.0, 0.22, 0.55]
+
+    y = 0.95
+    for cx, h in zip(col_x, header):
+        ax.text(cx, y, h, fontsize=_LABEL_PT, fontweight="bold",
+                transform=ax.transAxes, va="top", ha="left")
+    y -= 0.04
+    ax.axhline(y=y, xmin=0.0, xmax=0.98, color="gray", linewidth=0.5,
+               transform=ax.transAxes)
+
+    row_height = 0.85 / max(n_rows, 1)
+    for i, lname in enumerate(sorted_labels):
+        decomp = decomposition[lname]
+        feats = decomp["selected_features"]
+        feat_str = ", ".join(f"F{f}" for f in feats[:8])
+        if len(feats) > 8:
+            feat_str += f" (+{len(feats)-8})"
+
+        content_parts = []
+        for f in feats[:8]:
+            cl = card_lookup.get(f, "")
+            content_parts.append(cl if cl else "-")
+        content_str = ", ".join(content_parts)
+
+        row_y = y - 0.02 - i * row_height
+        ax.text(col_x[0], row_y, lname, fontsize=_ANNOT_PT,
+                transform=ax.transAxes, va="top", ha="left")
+        ax.text(col_x[1], row_y, feat_str, fontsize=_ANNOT_PT,
+                transform=ax.transAxes, va="top", ha="left", family="monospace")
+        ax.text(col_x[2], row_y, content_str, fontsize=_ANNOT_PT,
+                transform=ax.transAxes, va="top", ha="left")
+
+    ax.set_title("Label → SAE Feature → Content Mapping", fontsize=_TITLE_PT, pad=10)
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+# =========================================================================
+# Cross-architecture comparison plots
+# =========================================================================
+
+def plot_effective_dim_comparison(
+    pca_stats_jepa: dict,
+    pca_stats_sup: dict,
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """Side-by-side bar chart of effective dimensionality metrics.
+
+    Parameters
+    ----------
+    pca_stats_jepa : dict from get_pca_stats (JEPA embeddings)
+    pca_stats_sup  : dict from get_pca_stats (supervised embeddings)
+    """
+    metrics = ["effective_dimensionality", "components_for_90pct", "components_for_95pct"]
+    labels = ["Eff. dim.", "PCs for 90%", "PCs for 95%"]
+    jepa_vals = [pca_stats_jepa.get(m, 0) for m in metrics]
+    sup_vals = [pca_stats_sup.get(m, 0) for m in metrics]
+
+    x = np.arange(len(metrics))
+    width = 0.35
+    c_jepa, c_sup = "#3B82F6", "#EF4444"
+
+    fig, ax = plt.subplots(figsize=(7, 4.5), dpi=300)
+    bars_j = ax.bar(x - width / 2, jepa_vals, width, label="JEPA",
+                    color=c_jepa, alpha=0.85, edgecolor="white", linewidth=0.4)
+    bars_s = ax.bar(x + width / 2, sup_vals, width, label="Supervised",
+                    color=c_sup, alpha=0.85, edgecolor="white", linewidth=0.4)
+
+    for bars in (bars_j, bars_s):
+        for bar in bars:
+            h = bar.get_height()
+            fmt = f"{h:.1f}" if isinstance(h, float) and h != int(h) else f"{int(h)}"
+            ax.text(bar.get_x() + bar.get_width() / 2, h + 0.3, fmt,
+                    ha="center", va="bottom", fontsize=_ANNOT_PT)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=_LABEL_PT)
+    ax.set_ylabel("Value", fontsize=_LABEL_PT)
+    ax.set_title("Effective Dimensionality: JEPA vs Supervised", fontsize=_TITLE_PT)
+    ax.legend(fontsize=_LABEL_PT, framealpha=0.85)
+    ax.tick_params(labelsize=_TICK_PT)
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+def plot_sae_overlap_histogram(
+    matched_cosines: np.ndarray,
+    cosine_threshold: float = 0.85,
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """Histogram of Hungarian-matched cosine similarities between two SAE dictionaries.
+
+    Parameters
+    ----------
+    matched_cosines   : (n_matched,) cosine similarities from Hungarian matching
+    cosine_threshold  : vertical line marking "stable" threshold
+    """
+    matched_cosines = np.asarray(matched_cosines, dtype=float)
+    frac_stable = float((matched_cosines > cosine_threshold).mean())
+    mean_cos = float(matched_cosines.mean())
+    median_cos = float(np.median(matched_cosines))
+
+    fig, ax = plt.subplots(figsize=(7, 4.5), dpi=300)
+    ax.hist(matched_cosines, bins=50, color="#3B82F6", alpha=0.8,
+            edgecolor="white", linewidth=0.4)
+    ax.axvline(cosine_threshold, color="#EF4444", ls="--", lw=1.5,
+               label=f"threshold = {cosine_threshold}")
+
+    stats_text = (f"mean = {mean_cos:.3f}\n"
+                  f"median = {median_cos:.3f}\n"
+                  f"frac > {cosine_threshold} = {frac_stable:.2%}")
+    ax.text(0.03, 0.95, stats_text, transform=ax.transAxes, fontsize=_ANNOT_PT,
+            va="top", ha="left",
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="#CBD5E1", alpha=0.9))
+
+    ax.set_xlabel("Cosine similarity", fontsize=_LABEL_PT)
+    ax.set_ylabel("Count", fontsize=_LABEL_PT)
+    ax.set_title("SAE Feature Overlap (Hungarian Matching)", fontsize=_TITLE_PT)
+    ax.legend(fontsize=_ANNOT_PT, loc="upper left", framealpha=0.85)
+    ax.tick_params(labelsize=_TICK_PT)
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+def plot_trajectory_distributions(
+    jepa_vel: np.ndarray,
+    sup_vel: np.ndarray,
+    jepa_curv: np.ndarray,
+    sup_curv: np.ndarray,
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """Overlay histograms of velocity magnitude and curvature for both architectures.
+
+    Parameters
+    ----------
+    jepa_vel, sup_vel   : flattened velocity magnitudes (NaN-safe)
+    jepa_curv, sup_curv : flattened curvature cosine angles (NaN-safe)
+    """
+    c_jepa, c_sup = "#3B82F6", "#EF4444"
+
+    def _clean(arr):
+        a = np.asarray(arr, dtype=float).ravel()
+        return a[np.isfinite(a)]
+
+    jv, sv = _clean(jepa_vel), _clean(sup_vel)
+    jc, sc = _clean(jepa_curv), _clean(sup_curv)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5), dpi=300)
+
+    # Velocity panel
+    bins_v = np.linspace(0, max(np.percentile(jv, 99), np.percentile(sv, 99)), 50)
+    ax1.hist(jv, bins=bins_v, color=c_jepa, alpha=0.55, label="JEPA",
+             edgecolor="white", linewidth=0.3, density=True)
+    ax1.hist(sv, bins=bins_v, color=c_sup, alpha=0.55, label="Supervised",
+             edgecolor="white", linewidth=0.3, density=True)
+    ax1.set_xlabel("Velocity magnitude", fontsize=_LABEL_PT)
+    ax1.set_ylabel("Density", fontsize=_LABEL_PT)
+    ax1.set_title("Velocity Distribution", fontsize=_TITLE_PT)
+    ax1.legend(fontsize=_ANNOT_PT, framealpha=0.85)
+    ax1.tick_params(labelsize=_TICK_PT)
+
+    # Curvature panel
+    bins_c = np.linspace(
+        min(np.percentile(jc, 1), np.percentile(sc, 1)),
+        max(np.percentile(jc, 99), np.percentile(sc, 99)), 50)
+    ax2.hist(jc, bins=bins_c, color=c_jepa, alpha=0.55, label="JEPA",
+             edgecolor="white", linewidth=0.3, density=True)
+    ax2.hist(sc, bins=bins_c, color=c_sup, alpha=0.55, label="Supervised",
+             edgecolor="white", linewidth=0.3, density=True)
+    ax2.set_xlabel("Curvature (cosine angle)", fontsize=_LABEL_PT)
+    ax2.set_ylabel("Density", fontsize=_LABEL_PT)
+    ax2.set_title("Curvature Distribution", fontsize=_TITLE_PT)
+    ax2.legend(fontsize=_ANNOT_PT, framealpha=0.85)
+    ax2.tick_params(labelsize=_TICK_PT)
+
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+def plot_probe_auroc_comparison(
+    probe_comparison: dict,
+    show: bool = True,
+    save_path: Path | str | None = None,
+):
+    """Grouped bar chart of prospective probe AUROC per label.
+
+    Parameters
+    ----------
+    probe_comparison : {label_name: {"jepa_traj_auroc": float,
+                                      "jepa_baseline_auroc": float,
+                                      "sup_traj_auroc": float,
+                                      "sup_baseline_auroc": float}}
+    """
+    if not probe_comparison:
+        return
+
+    label_names = sorted(probe_comparison.keys())
+    n = len(label_names)
+    bar_keys = ["jepa_traj_auroc", "jepa_baseline_auroc",
+                "sup_traj_auroc", "sup_baseline_auroc"]
+    bar_labels = ["JEPA traj.", "JEPA baseline",
+                  "Sup. traj.", "Sup. baseline"]
+    bar_colors = ["#3B82F6", "#93C5FD", "#EF4444", "#FCA5A5"]
+
+    x = np.arange(n)
+    width = 0.18
+
+    fig, ax = plt.subplots(figsize=(max(8, n * 1.8), 5), dpi=300)
+    for i, (key, lbl, color) in enumerate(zip(bar_keys, bar_labels, bar_colors)):
+        vals = [probe_comparison[ln].get(key, 0) for ln in label_names]
+        offset = (i - 1.5) * width
+        bars = ax.bar(x + offset, vals, width, label=lbl,
+                      color=color, alpha=0.85, edgecolor="white", linewidth=0.4)
+        for bar in bars:
+            h = bar.get_height()
+            if h > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, h + 0.005,
+                        f"{h:.2f}", ha="center", va="bottom", fontsize=_ANNOT_PT - 1)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(label_names, rotation=30, ha="right", fontsize=_TICK_PT)
+    ax.set_ylabel("AUROC", fontsize=_LABEL_PT)
+    ax.set_title("Prospective Probe: JEPA vs Supervised", fontsize=_TITLE_PT)
+    ax.set_ylim(0, 1.05)
+    ax.axhline(0.5, color="#94A3B8", ls=":", lw=0.8, alpha=0.6)
+    ax.legend(fontsize=_ANNOT_PT, loc="upper right", framealpha=0.85, ncol=2)
+    ax.tick_params(labelsize=_TICK_PT)
+    fig.tight_layout()
+    show_or_savefig(fig, show, save_path=save_path)
+
+
+# =========================================================================
 # 2. Multi-panel patient profile figure
 # =========================================================================
 

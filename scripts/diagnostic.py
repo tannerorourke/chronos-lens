@@ -3,7 +3,7 @@
 Unified evaluation script for all trained models (stopgrad, ema, supervised).
 
 Loads a checkpoint, extracts embeddings, and runs downstream probing tasks
-on each available latent vector.  Outputs a structured JSON and a summary
+on each available latent vector. Outputs a structured JSON and a summary
 table to stdout.
 
 Tasks
@@ -15,10 +15,10 @@ Tasks
 
 Usage
 -----
-  python -m scripts.evaluate --checkpoint experiments/stopg_42_v01/checkpoints/checkpoint_100.pt
-  python -m scripts.evaluate --checkpoint experiments/stopg_42_v01/checkpoints/checkpoint_100.pt --tasks readmit_30d,escalation
-  python -m scripts.evaluate --checkpoint experiments/stopg_42_v01/checkpoints/checkpoint_100.pt --split temporal
-  python -m scripts.evaluate --checkpoint experiments/stopg_42_v01/checkpoints/checkpoint_100.pt --eval-subset fcode
+  python -m scripts.diagnostic --exp stopg_42_v01 --checkpoint-name checkpoint_100.pt
+  python -m scripts.diagnostic --exp stopg_42_v01 --checkpoint-name checkpoint_100.pt --tasks readmit_30d,escalation
+  python -m scripts.diagnostic --exp stopg_42_v01 --checkpoint-name checkpoint_100.pt --split temporal
+  python -m scripts.diagnostic --exp stopg_42_v01 --checkpoint-name checkpoint_100.pt --eval-subset fcode
 """
 from os import environ
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -29,13 +29,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import yaml
-from torch.utils.data import DataLoader
 
-from src.training.utils.checkpoint import load_model_notrain
-from src.training.utils.datasets import (
-    MimicDataset, collate_fn,
-    SupervisedDataset, supervised_collate_fn)
+from src.training.utils.inference import load_scaffolding
 from src.analysis.eval_infra import (
     extract_jepa_embeddings, extract_supervised_embeddings,
     load_label, load_escalation_labels, compute_escalation_criterions,
@@ -48,8 +43,8 @@ from src.analysis.probing import (
     evaluate_binary_probe, evaluate_binary_probe_temporal, 
     probe_icd_blocks, probe_icd_blocks_temporal)
 from src.utils.constants import ESCALATION_CRITERIA, MODEL_PRED_VECS, ALL_TASKS
-from src.utils.io import EXPERIMENTS_DIR, load_json, load_sequences, load_sequences_dict, DATA_DIR
-from src.utils.seed import SEED, load_exp_seed, set_global_seed
+from src.utils.io import load_sequences_dict, DATA_DIR, RUNS_DIR
+from src.utils.seed import set_global_seed, load_exp_seed
 
 # =============================================================================
 # Core evaluation
@@ -253,127 +248,60 @@ def print_summary(
     print()
 
 
-# =============================================================================
-# Main
-# =============================================================================
 
-def main():
-    parser = argparse.ArgumentParser(description="Evaluate trained model on downstream tasks")
-    parser.add_argument("--model", type=str, required=True,
-                        help="model name from 'experiments' directory")
-    parser.add_argument("--checkpoint-name", type=str, required=True,
-                        help="file name of .pt checkpoint in model's checkpoints/ directory.")
-    parser.add_argument("--sequences", type=str,
-                        default=str(DATA_DIR / "sequences.jsonl"),
-                        help="Path to sequences.jsonl")
-    parser.add_argument("--output", type=str,
-                        default=None,
-                        help="Path for results JSON (default: <run_dir>/eval_results.json)")
-    parser.add_argument("--tasks", type=str,
-                        default="readmit_30d,escalation,icd_block,escalation_type",
-                        help="Comma-separated task list")
-    parser.add_argument("--split", type=str, 
-                        default="random",
-                        choices=["random", "temporal"],
-                        help="Split strategy: random (stratified CV) or temporal")
-    parser.add_argument("--eval-subset", type=str, 
-                        default="all",
-                        choices=["all", "fcode", "non_fcode"],
-                        help="Evaluate on a patient subset: fcode (F30-F39), non_fcode, or all")
-    parser.add_argument("--batch-size", type=int, 
-                        default=64,
-                        help="Batch size for embedding extraction")
-    args = parser.parse_args()
+def build_diagnostic_ctx(args: argparse.Namespace, tasks: list[str]) -> dict:
+    """Step [2]: gather everything run_tasks needs - model, loader, dataset,
+    extracted embeddings, label lookups, and (optionally) temporal-split masks.
 
-    tasks = [t.strip() for t in args.tasks.split(",")]
-    for t in tasks:
-        if t not in ALL_TASKS:
-            raise ValueError(f"Unknown task '{t}'. Available: {ALL_TASKS}")
-
-    # -- Resolve experiment directory -----------------------------------------
-    run_dir = EXPERIMENTS_DIR / args.model
-    sequences_path = Path(args.sequences)
-    config_path = run_dir / "config.yaml"
-    vocab_path = run_dir / "vocab.json"
-    
-    loaded_seed = load_exp_seed(run_dir)
-    set_global_seed(loaded_seed)
-    
-    
-
-    if not config_path.exists():
-        raise FileNotFoundError(f"config.yaml not found in {run_dir}")
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    data_params = config["data"]
-
-    # -- Load model -----------------------------------------------------------
+    Rebuilds the model + loader from the run's frozen artifacts via
+    ``load_scaffolding`` (inference only; no training), then extracts embeddings
+    and applies the eval-subset filter and temporal split. Returns a context dict.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt_path = Path(args.checkpoint)
-    
-    model, checkpoint = load_model_notrain(ckpt_path, device, restore_rng=False)
-    model_params = checkpoint["model_params"]
-    architecture = model_params.get("architecture", "")
+
+    # -- Rebuild model + loader from the run's frozen artifacts ---------------
+    model, loader, run_dir, (checkpoint, config), (ds, is_supervised, label_key, _vocab) = \
+        load_scaffolding(args.checkpoint_name, args.exp, device)
+
+    architecture = config["model"]["architecture"]
     epoch = checkpoint.get("epoch", "")
-    assert architecture != "" and epoch != "", \
-        ValueError("Checkpoint missing 'architecture' or 'epoch'")
-    is_supervised = architecture == "supervised"
+    ckpt_path = run_dir / "checkpoints" / args.checkpoint_name
 
     print(f"  Model:        {architecture}")
-    print(f"  Checkpoint:   {ckpt_path}")
+    print(f"  Run dir:      {run_dir}")
     print(f"  Epoch:        {epoch}")
     print(f"  Device:       {device}")
     print(f"  Tasks:        {tasks}")
     print(f"  Split:        {args.split}")
     print(f"  Eval subset:  {args.eval_subset}")
+    print(f"  Samples:      {len(ds)}")
 
-    # -- Load vocab & build dataset -------------------------------------------
-    n_patients = data_params.get("n_patients", None)
-    patients = load_sequences(n=n_patients)
-
-    vocab = load_json(vocab_path)
-    assert vocab is not None, f"vocab.json not found at {vocab_path}"
-
-    if is_supervised:
-        dataset = SupervisedDataset(patients, vocab, data_params, pad_idx=0)
-        loader = DataLoader(
-            dataset, batch_size=args.batch_size,
-            shuffle=False, collate_fn=supervised_collate_fn, drop_last=False,
-            num_workers=0)
-    else:
-        dataset = MimicDataset(patients, vocab, data_params, pad_idx=0)
-        loader = DataLoader(
-            dataset, batch_size=args.batch_size,
-            shuffle=False, collate_fn=collate_fn, drop_last=False,
-            num_workers=0)
-
-    print(f"  Samples:      {len(dataset)}")
-
-    # -- Extract embeddings --
+    # -- Extract embeddings ---------------------------------------------------
     print("\n  Extracting embeddings...")
     if is_supervised:
         vecs = extract_supervised_embeddings(model, loader, device)
+        print(f"  z_enc_pooled shape: {vecs['z_enc_pooled'].shape}")
     else:
         vecs = extract_jepa_embeddings(model, loader, device)
         vecs = compute_derived_vectors(vecs)
-
-    if is_supervised:
-        print(f"  z_enc_pooled shape: {vecs['z_enc_pooled'].shape}")
-    else:
         print(f"  z_pred shape:       {vecs['z_pred'].shape}")
         print(f"  z_enc_pooled shape: {vecs['z_enc_pooled'].shape}")
 
-    # -- Load patient data for label lookups --
+    # -- Label lookup source --------------------------------------------------
+    sequences_path = DATA_DIR / "sequences.jsonl"
     patients_dict = load_sequences_dict(sequences_path)
 
-    # -- Filter by eval subset --
+    # -- Filter by eval subset (apply mask to every per-sample array) ---------
     if args.eval_subset != "all":
         subset_mask = compute_subset_mask(patients_dict, vecs["subject_ids"], args.eval_subset)
-        vecs = { k: v[subset_mask] for k, v in vecs.items() 
-                 if k in ["z_enc_pooled", "z_encs", "z_pred", "z_target"] and v is not None
-               }
+        vecs = {
+            k: (v[subset_mask]
+                if isinstance(v, np.ndarray) and v.shape[:1] == subset_mask.shape
+                else v)
+            for k, v in vecs.items()
+        }
 
-    # -- Compute temporal split --
+    # -- Temporal split masks -------------------------------------------------
     temporal_masks = None
     if args.split == "temporal":
         print("\n  Computing temporal split...")
@@ -384,32 +312,87 @@ def main():
         print(f"  Train:        {int(train_mask.sum())} samples")
         print(f"  Test:         {int(test_mask.sum())} samples")
 
-    # -- Run evaluation tasks --
+    return {
+        "vecs": vecs,
+        "patients_dict": patients_dict,
+        "sequences_path": sequences_path,
+        "is_supervised": is_supervised,
+        "architecture": architecture,
+        "epoch": epoch,
+        "seed": config["meta"]["seed"],
+        "ckpt_path": ckpt_path,
+        "run_dir": run_dir,
+        "temporal_masks": temporal_masks,
+        "config": config,
+    }
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+def main():
+    # [1] -- Read args --------------------------------------------------------
+    parser = argparse.ArgumentParser(description="Evaluate trained model on downstream tasks")
+    parser.add_argument("--exp", type=str, required=True,
+                        help="run-id from the runs/ directory")
+    parser.add_argument("--checkpoint-name", type=str, required=True,
+                        help="file name of .pt checkpoint in the run's checkpoints/ directory.")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Path for results JSON (default: <run_dir>/eval_results.json)")
+    parser.add_argument("--tasks", type=str,
+                        default="readmit_30d,escalation,icd_block,escalation_type",
+                        help="Comma-separated task list")
+    parser.add_argument("--split", type=str,
+                        default="random",
+                        choices=["random", "temporal"],
+                        help="Split strategy: random (stratified CV) or temporal")
+    parser.add_argument("--eval-subset", type=str,
+                        default="all",
+                        choices=["all", "fcode", "non_fcode"],
+                        help="Evaluate on a patient subset: fcode (F30-F39), non_fcode, or all")
+    parser.add_argument("--batch-size", type=int,
+                        default=64,
+                        help="Batch size for embedding extraction")
+    args = parser.parse_args()
+
+    tasks = [t.strip() for t in args.tasks.split(",")]
+    for t in tasks:
+        if t not in ALL_TASKS:
+            raise ValueError(f"Unknown task '{t}'. Available: {ALL_TASKS}")
+
+    # Seed at entry from the run's frozen config (load_scaffolding re-applies the
+    # same seed when it rebuilds the model; setting it here makes the run's
+    # determinism explicit and independent of that call order).
+    set_global_seed(load_exp_seed(RUNS_DIR / args.exp))
+
+    # [2] -- Gather context (model, loader, embeddings, masks) ----------------
+    ctx = build_diagnostic_ctx(args, tasks)
+
+    # [3] -- Run evaluation tasks ---------------------------------------------
     print("\n  Running evaluation tasks...")
     task_results = run_tasks(
-        vecs, patients_dict, sequences_path, tasks, is_supervised,
-        split=args.split, temporal_masks=temporal_masks)
+        ctx["vecs"], ctx["patients_dict"], ctx["sequences_path"], tasks,
+        ctx["is_supervised"], split=args.split, temporal_masks=ctx["temporal_masks"])
 
-    # -- Build output --
+    # [4] -- Print summary + save JSON ----------------------------------------
+    print_summary(ctx["architecture"], task_results,
+                  split=args.split, eval_subset=args.eval_subset)
+
     output = {
-        "model": architecture,
-        "checkpoint": str(ckpt_path),
-        "epoch": epoch,
-        "seed": loaded_seed,
+        "model": ctx["architecture"],
+        "checkpoint": str(ctx["ckpt_path"]),
+        "epoch": ctx["epoch"],
+        "seed": ctx["seed"],
         "split": args.split,
         "eval_subset": args.eval_subset,
-        "n_samples": len(vecs["subject_ids"]),
-        "n_patients": len(np.unique(vecs["subject_ids"])),
-        "modality": data_params.get("modality", "all"),
+        "n_samples": len(ctx["vecs"]["subject_ids"]),
+        "n_patients": len(np.unique(ctx["vecs"]["subject_ids"])),
+        "modality": ctx["config"]["data"].get("modality", "all"),
         "tasks": task_results,
     }
 
-    # -- Print summary table --
-    print_summary(architecture, task_results,
-                  split=args.split, eval_subset=args.eval_subset)
-
-    # -- Save JSON --
-    output_path = Path(args.output) if args.output else run_dir / "eval_results.json"
+    output_path = Path(args.output) if args.output else ctx["run_dir"] / "eval_results.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(output, f, indent=2, default=float)

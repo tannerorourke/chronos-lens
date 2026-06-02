@@ -27,7 +27,7 @@ from src.training.utils.datasets import MimicDataset, build_vocab
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import TrainingLogger
 from src.training.utils.checkpoint import build_model, save_checkpoint, sync_model_checkpoint
-from src.utils.io import load_sequences, EXPERIMENTS_DIR
+from src.utils.io import load_sequences, RUNS_DIR
 
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:
@@ -63,7 +63,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- build sequences, vocab, dataset, loader
     patients = load_sequences(n=n_patients)
     print(f"Patients: {len(patients)}")
-    vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=False)
+    vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=True)  # freeze vocab in run dir
     print(f"Vocab: {len(vocab)} tokens")
 
     ds = MimicDataset(patients, vocab, data_params, pad_idx=0, max_enc=max_encounters,
@@ -81,15 +81,19 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     assert type(model) == SupervisedTransformer
 
     # --- init optimizer / scheduler
+    # ipe is optimizer-steps-per-epoch (one scheduler.step() per accumulation
+    # group) so the warmup/cosine schedule is sized in the same units it's
+    # stepped in - otherwise accum_steps>1 stretches warmup and the cosine
+    # never reaches min_lr.
     optimizer, scheduler = init_optimizers(
         model, opt_params,
-        ipe=len(loader),
+        ipe=len(loader) // accum_steps,
         num_epochs=epochs)
 
     start_epoch, global_step, loss_history = 1, 1, []
     # --- load checkpoint?
     if params.get("resume_from"):
-        ckpt_path = EXPERIMENTS_DIR / params["resume_from"]
+        ckpt_path = RUNS_DIR / params["resume_from"]
         model, model_params, optimizer, scheduler, start_epoch, global_step, loss_history = \
             sync_model_checkpoint(
                 model,
@@ -111,8 +115,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         if use_bfloat16 and device.type == "cuda"
         else nullcontext())
     
-    # --- early stopping
-    b_state, b_loss, b_epoch, since_imprv = None, 0.0, 0, 0
+    # --- early stopping (b_loss=inf so the first finite epoch loss wins)
+    b_state, b_loss, b_epoch, since_imprv = None, float("inf"), 0, 0
     
     logger = TrainingLogger(
         run_dir, arch=model_params["architecture"],
@@ -120,6 +124,10 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         global_step=global_step,
         loss_history=loss_history,
         total_epochs=epochs,
+        log_tb=meta_p.get("log_tb", False),
+        log_csv=meta_p.get("log_csv", False),
+        log_wandb=meta_p.get("log_wandb", False),
+        sync_s3=meta_p.get("sync_s3", False),
     )
 
     for epoch in range(start_epoch, epochs + 1):
@@ -148,9 +156,10 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 scheduler.step()
             
             # --- stat logging
-            history.append((loss.item(), len(batch)))
-            logger.log_batch(loss.item(), len(batch))
-            logger.update_embed_health_supv(z_enc_pooled, batch_dev["ctx_pad_mask"])
+            bs = batch_dev["tgt_times"].shape[0]
+            history.append((loss.item(), bs))
+            logger.log_batch(loss.item(), bs)
+            logger.update_embed_health_supv(z_enc_pooled)
 
         # --------------------------------------------------------------
         model.eval()
@@ -160,12 +169,12 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             "loss_p_batch": t_loss / len(history),
             "loss_p_sample": t_loss / sum([l[1] for l in history])
         }
-        logger.log_epoch(lr=optimizer.param_groups[0]["lr"], **metrics)
+        logger.log_epoch(lr=optimizer.param_groups[0]["lr"], model=model, **metrics)
         
         # --- early stopping
         if t_loss < b_loss:
             b_loss, b_epoch = t_loss, epoch
-            b_state = model.state_dict()
+            b_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             since_imprv = 0
         else:
             since_imprv += 1
@@ -176,6 +185,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                                 optimizer, scheduler,
                                 b_epoch, logger.global_step, logger.loss_history,
                                 ckpt_dir)
+                logger.sync()  # non-blocking S3 sync of the run dir
                 b_state, b_epoch = None, 0
             else:
                 print(f"  Checked for recent best - none to save.")

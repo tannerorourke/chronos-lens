@@ -230,7 +230,7 @@ class EmbeddingWriterSupv:
         if not self._active:
             return
 
-        z_enc, _ = data # (B, C, D)
+        z_enc, _ = data # z_enc: per-encounter (B, C, D)
         z_enc_np    = z_enc.detach().cpu().half().numpy()
         mask_np     = mask_pos.detach().cpu().float().numpy()
         pad_np      = ctx_pad_mask.detach().cpu().float().numpy()

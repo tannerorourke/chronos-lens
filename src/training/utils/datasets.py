@@ -122,9 +122,11 @@ class MimicDataset(Dataset):
 
         # Determine maximum context length and max tokens-per-encounter
         max_ctx = max(len(item["context"]) for item in batch)
+        # Always include the target encounter: tgt_tokens is written for every
+        # sample (even supervised, where it's unused), so max_tok must cover it
+        # or a target longer than all context encounters overflows the buffer.
         all_enc_lens = [len(enc) for item in batch for enc in item["context"]]
-        if not self.is_supervised:
-            all_enc_lens += [len(item["target"]) for item in batch]
+        all_enc_lens += [len(item["target"]) for item in batch]
         max_tok = max(all_enc_lens) if all_enc_lens else 1
 
         # [b, c, t] - token t for context encounter c in batch b
@@ -156,6 +158,9 @@ class MimicDataset(Dataset):
         tgt_times   = torch.tensor([sample["target_time"] for sample in batch], dtype=torch.long)
         subject_ids = [item["subject_id"] for item in batch]
         
+        assert (ctx_pad_mask.int().diff(dim=1) >= 0).all(), \
+            "interior padding detected in ctx_pad_mask"
+        
         batch_out = {
             "ctx_tokens":        ctx_tokens,
             "ctx_tok_mask":      ctx_tok_mask,
@@ -165,10 +170,13 @@ class MimicDataset(Dataset):
             "tgt_tok_mask":      tgt_tok_mask,
             "tgt_times":         tgt_times,
             "subject_ids":       subject_ids,
+            "mask_pos":          torch.tensor([len(s["context"]) for s in batch],
+                                              dtype=torch.long),
         }
-        
+
         if self.is_supervised:
             labels = torch.tensor([sample["label"] for sample in batch], dtype=torch.long)
+            batch_out["labels"] = labels
             batch_out["tgt_labels"] = labels
 
         return batch_out

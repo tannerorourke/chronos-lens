@@ -42,8 +42,10 @@ def _restore_rng(checkpoint: dict) -> None:
 
 
 def load_exp_seed(exp_dir: Path) -> int:
-    """Read seed from an experiment's config.yaml (meta.seed), fallback to DEFAULT_SEED."""
-    cfg_path = Path(exp_dir) / "config.yaml"
+    """Read meta.seed from an experiment's config. Accepts either flat input config 
+    file (experiments/<run-id>.yaml) or a run dir holding a frozen config.yaml."""
+    exp_dir = Path(exp_dir)
+    cfg_path = exp_dir if exp_dir.suffix == ".yaml" else exp_dir / "config.yaml"
     with open(cfg_path) as f:
         params = yaml.safe_load(f)
     seed = params.get("meta", {}).get("seed", -1)

@@ -32,7 +32,7 @@ from src.training.utils.checkpoint import (
     build_model,
     save_checkpoint, sync_model_checkpoint,
     count_improvement)
-from src.utils.io import load_sequences, EXPERIMENTS_DIR
+from src.utils.io import load_sequences, RUNS_DIR
 
 
 def main(params: Dict, run_dir: Path, device: torch.device) -> None:
@@ -67,7 +67,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- build sequences, vocab, dataset, loader
     patients = load_sequences(n=n_patients)
     print(f"Patients: {len(patients)}")
-    vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=False)
+    vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=True)  # freeze vocab in run dir
     print(f"Vocab: {len(vocab)} tokens")
 
     ds = MimicDataset(
@@ -87,7 +87,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         pin_memory=pin_memory,
         num_workers=num_workers, 
         persistent_workers=num_workers > 0)
-    del patients, ds, sampler; gc.collect()
+    # keep the sampler for re-seeding per epoch
+    del patients, ds; gc.collect()
 
     # --- model
     model_params = params["model"]
@@ -98,13 +99,13 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- init optimizer / scheduler
     optimizer, scheduler = init_optimizers(
         model, opt_params,
-        ipe=len(loader),
+        ipe=len(loader) // accum_steps,
         num_epochs=epochs)
-    
+
     start_epoch, start_step, loss_history = 1, 1, []
     # --- load checkpoint?
     if params.get("resume_from"):
-        ckpt_path = EXPERIMENTS_DIR / params["resume_from"]
+        ckpt_path = RUNS_DIR / params["resume_from"]
         model, model_params, optimizer, scheduler, start_epoch, start_step, loss_history = \
             sync_model_checkpoint(
                 model,
@@ -138,13 +139,19 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         epoch=start_epoch - 1,
         global_step=start_step,
         loss_history=loss_history,
-        total_epochs=epochs)
+        total_epochs=epochs,
+        log_tb=meta_p.get("log_tb", False),
+        log_csv=meta_p.get("log_csv", False),
+        log_wandb=meta_p.get("log_wandb", False),
+        sync_s3=meta_p.get("sync_s3", False))
     drift_mon = DriftMonitor()
-    drift_mon.set_probe(next(iter(loader)))
-    
+    probe_batch = next(iter(loader))
+    drift_mon.set_probe(probe_batch)
+
     vic_reg_loss = VicRegLoss(**params["vicreg"])
     
     for epoch in range(start_epoch, epochs + 1):
+        sampler.set_epoch(epoch) # re-seed noisy buckets per epoch
         model.train()
         logger.lap()
         n_batches = 0
@@ -171,7 +178,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 scheduler.step()
 
             # --- stat logging
-            logger.log_batch(loss.item(), len(batch))
+            logger.log_batch(loss.item(), batch_dev["tgt_times"].shape[0])
             logger.update_embed_health(z_enc, z_pred, z_target, batch_dev["ctx_pad_mask"])
             n_batches += 1
 
@@ -179,7 +186,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         model.eval()
         drift_log = drift_mon.compute(model, device)
         vr_log = vic_reg_loss.compute_accum(n_batches)
-        ep_metrics = logger.log_epoch(lr=optimizer.param_groups[0]["lr"], **drift_log, **vr_log)
+        ep_metrics = logger.log_epoch(lr=optimizer.param_groups[0]["lr"], model=model, **drift_log, **vr_log)
 
         # --- early stopping
         pem = ep_metrics["pred_err_l2_mean"]
@@ -222,10 +229,11 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                         b_epoch, logger.global_step,
                         logger.loss_history,
                         ckpt_dir)
+                    logger.sync()  # non-blocking S3 sync of the run dir
                     b_state, b_epoch = None, 0
                 else:
                     print(f"  Checked for recent best - none to save.")
-        
+
         # -- stop conditions
         no_enc_imp = not is_descending and since_zem_imprv >= 75
         pred_imprv_ends = (is_descending and epoch >= 30 and 

@@ -16,7 +16,7 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from src.models.sae import SparseAutoencoder
 from src.utils.io import load_embeddings, save_json
-from src.analysis.plotting import plot_loss_curve
+from src.training.utils.logging import plot_loss_curve
 
 # =========================================================================
 # Training
@@ -64,7 +64,7 @@ def main(
     n_features  = params["n_features"]
     top_k       = params["top_k"]
     epochs      = params["epochs"]
-    lr          = params["lr"]
+    lr          = float(params["lr"])
     batch_size  = params["batch_size"]
 
     # --- Dataset
@@ -174,8 +174,8 @@ def save_sae_results(
 
     # --- Loss curve
     loss_fig_path = output_dir / "sae_loss_curve.png"
-    plot_loss_curve(loss_history, show=False, save=True, fig_dir=output_dir,
-                    fig_name="sae_loss_curve", title="SAE Training Loss")
+    plot_loss_curve(loss_history, save_path=output_dir / "sae_loss_curve",
+                    title="SAE Training Loss")
 
     # --- Summary JSON
     summary_path = output_dir / "sae_summary.json"

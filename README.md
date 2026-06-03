@@ -34,12 +34,22 @@ Core questions:
 ## Usage
 
 ### Setup
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu126
-pip install -e .
-```
 
-Requires Python $\geq$ 3.12.
+Requires  Python $\geq$ 3.12:
+```bash
+# uv
+uv venv && source .venv/bin/activate          # Windows: .venv\Scripts\activate
+uv pip install -r requirements.txt            # pinned env (PyTorch CUDA 12.4) + editable install
+
+# pip
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# flexible
+python -m venv .venv && source .venv/bin/activate # or: uv venv && source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install -e . # or: uv pip install -e .
+```
 
 ### Data extraction
 
@@ -62,10 +72,11 @@ python -m scripts.extract_mimic
 
 ### Training
 
-A single flat config, `experiments/<run-id>.yaml`, fully defines a run: the core model architecture (stop-gradient JEPA, EMA JEPA, or supervised baseline), its training hyperparameters, and the downstream SAE settings. A run first trains the encoder/predictor (or supervised baseline), then optionally fits a sparse autoencoder post-hoc on a chosen target vector. All checkpoints, logs, and extracted embeddings are written out-of-repo to `artifacts/training-runs/<run-id>/`.
+Runs are configured via `experiments/<run-id>.yaml` (one flat config file per run). It defines the core model architecture (stop-gradient JEPA, EMA JEPA, or supervised baseline), its training hyperparameters, and the downstream SAE settings. A run first trains the encoder/predictor (or supervised baseline), then optionally fits a sparse autoencoder post-hoc on a chosen target vector.
+- All checkpoints, logs, and extracted embeddings are written out-of-repo to `artifacts/training-runs/<run-id>/`.
+- If a run directory already has checkpoints/logs, a new versioned directory is created automatically (e.g., `stopg_42_v01` -> `stopg_42_v01_v01-1`).
 
 ```bash
-# Core model — `model` is the default subcommand, so it can be omitted.
 # Stop-gradient JEPA
 python -m scripts.train --exp stopg_42_v01
 
@@ -79,11 +90,9 @@ python -m scripts.train --exp supervised_v01
 python -m scripts.train --exp stopg_42_v01 sae --target z_enc --embeddings embeddings_40.npz
 ```
 
-Runs are configured via `experiments/<run-id>.yaml` (one flat config file per run). If a run directory already has checkpoints/logs, a new versioned directory is created automatically (e.g., `stopg_42_v01` -> `stopg_42_v01_v01-1`).
-
 ### Analysis
 
-Analysis is consolidated into a handful of `scripts/analyze_*.py` entry points (trajectory geometry, label-first SAE features, subspace composition, and JEPA-vs-supervised comparison), each running a family of related analyses over a trained run's frozen embeddings. Every script reads from `artifacts/training-runs/<run-id>/` and writes structured results back under `results/` as paired `.json` (scalars) and `.npz` (large arrays) files.
+Analysis is consolidated into a handful of `scripts/analyze_*.py` entry points. Every script reads from `artifacts/training-runs/<run-id>/` and writes .json (scalars) and .npz files back under `results/`.
 
 ```bash
 # Per-run lenses — each reads/writes artifacts/training-runs/<run-id>/results/

@@ -1,4 +1,4 @@
-# sg-vr_256_42.yaml  (embed_dim 256, stopgrad, seed 42) - generated from plan §1/§5
+# (embed_dim 256, stopgrad, seed 42)
 model:
     embed_dim: 256
     encoder_heads: 8
@@ -43,7 +43,7 @@ meta:
     description: "Stop-grad JEPA + VICReg, embed_dim 256, seed 42 (scaling ladder)"
     resume_from: null
     save_cycle: 5
-    sync_s3: false     # flip true on the Lambda node (see plan §7)
+    sync_s3: true      # S3 archive always on - embeddings/vectors get huge at scale; flag kept as off-switch
 sae_config:
     z_enc:
         n_features: 1024      # ~4x embed_dim

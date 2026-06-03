@@ -20,10 +20,10 @@ from sklearn.metrics import (
     roc_auc_score, brier_score_loss)
 
 from src.models.jepa_ema import JEPA_EMA
-from src.analysis.eval_infra import (
+from src.infra.vector_computation import (
     flatten_valid_encounters,
-    pool_to_patients,
-    compute_all_metrics)
+    select_terminal_by_patient)
+from src.infra.metrics import compute_all_metrics
 from src.utils.seed import SEED
 
 # =============================================================================
@@ -38,14 +38,15 @@ def extract_layer_representations(
     """Extract per-layer transformer representations via forward hooks.
 
     Registers a forward hook on each transformer encoder layer to capture
-    intermediate outputs.  Both layer outputs and the final z_enc are
-    mean-pooled over valid context positions.
+    intermediate outputs. Both layer outputs and the final z_enc are reduced to
+    the recency encounter ``z_enc[k-1]`` (the most-recent context slot), not a
+    context mean - the recency point is the consistent per-encounter vector.
 
     Returns
     -------
     dict with:
-        layer_0 .. layer_{n-1} : (N, D) mean-pooled per-layer outputs
-        final                  : (N, D) mean-pooled z_enc from model output
+        layer_0 .. layer_{n-1} : (N, D) recency per-layer outputs
+        final                  : (N, D) recency z_enc from model output
         subject_ids            : (N,) str array
         mask_pos               : (N,) int array - target encounter index per
                                  sample, for aligning causal per-encounter labels
@@ -69,42 +70,43 @@ def extract_layer_representations(
 
     all_final = []
     all_sids = []
-    all_pad_masks = []
     all_mask_pos = []
+
+    def _recency(seq: torch.Tensor, mpos: torch.Tensor) -> torch.Tensor:
+        # (B, C, D) -> (B, D): the last valid context slot, index mask_pos-1
+        rows = torch.arange(seq.size(0))
+        return seq[rows, (mpos - 1).long()]
 
     try:
         with torch.no_grad():
             for batch in loader:
                 batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
-                z_enc, z_pred, z_target = model(batch)
-                # z_enc: (B, C, D) - mean-pool over valid context positions
-                ctx_pad_mask = batch["ctx_pad_mask"]  # (B, C) True=padding
-                valid = (~ctx_pad_mask).float().unsqueeze(-1)  # (B, C, 1)
-                z_enc_pooled = (
-                    (z_enc * valid).sum(dim=1) /
-                    valid.sum(dim=1).clamp(min=1.0)
-                )  # (B, D)
-                all_final.append(z_enc_pooled.cpu())
+                # out[0] is the per-encounter z_enc (B,C,D) for every arch
+                # (JEPA: (z_enc, z_pred, z_target); supervised: (z_enc, logits)).
+                out = model(batch)
+                z_enc = out[0]
+                mpos = batch["mask_pos"].cpu()
+                if z_enc.dim() == 3:
+                    z_rec = _recency(z_enc.cpu(), mpos)   # slice recency -> (B, D)
+                else:
+                    z_rec = z_enc.cpu()                   # defensive: already (B, D)
+                all_final.append(z_rec)
                 all_sids.extend(batch["subject_ids"])
-                all_pad_masks.append(ctx_pad_mask.cpu())
-                all_mask_pos.append(batch["mask_pos"].cpu())
+                all_mask_pos.append(mpos)
     finally:
         for h in hooks:
             h.remove()
 
-    # Mean-pool each layer's sequence outputs using padding masks. Pool per
-    # batch *before* concatenating: context length C varies across batches, so
-    # the raw (B, C, D) tensors can't be stacked, but the pooled (B, D) can.
+    # Slice each layer's recency encounter per batch *before* concatenating:
+    # context length C varies across batches, so raw (B, C, D) tensors can't be
+    # stacked, but the recency (B, D) slices can.
     result = {}
     for i in range(n_layers):
-        pooled_batches = []
-        for layer_seqs, pad_mask in zip(hook_outputs[i], all_pad_masks):
-            layer_seqs = layer_seqs.cpu()               # (B, C, D)
-            valid = (~pad_mask).float().unsqueeze(-1)    # (B, C, 1)
-            pooled = (layer_seqs * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1.0)
-            pooled_batches.append(pooled)               # (B, D)
-        result[f"layer_{i}"] = torch.cat(pooled_batches, dim=0).numpy()
+        rec_batches = []
+        for layer_seqs, mpos in zip(hook_outputs[i], all_mask_pos):
+            rec_batches.append(_recency(layer_seqs.cpu(), mpos))   # (B, D)
+        result[f"layer_{i}"] = torch.cat(rec_batches, dim=0).numpy()
 
     result["final"] = torch.cat(all_final, dim=0).numpy()
     result["subject_ids"] = np.array(all_sids, dtype=str)
@@ -122,29 +124,37 @@ def probe_vectors(
     vectors: dict[str, np.ndarray],
     labels: np.ndarray,
     subject_ids: np.ndarray,
-    pool_to_patient: bool = False,
+    to_patient: bool = False,
+    mask_pos: np.ndarray | None = None,
     n_splits: int = 5,
 ) -> dict[str, dict]:
     """ Generic binary probe across named vectors.
 
     Parameters
     ----------
-    vectors         : named (N, D) arrays to probe
-    labels          : (N,) binary labels
-    subject_ids     : (N,) patient IDs
-    pool_to_patient : if True, mean-pool vectors per patient before probing
-                      (prevents data leakage for patient-level labels with
-                      multiple mask positions per patient)
-    n_splits        : number of stratified CV folds
+    vectors     : named (N, D) arrays to probe
+    labels      : (N,) binary labels
+    subject_ids : (N,) patient IDs
+    to_patient  : if True, reduce to one row per patient (their terminal sample,
+                  largest mask_pos) before probing - prevents data leakage for
+                  patient-level labels with multiple mask positions per patient.
+                  Requires ``mask_pos``.
+    mask_pos    : (N,) target encounter index per sample; required when
+                  ``to_patient`` is True.
+    n_splits    : number of stratified CV folds
 
     Returns
     -------
     dict mapping vector name -> evaluate_binary_probe metrics dict
     """
+    if to_patient and mask_pos is None:
+        raise ValueError("probe_vectors(to_patient=True) requires mask_pos")
+
     results = {}
     for name, emb in vectors.items():
-        if pool_to_patient:
-            emb_p, unique_ids = pool_to_patients(emb, subject_ids)
+        if to_patient:
+            emb_p, _ = select_terminal_by_patient(emb, subject_ids, mask_pos)
+            # patient labels are constant per patient -> first occurrence suffices
             _, first_idx = np.unique(np.asarray(subject_ids, dtype=str), return_index=True)
             labels_p = labels[first_idx]
             results[name] = evaluate_binary_probe(emb_p, labels_p, n_splits=n_splits)

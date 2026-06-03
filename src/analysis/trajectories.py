@@ -40,21 +40,20 @@ from src.utils.seed import SEED
 # =============================================================================
 
 def extract_trajectories(
-    z_enc_pooled: np.ndarray,
+    z_sample: np.ndarray,
     subject_ids: np.ndarray,
     mask_pos: np.ndarray,
     times: np.ndarray | None = None,
 ) -> dict:
     """Group sample-level embeddings into per-patient temporal trajectories.
 
-    Each sample (subject_id, mask_pos) represents the patient's pooled
-    encoder state at a given encounter window position.
-    Grouping by patient and sorting by mask_pos ascending recovers the
-    trajectory through z_enc space.
+    Each sample (subject_id, mask_pos) contributes one encounter point (the
+    recency vector z_enc[k-1]); grouping by patient and sorting by mask_pos
+    ascending recovers the patient's trajectory through z_enc space.
 
     Parameters
     ----------
-    z_enc_pooled : (N, D) pooled encoder output per sample
+    z_sample : (N, D) per-sample encounter vector (recency z_enc[k-1])
     subject_ids  : (N,) patient identifier per sample
     mask_pos     : (N,) encounter index per sample (int-castable)
     times        : (N,) optional float, days-since-first-admit per sample.
@@ -71,7 +70,7 @@ def extract_trajectories(
     """
     subject_ids = np.asarray(subject_ids, dtype=str)
     mask_pos = np.asarray(mask_pos, dtype=int)
-    D = z_enc_pooled.shape[1]
+    D = z_sample.shape[1]
     has_times = times is not None
     if has_times:
         times = np.asarray(times, dtype=float)
@@ -91,13 +90,13 @@ def extract_trajectories(
         patient_groups[sid].sort(key=lambda x: x[0])
         T_max = max(T_max, len(patient_groups[sid]))
 
-    trajectories = np.zeros((P, T_max, D), dtype=z_enc_pooled.dtype)
+    trajectories = np.zeros((P, T_max, D), dtype=z_sample.dtype)
     validity_mask = np.zeros((P, T_max), dtype=bool)
     time_mat = np.zeros((P, T_max), dtype=np.float64) if has_times else None
 
     for p_idx, sid in enumerate(unique_ids):
         for t, (_, sample_idx) in enumerate(patient_groups[sid]):
-            trajectories[p_idx, t] = z_enc_pooled[sample_idx]
+            trajectories[p_idx, t] = z_sample[sample_idx]
             validity_mask[p_idx, t] = True
             if has_times:
                 time_mat[p_idx, t] = times[sample_idx]

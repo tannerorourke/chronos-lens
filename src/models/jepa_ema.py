@@ -1,3 +1,15 @@
+"""
+EMA-based Joint Embedding Predictive Architecture.
+
+Composes a context encoder (online), a transformer predictor, and an EMA
+target encoder (deepcopy of context encoder, no gradients).
+
+Components
+----------
+encoder        : EncounterEncoder - online context path (with grads)
+predictor      : Predictor - attends over (B, C, D) -> z_pred (B, D)
+target_encoder : EncounterEncoder - EMA shadow, no backprop
+"""
 import copy
 
 import torch
@@ -10,25 +22,6 @@ from src.training.utils.vicreg import Projector
 
 
 class JEPA_EMA(nn.Module):
-    """
-    EMA-based Joint Embedding Predictive Architecture.
-
-    Composes a context encoder (online), a transformer predictor, and an EMA
-    target encoder (deepcopy of context encoder, no gradients).
-
-    Components
-    ----------
-    encoder        : EncounterEncoder - online context path (with grads)
-    predictor      : Predictor - attends over (B, C, D) -> z_pred (B, D)
-    target_encoder : EncounterEncoder - EMA shadow, no backprop
-    
-    Returns
-    -------
-    z_enc: (B, D) encoded representation
-    z_pred: (B, D) predictor output
-    z_target: (B, D) EMA target encoding
-    """
-    
     def __init__(
         self,
         vocab_size: int,

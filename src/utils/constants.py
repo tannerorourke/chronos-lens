@@ -3,9 +3,8 @@ from typing import Literal
 ARCHITECTURES = Literal["ema", "stopgrad", "supervised"]
 
 MODEL_VECS          = ["z_enc", "z_pred", "z_target"]
-MODEL_PRED_VECS     = ["z_pred", "z_target", "pred_error", "z_enc_pooled"]
+MODEL_PRED_VECS     = ["z_pred", "z_target", "pred_error", "z_enc_recency"]
 SAE_TARGETS         = ["z_enc", "z_pred", "z_target", "pred_error"]
-SUPERVISED_VECTORS  = ["z_enc_pooled"]
 
 
 ALL_TASKS = ["readmit_30d", "escalation", "icd_block", "escalation_type"]

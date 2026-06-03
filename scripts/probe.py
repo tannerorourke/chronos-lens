@@ -2,10 +2,11 @@
 """
 Layer-wise linear probing sweep for signal localization.
 
-Loads a trained JEPA checkpoint, extracts mean-pooled representations at every
-transformer encoder layer (plus the final z_enc) via forward hooks, then runs a
-stratified-CV logistic-regression probe at each layer against a binary clinical
-label. Reports where prediction signal emerges through the encoder.
+Loads a trained JEPA checkpoint, extracts the recency encounter representation
+(z_enc[k-1]) at every transformer encoder layer (plus the final z_enc) via
+forward hooks, then runs a stratified-CV logistic-regression probe at each layer
+against a binary clinical label. Reports where prediction signal emerges through
+the encoder.
 
 This is an *analysis* entry point (runs locally over a run's frozen artifacts).
 It is the generic counterpart to the per-analysis probes scattered across
@@ -19,13 +20,12 @@ Usage
 
 Notes
 -----
-* JEPA only (ema / stopgrad). The sweep relies on ``model.transformer_layers``
-  and a (z_enc, z_pred, z_target) forward signature; supervised models expose
-  neither and are rejected.
-* The default label (``label_30d``) is patient-level: ``load_label`` with no
-  mask position falls back to each patient's last-encounter label, which aligns
-  with the context-pooled representations produced by the sweep. Encounter-level
-  labels would require carrying mask positions through the extraction step.
+* The sweep relies on model.transformer_layers and slices the recency encounter
+  from the per-layer encoder outputs; the supervised encoder exposes the same
+  per-layer geometry as the JEPA context encoder.
+* Labels are aligned causally to each sample's target encounter via the
+  ``mask_pos`` carried through extraction, matching the recency representations
+  the sweep produces.
 """
 from os import environ
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -35,9 +35,9 @@ from pathlib import Path
 
 import torch
 
-from src.training.utils.inference import load_scaffolding
+from src.infra.loaders import load_scaffolding
 from src.analysis.probing import extract_layer_representations, run_probing_sweep
-from src.analysis.eval_infra import load_label
+from src.infra.labels import load_label
 from src.utils.io import load_sequences_dict, save_json, RUNS_DIR
 from src.utils.seed import set_global_seed, load_exp_seed
 
@@ -64,13 +64,8 @@ def main() -> None:
     set_global_seed(load_exp_seed(RUNS_DIR / args.exp))
 
     # --- Rebuild model + loader from the run's frozen artifacts (inference only).
-    model, loader, run_dir, (_ckpt, _config), (_ds, is_supervised, _label_key, _vocab) = \
+    model, loader, run_dir, (_ckpt, _config), (_ds, _is_supervised, _label_key, _vocab) = \
         load_scaffolding(args.checkpoint_name, args.exp, device)
-
-    if is_supervised:
-        raise SystemExit(
-            "probe sweep requires a JEPA model (ema/stopgrad); supervised models "
-            "expose neither per-layer hooks nor a (z_enc, z_pred, z_target) forward.")
 
     # --- Per-layer representations (forward hooks) -> labels -> sweep.
     print("Extracting per-layer representations...")

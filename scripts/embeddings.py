@@ -7,7 +7,7 @@ pull just that one object from S3" (a single ``aws s3 cp``, never a bulk sync). 
 no ``.npz`` exists yet, they are *extracted* from a checkpoint by a forward pass.
 
 This is a training-side tool (runs on the GPU box right after training). It imports
-only ``src.training.utils.inference`` + ``src.utils.{io,s3}`` - never ``src.analysis``.
+``src.infra.{loaders,s3}`` + ``src.utils.io`` - never ``src.analysis``.
 
 Subcommands
 -----------
@@ -24,29 +24,14 @@ import subprocess
 
 import torch
 
-from src.training.utils.inference import load_scaffolding, extract_embeddings
-from src.utils.io import RUNS_DIR, _embedding_epoch
-from src.utils.s3 import ensure_local, s3_list, s3_uri, get_bucket, aws_available
+from src.infra.loaders import load_scaffolding, stream_embeddings
+from src.utils.io import RUNS_DIR, _embedding_epoch, _normalize_npz, _latest_local
+from src.infra.s3 import ensure_local, s3_list, s3_uri, get_bucket, aws_available
 
 
 # =============================================================================
 # Helpers
 # =============================================================================
-
-def _normalize_npz(name: str) -> str:
-    return name if name.endswith(".npz") else name + ".npz"
-
-
-def _latest_local(emb_dir) -> "str | None":
-    """Highest-epoch local embeddings_*.npz filename, or None."""
-    if not emb_dir.is_dir():
-        return None
-    names = [p.name for p in emb_dir.glob("embeddings_*.npz")]
-    if not names:
-        return None
-    names.sort(key=lambda n: (_embedding_epoch(n), n))
-    return names[-1]
-
 
 def _extract(run_id: str, ckpt_name: str, output_subdir: str = "embeddings") -> None:
     """Extract embeddings from a checkpoint into RUNS_DIR/<run-id>/<output_subdir>/."""
@@ -68,8 +53,8 @@ def _extract(run_id: str, ckpt_name: str, output_subdir: str = "embeddings") -> 
     use_bf16 = config["meta"]["use_bfloat16"]
     output_dir = run_dir / output_subdir
 
-    extract_embeddings(model, loader, epoch, n_total, max_ctx, embed_dim,
-                       use_bf16, is_supervised, device, output_dir)
+    stream_embeddings(model, loader, epoch, n_total, max_ctx, embed_dim,
+                      use_bf16, is_supervised, device, output_dir)
     print(f"Extracted embeddings_{epoch}.npz -> {output_dir}")
 
 

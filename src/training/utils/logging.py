@@ -140,7 +140,8 @@ class EmbeddingTracker:
         self._norm_sq_sum: float = 0.0
 
     def update(self, z: np.ndarray) -> None:
-        """z: (B, D) numpy array (already pooled if originally (B, C, D))."""
+        """z: (M, D) numpy array - per-encounter rows (flattened valid encounters)
+        for z_enc, or per-sample (B, D) for the predictor vectors."""
         B, D = z.shape
         if self._mean is None:
             self._mean = np.zeros(D, dtype=np.float64)
@@ -260,7 +261,7 @@ class TrainingLogger:
         self._wandb = self._init_wandb(log_wandb)
 
         # --- optional non-blocking S3 archive of the run dir ----------------
-        from src.utils.s3 import S3Syncer
+        from src.infra.s3 import S3Syncer
         self._syncer = S3Syncer(self._run_root, enabled=sync_s3)
 
         self._ep_start = 0.0
@@ -270,10 +271,7 @@ class TrainingLogger:
               + (" +wandb" if self._wandb else "") + (" +s3" if self._syncer.enabled else ""))
 
     def _init_wandb(self, log_wandb: bool):
-        """W&B sink, gated by the ``log_wandb`` flag (default OFF). ``wandb`` is a
-        hard dependency (imported at module top); only the *runtime* init is
-        guarded - a failed ``wandb.init`` (no API key / no network on a Lambda
-        box) must never crash a multi-hour run over telemetry."""
+        """W&B sink"""
         if not log_wandb:
             return None
         try:
@@ -338,31 +336,27 @@ class TrainingLogger:
         self._last_grad_norm = float(grad_norm)
         self.log_step_scalar("step/grad_norm", grad_norm)
 
-    def update_embed_health_supv(self, z_enc: torch.Tensor) -> None:
-        """z_enc is the already-pooled (B, D) representation the supervised
-        encoder returns (pool=True). Track it directly - no re-pooling."""
-        z_enc_np = z_enc.detach().cpu().float().numpy()  # (B, D)
-        self.embed_tracker_z_enc.update(z_enc_np)
-
     def update_embed_health(
         self,
-        z_enc:        torch.Tensor,  # (B, C, D)
-        z_pred:       torch.Tensor,  # (B, D)
-        z_target:     torch.Tensor,  # (B, D)
-        ctx_pad_mask: torch.Tensor,  # (B, C)
+        z_enc:        torch.Tensor,         # (B, C, D)
+        ctx_pad_mask: torch.Tensor,         # (B, C) True = padding
+        z_pred:       torch.Tensor = None,  # (B, D), JEPA only
+        z_target:     torch.Tensor = None,  # (B, D), JEPA only
     ) -> None:
-        # One device->host sync, shared across all three trackers.
-        z_enc_np    = z_enc.detach().cpu().float().numpy()        # (B, C, D)
+        """Track `z_enc` collapse health over the **flattened valid encounters**
+        `z_enc[~ctx_pad_mask]` - the same per-encounter population VICReg
+        regularizes - identically for every arch. JEPA additionally passes
+        `z_pred`/`z_target` for predictor-side health + the pred-error scalar.
+        """
+        z_enc_np = z_enc.detach().cpu().float().numpy()           # (B, C, D)
+        valid    = ~ctx_pad_mask.detach().cpu().bool().numpy()    # (B, C) True = real
+        self.embed_tracker_z_enc.update(z_enc_np[valid])          # (N_valid, D)
+
+        if z_pred is None or z_target is None:
+            return
+
         z_pred_np   = z_pred.detach().cpu().float().numpy()       # (B, D)
         z_target_np = z_target.detach().cpu().float().numpy()     # (B, D)
-        pad_np      = ctx_pad_mask.detach().cpu().float().numpy() # (B, C)
-
-        # Pool z_enc over valid positions
-        valid     = (pad_np == 0).astype(np.float32)              # (B, C)
-        valid_sum = valid.sum(axis=1, keepdims=True).clip(min=1)  # (B, 1)
-        z_enc_pooled = (z_enc_np * valid[..., None]).sum(axis=1) / valid_sum
-
-        self.embed_tracker_z_enc.update(z_enc_pooled)
         self.embed_tracker_z_pred.update(z_pred_np)
         self.embed_tracker_z_target.update(z_target_np)
 

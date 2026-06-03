@@ -4,10 +4,11 @@ EMA JEPA training pipeline for longitudinal patient sequences.
 
 Architecture
 ------------
-  encoder        : EncounterEncoder - online context path (with grads)
-  target_encoder : EMA copy of encoder (momentum -> 1.0), no backprop
-  predictor      : Transformer(z_enc context tokens + mask token -> z_pred)
-  loss           : smooth_l1(z_pred, z_target)  (iJEPA)
+  encoder   : EncounterEncoder - online context path (with grads)
+  target    : EMA copy of encoder (momentum ramped toward 1.0), no backprop
+  predictor : Transformer(z_enc context tokens + mask token -> z_pred)
+  loss      : cosine-sim(z_pred, z_target) + VICReg var/cov on online z_enc
+              (cosine similarity, not iJEPA's smooth-L1 regression)
 """
 from os import environ
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -39,7 +40,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- optimization
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
-    patience    = opt_params.get("patience", 8)
     ema         = opt_params["ema"]
     accum_steps = opt_params.get("accumulation_steps", 1)
     grad_clip   = opt_params.get("grad_clip", 5.0)
@@ -104,7 +104,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         num_epochs=epochs)
 
     start_epoch, start_step, loss_history = 1, 1, []
-    # --- load checkpoint?
+    # --- load checkpoint
     if params.get("resume_from"):
         ckpt_path = RUNS_DIR / params["resume_from"]
         model, model_params, optimizer, scheduler, start_epoch, start_step, loss_history = \
@@ -122,23 +122,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     def momentum_at(step: int, m0: float, m1: float) -> float:
         return m0 + (m1 - m0) * (step / total_steps)
     
-    # ------------------------------------------------------------------
-    # --- TRAINING LOOP ------------------------------------------------
-    # ------------------------------------------------------------------
-    
-    cond_autocast_ctx = (
-        torch.autocast("cuda", dtype=torch.bfloat16)
-        if use_bfloat16 and device.type == "cuda"
-        else nullcontext())
-
-    # --- early stopping: to stop the game of "cat and mouse", we need both
-    #     the encoder stalling and the pred_err stalling after peaking
-    pred_err_peak, pred_err_peak_epoch = 0.0, 0
-    is_descending = False
-    zem_high, since_zem_imprv = float("-inf"), 0
-    pem_low, since_pem_imprv = float("inf"), 0
-    b_epoch, b_state = 0, None
-    
     # --- training monitors
     logger = TrainingLogger(
         run_dir, arch=model_params["architecture"],
@@ -153,11 +136,23 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     drift_mon = DriftMonitor()
     probe_batch = next(iter(loader))
     drift_mon.set_probe(probe_batch)
+    
+    # ------------------------------------------------------------------
+    # --- TRAINING LOOP ------------------------------------------------
+    # ------------------------------------------------------------------
+
+    # --- JEPA training is a game of "cat and mouse"
+    #     "good" representations ~= encoder stalling and the pred_err stalling after peaking
+    pred_err_peak, pred_err_peak_epoch = 0.0, 0
+    is_descending = False
+    zem_high, since_zem_imprv = float("-inf"), 0
+    pem_low, since_pem_imprv = float("inf"), 0
+    b_epoch, b_state = 0, None
 
     vic_reg_loss = VicRegLoss(**params["vicreg"])
 
     for epoch in range(start_epoch, epochs + 1):
-        sampler.set_epoch(epoch)  # re-seed noisy buckets per epoch
+        sampler.set_epoch(epoch) # re-seed noisy buckets per epoch
         model.train()
         logger.lap()
         n_batches = 0
@@ -169,7 +164,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 for k, v in batch.items()
             }
 
-            with cond_autocast_ctx:
+            with torch.autocast("cuda", dtype=torch.bfloat16):
                 z_enc, z_pred, z_target = model(batch_dev)
                 loss, _ = vic_reg_loss(z_enc, z_pred, z_target, batch_dev["ctx_pad_mask"], 
                                        projector=model.projector)
@@ -191,7 +186,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
             # --- stat logging
             logger.log_batch(loss.item(), batch_dev["tgt_times"].shape[0])
-            logger.update_embed_health(z_enc, z_pred, z_target, batch_dev["ctx_pad_mask"])
+            logger.update_embed_health(z_enc, batch_dev["ctx_pad_mask"], z_pred, z_target)
             n_batches += 1
 
         # --------------------------------------------------------------
@@ -200,7 +195,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         vr_log = vic_reg_loss.compute_accum(n_batches)
         ep_metrics = logger.log_epoch(lr=optimizer.param_groups[0]["lr"], model=model, **drift_log, **vr_log)
         
-        # --- early stopping
+        # --- cherry picking best checkpoints based on logging metrics
         pem = ep_metrics["pred_err_l2_mean"]
         zem = ep_metrics["embed_z_enc_std_mean"]
         zes_min = ep_metrics["embed_z_enc_std_min"]
@@ -245,15 +240,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                     b_state, b_epoch = None, 0
                 else:
                     print(f"  Checked for recent best - none to save.")
-            
-        # -- stop conditions
-        no_enc_imp = not is_descending and since_zem_imprv >= 75
-        pred_imprv_ends = (is_descending and epoch >= 30 and 
-                           since_pem_imprv >= patience and 
-                           since_zem_imprv >= patience + 3)
-        if (no_enc_imp or pred_imprv_ends):
-            print(f"Early stopping at epoch {epoch}.")
-            break
         
 
     # ------------------------------------------------------------------

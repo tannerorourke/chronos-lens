@@ -22,7 +22,10 @@
 - patient_subject_ids: (P,) str     - unique patient IDs (from np.unique or pooling)
 
 ### Embeddings - all architectures
-- z_enc_pooled: (P, D)              - mean-pooled encoder representations per patient
+- z_enc_recency: (N, D)             - recency encounter z_enc[k-1] per sample (the
+                                      most-recent context slot; replaces the old
+                                      context mean-pool). Stacked per patient by
+                                      ascending mask_pos = the encounter trajectory.
 
 ### Embeddings - JEPA only       
 - z_encs: (N, C, D)                 - encoder output (per-encounter, padded)
@@ -40,10 +43,11 @@
                                          (accounts for mask_pos gap: positions before mask_pos
                                          are unchanged, positions >= mask_pos are shifted +1)
 
-### Patient-level pooled vectors (mean across mask positions per patient)
-- z_pred_pooled: (P, D)
-- z_target_pooled: (P, D)
-- pred_error_pooled: (P, D)
+### Patient-level vectors (terminal sample per patient - largest mask_pos, no mean)
+- z_pred: (P, D)
+- z_target: (P, D)
+- pred_error: (P, D)
+- z_enc_recency: (P, D)
 
 ### Labels - patient-level (length P, indexed by patient_subject_ids)
 - label_escalation: (P,) int

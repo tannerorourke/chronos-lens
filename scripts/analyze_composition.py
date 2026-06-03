@@ -22,11 +22,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.analysis.eval_infra import (
-    extract_jepa_embeddings, compute_derived_vectors,
-    load_escalation_labels, load_label_30d_at_k,
-    extract_icd_block_targets)
-from src.training.utils.inference import load_scaffolding
+from src.infra.loaders import load_scaffolding, extract_embeddings
+from src.infra.vector_computation import compute_derived_vectors
+from src.infra.labels import (
+    load_escalation_labels, load_label_30d_at_k, extract_icd_block_targets)
 from src.analysis.geometry import (
     label_subspace, multi_label_subspace, effective_rank_of_label)
 from src.analysis.composition import (
@@ -103,7 +102,7 @@ def main():
     else:
         model, loader, exp_dir, (ckpt, config), _ = \
             load_scaffolding(args.ckpt, args.exp, device)
-        emb = extract_jepa_embeddings(model, loader, device)
+        emb = extract_embeddings(model, loader, device)
         emb = compute_derived_vectors(emb)
         print(f"Extracted embeddings from {args.ckpt}")
 
@@ -111,13 +110,13 @@ def main():
     mask_pos = emb["mask_pos"]          # (N,)
     N = len(subject_ids)
 
-    # Use z_enc_pooled as the embedding for subspace analysis (fall back to z_pred)
-    z_enc = emb.get("z_enc_pooled")
+    # Per-sample analysis vector: the recency encounter z_enc[k-1] (fall back to z_pred)
+    z_enc = emb.get("z_enc_recency")
     if z_enc is None:
         z_enc = emb.get("z_pred")
     if z_enc is None:
         raise KeyError(
-            f"No 'z_enc_pooled' or 'z_pred' in embeddings for run '{args.exp}' "
+            f"No 'z_enc_recency' or 'z_pred' in embeddings for run '{args.exp}' "
             f"(available keys: {sorted(emb.keys())}).")
     D = z_enc.shape[1]
     print(f"z_enc: ({N}, {D})")

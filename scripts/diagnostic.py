@@ -8,7 +8,7 @@ table to stdout.
 
 Tasks
 -----
-  readmit_30d      : 30-day F-code readmission (patient-level, pooled vectors)
+  readmit_30d      : 30-day F-code readmission (patient-level, terminal sample per patient)
   escalation       : per-encounter escalation binary probe
   icd_block        : ICD-10 chapter prediction for the masked encounter
   escalation_type  : per-criterion escalation probes (6 binary probes)
@@ -30,15 +30,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.training.utils.inference import load_scaffolding
-from src.analysis.eval_infra import (
-    extract_jepa_embeddings, extract_supervised_embeddings,
+from src.infra.loaders import load_scaffolding, extract_embeddings
+from src.infra.labels import (
     load_label, load_escalation_labels, compute_escalation_criterions,
-    compute_subset_mask, 
-    compute_derived_vectors, pool_to_patients,
-    format_binary_result, 
-    compute_temporal_split, 
-    extract_icd_block_targets)
+    compute_subset_mask, compute_temporal_split, extract_icd_block_targets)
+from src.infra.vector_computation import compute_derived_vectors, select_terminal_by_patient
+from src.infra.metrics import format_binary_result
 from src.analysis.probing import (
     evaluate_binary_probe, evaluate_binary_probe_temporal, 
     probe_icd_blocks, probe_icd_blocks_temporal)
@@ -55,63 +52,62 @@ def run_tasks(
     patients_dict: dict[str, dict],
     sequences_path: Path,
     tasks: list[str],
-    is_supervised: bool,
     split: str = "random",
     temporal_masks: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> dict:
     """Run evaluation tasks on all available latent vectors.
 
-    Patient-level tasks (readmit_30d) use vectors pooled across mask
-    positions per patient to prevent data leakage.  Encounter-level tasks
-    (escalation, icd_block, escalation_type) use sample-level vectors.
+    Patient-level tasks (readmit_30d) represent each patient by their terminal
+    sample (largest mask_pos) - the latest encoded state, no mean over samples.
+    Encounter-level tasks (escalation, icd_block, escalation_type) use
+    sample-level vectors.
+
+    Architecture-agnostic: supervised carries the same per-sample ``z_enc_recency``
+    as JEPA (which additionally has z_pred/z_target/pred_error), so every model is
+    reduced and probed identically.
     """
     subject_ids = vecs["subject_ids"]
     mask_pos = vecs.get("mask_pos")
     results: dict = {}
 
-    # -- Build encounter-level vector dict --
-    if is_supervised:
-        enc_vectors = {"z_enc_pooled": vecs["z_enc_pooled"]}
-    else:
-        enc_vectors = {
-            name: vecs[name] for name in MODEL_PRED_VECS
-            if vecs.get(name) is not None
-        }
+    # -- Build encounter-level vector dict (whatever vectors are present) --
+    #    supervised -> {z_enc_recency}; JEPA -> {z_pred, z_target, pred_error, z_enc_recency}
+    enc_vectors = {
+        name: vecs[name] for name in MODEL_PRED_VECS
+        if vecs.get(name) is not None
+    }
 
-    # -- Build patient-level vector dict --
-    if is_supervised:
-        pat_vectors = {"z_enc_pooled": vecs["z_enc_pooled"]}
-        pat_ids = subject_ids  # one sample per patient already
-    else:
-        pat_vectors, pat_ids = pool_to_patients(enc_vectors, subject_ids)
-
-    # Patient-level temporal masks (computed separately from sample-level)
-    pat_temporal: tuple[np.ndarray, np.ndarray] | None = None
-    if split == "temporal":
-        pat_train, pat_test, _ = compute_temporal_split(sequences_path, pat_ids)
-        pat_temporal = (pat_train, pat_test)
+    # -- Patient-level vectors: each patient's terminal sample (largest mask_pos) --
+    pat_vectors, pat_ids = (
+        select_terminal_by_patient(enc_vectors, subject_ids, mask_pos)
+        if mask_pos is not None else (None, None)
+    )
 
     # -- readmit_30d (patient-level) --
     if "readmit_30d" in tasks:
-        labels_30d = load_label(patients_dict, pat_ids, "label_30d")
-        task_results: dict = {}
-        for vec_name, emb in pat_vectors.items():
+        if pat_vectors is None:
+            print("  [readmit_30d] skipped - requires per-sample mask positions")
+        else:
+            labels_30d = load_label(patients_dict, pat_ids, "label_30d")
+            task_results: dict = {}
+            pat_temporal: tuple[np.ndarray, np.ndarray] | None = None
             if split == "temporal":
                 pat_train, pat_test, _ = compute_temporal_split(sequences_path, pat_ids)
                 pat_temporal = (pat_train, pat_test)
-                res = evaluate_binary_probe_temporal(emb, labels_30d, 
-                                                     train_mask=pat_temporal[0], 
-                                                     test_mask=pat_temporal[1])
-            else:
-                res = evaluate_binary_probe(emb, labels_30d)
-                
-            task_results[vec_name] = format_binary_result(res)
-        results["readmit_30d"] = task_results
+            for vec_name, emb in pat_vectors.items():
+                if split == "temporal":
+                    res = evaluate_binary_probe_temporal(emb, labels_30d,
+                                                         train_mask=pat_temporal[0],
+                                                         test_mask=pat_temporal[1])
+                else:
+                    res = evaluate_binary_probe(emb, labels_30d)
+                task_results[vec_name] = format_binary_result(res)
+            results["readmit_30d"] = task_results
 
     # -- escalation (encounter-level) --
     if "escalation" in tasks:
-        if is_supervised or mask_pos is None:
-            print("  [escalation] skipped - requires JEPA model with mask positions")
+        if mask_pos is None:
+            print("  [escalation] skipped - requires per-sample mask positions")
         else:
             labels_esc = load_escalation_labels(patients_dict, subject_ids, mask_pos)
             task_results = {}
@@ -129,8 +125,8 @@ def run_tasks(
 
     # -- icd_block (encounter-level) --
     if "icd_block" in tasks:
-        if is_supervised or mask_pos is None:
-            print("  [icd_block] skipped - requires JEPA model with mask positions")
+        if mask_pos is None:
+            print("  [icd_block] skipped - requires per-sample mask positions")
         else:
             targets, chapter_names = extract_icd_block_targets(sequences_path, subject_ids, mask_pos)
             task_results = {}
@@ -154,8 +150,8 @@ def run_tasks(
 
     # -- escalation_type (encounter-level) --
     if "escalation_type" in tasks:
-        if is_supervised or mask_pos is None:
-            print("  [escalation_type] skipped - requires JEPA model with mask positions")
+        if mask_pos is None:
+            print("  [escalation_type] skipped - requires per-sample mask positions")
         else:
             criteria_labels = compute_escalation_criterions(patients_dict, subject_ids, mask_pos)
             task_results = {}
@@ -260,7 +256,7 @@ def build_diagnostic_ctx(args: argparse.Namespace, tasks: list[str]) -> dict:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # -- Rebuild model + loader from the run's frozen artifacts ---------------
-    model, loader, run_dir, (checkpoint, config), (ds, is_supervised, label_key, _vocab) = \
+    model, loader, run_dir, (checkpoint, config), (ds, _is_supervised, _label_key, _vocab) = \
         load_scaffolding(args.checkpoint_name, args.exp, device)
 
     architecture = config["model"]["architecture"]
@@ -278,14 +274,11 @@ def build_diagnostic_ctx(args: argparse.Namespace, tasks: list[str]) -> dict:
 
     # -- Extract embeddings ---------------------------------------------------
     print("\n  Extracting embeddings...")
-    if is_supervised:
-        vecs = extract_supervised_embeddings(model, loader, device)
-        print(f"  z_enc_pooled shape: {vecs['z_enc_pooled'].shape}")
-    else:
-        vecs = extract_jepa_embeddings(model, loader, device)
-        vecs = compute_derived_vectors(vecs)
-        print(f"  z_pred shape:       {vecs['z_pred'].shape}")
-        print(f"  z_enc_pooled shape: {vecs['z_enc_pooled'].shape}")
+    # Single extraction path for every arch: z_encs (N, C, D); JEPA also yields
+    # z_pred/z_target. compute_derived_vectors adds z_enc_recency (+ pred_error).
+    vecs = extract_embeddings(model, loader, device)
+    vecs = compute_derived_vectors(vecs)
+    print(f"  z_enc_recency shape: {vecs['z_enc_recency'].shape}")
 
     # -- Label lookup source --------------------------------------------------
     sequences_path = DATA_DIR / "sequences.jsonl"
@@ -316,7 +309,6 @@ def build_diagnostic_ctx(args: argparse.Namespace, tasks: list[str]) -> dict:
         "vecs": vecs,
         "patients_dict": patients_dict,
         "sequences_path": sequences_path,
-        "is_supervised": is_supervised,
         "architecture": architecture,
         "epoch": epoch,
         "seed": config["meta"]["seed"],
@@ -373,7 +365,7 @@ def main():
     print("\n  Running evaluation tasks...")
     task_results = run_tasks(
         ctx["vecs"], ctx["patients_dict"], ctx["sequences_path"], tasks,
-        ctx["is_supervised"], split=args.split, temporal_masks=ctx["temporal_masks"])
+        split=args.split, temporal_masks=ctx["temporal_masks"])
 
     # [4] -- Print summary + save JSON ----------------------------------------
     print_summary(ctx["architecture"], task_results,

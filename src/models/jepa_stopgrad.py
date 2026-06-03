@@ -1,3 +1,15 @@
+"""
+Joint Embedding Predictive Architecture with a stop-gradient on the target.
+
+Both predictor and target paths share the same encoder; the target
+path blocks gradient flow via torch.no_grad() + detach() for full symmetry.
+
+Components
+----------
+encoder   : EncounterEncoder (shared by both paths)
+predictor : Predictor - attends over (B, C, D) -> z_pred (B, D)
+"""
+    
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,24 +20,6 @@ from src.training.utils.vicreg import Projector
 
 
 class JEPAStopGrad(nn.Module):
-    """Joint Embedding Predictive Architecture with a stop-gradient variant.
-
-    Both predictor and target paths share the same encoder; the target
-    path blocks gradient flow via torch.no_grad() + detach().
-
-    Components
-    ----------
-    encoder   : EncounterEncoder (shared by both paths)
-    predictor : Predictor - attends over (B, C, D) -> z_pred (B, D)
-    
-    Returns
-    -------
-    z_enc: (B, D) encoded representation
-    z_pred: (B, D) predictor output
-    z_target: (B, D) stop-grad target
-    z_target_nograd: (B, D) stop-gradtarget (no grad)
-    """
-
     def __init__(
         self,
         vocab_size: int,
@@ -67,8 +61,7 @@ class JEPAStopGrad(nn.Module):
         self.predictor = Predictor(embed_dim,
             predictor_embed_dim, predictor_heads, predictor_depth, predictor_ffn_dim
         )
-        # No target encoder is created - predictor and target paths share the same encoder. 
-        # The target path blocks gradient flow via torch.no_grad() + detach() for full symmetry.
+        # No target encoder is created
 
     def forward(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         ctx_tokens   = batch["ctx_tokens"]   # (B, C, T_tok)
@@ -90,7 +83,7 @@ class JEPAStopGrad(nn.Module):
         
         # Target path stop-grad, for sim loss
         z_target_nograd = z_target.detach()
-
+        
         return z_enc, z_pred, z_target, z_target_nograd
 
     @property

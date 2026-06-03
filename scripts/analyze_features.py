@@ -21,11 +21,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.analysis.eval_infra import (
-    extract_jepa_embeddings, compute_derived_vectors,
-    load_escalation_labels, load_label_30d_at_k,
-    extract_icd_block_targets)
-from src.training.utils.inference import load_scaffolding
+from src.infra.loaders import load_scaffolding, extract_embeddings
+from src.infra.vector_computation import compute_derived_vectors
+from src.infra.labels import (
+    load_escalation_labels, load_label_30d_at_k, extract_icd_block_targets)
 from src.analysis.sae import (
     load_sae, extract_sae_activations,
     sae_label_enrichment, feature_label_specificity,
@@ -129,12 +128,12 @@ def _resolve_target_vec(emb: dict, sae_dir: Path) -> np.ndarray:
     if (target_key == "pred_error"
             and emb.get("z_pred") is not None and emb.get("z_target") is not None):
         return emb["z_pred"] - emb["z_target"]
-    for fallback in ("z_enc_pooled", "z_pred"):
+    for fallback in ("z_enc_recency", "z_pred"):
         if emb.get(fallback) is not None:
             return emb[fallback]
     raise KeyError(
         f"Could not resolve SAE target vector for '{sae_dir.name}': none of "
-        f"'{target_key}', 'z_enc_pooled', 'z_pred' are present in the embeddings "
+        f"'{target_key}', 'z_enc_recency', 'z_pred' are present in the embeddings "
         f"(available keys: {sorted(emb.keys())}).")
 
 
@@ -168,7 +167,7 @@ def main():
     else:
         model, loader, exp_dir, (ckpt, config), _ = \
             load_scaffolding(args.ckpt, args.exp, device)
-        emb = extract_jepa_embeddings(model, loader, device)
+        emb = extract_embeddings(model, loader, device)
         emb = compute_derived_vectors(emb)
         print(f"Extracted embeddings from {args.ckpt}")
 

@@ -24,7 +24,7 @@ from collections import Counter
 import numpy as np
 import torch
 
-from src.analysis.eval_infra import odds_ratio
+from src.infra.metrics import odds_ratio
 from src.models.sae import SparseAutoencoder
 from src.utils.io import load_sequences_dict
 from src.mimic.helper import parse_dt

@@ -21,11 +21,10 @@ import json
 import numpy as np
 import torch
 
-from src.analysis.eval_infra import (
-    extract_jepa_embeddings, compute_derived_vectors,
-    load_escalation_labels, load_label_30d_at_k,
-    extract_icd_block_targets)
-from src.training.utils.inference import load_scaffolding
+from src.infra.loaders import load_scaffolding, extract_embeddings
+from src.infra.vector_computation import compute_derived_vectors
+from src.infra.labels import (
+    load_escalation_labels, load_label_30d_at_k, extract_icd_block_targets)
 from src.analysis.trajectories import (
     extract_trajectories,
     trajectory_velocity, trajectory_temporal_velocity,
@@ -128,15 +127,15 @@ def main():
     else:
         model, loader, exp_dir, (ckpt, config), _ = \
             load_scaffolding(args.ckpt, args.exp, device)
-        emb = extract_jepa_embeddings(model, loader, device)
+        emb = extract_embeddings(model, loader, device)
         emb = compute_derived_vectors(emb)
         print(f"Extracted embeddings from {args.ckpt}")
 
-    z_enc_pooled = emb["z_enc_pooled"]     # (N, D)
+    z_enc_recency = emb["z_enc_recency"]   # (N, D) recency encounter z_enc[k-1]
     subject_ids = emb["subject_ids"]       # (N,)
     mask_pos = emb["mask_pos"]             # (N,)
 
-    N, D = z_enc_pooled.shape
+    N, D = z_enc_recency.shape
     print(f"Samples: {N}, Dim: {D}, Patients: {len(np.unique(subject_ids))}")
 
     # -- Load patient data for labels and times --------------------------------
@@ -145,7 +144,7 @@ def main():
     times = _encounter_times(patients_dict, subject_ids, mask_pos)
 
     # -- Extract trajectories --------------------------------------------------
-    traj_dict = extract_trajectories(z_enc_pooled, subject_ids, mask_pos, times=times)
+    traj_dict = extract_trajectories(z_enc_recency, subject_ids, mask_pos, times=times)
     P, T_max = traj_dict["trajectories"].shape[:2]
     print(f"Trajectories: {P} patients, T_max={T_max}")
 
@@ -187,7 +186,7 @@ def main():
     centroids: dict[str, np.ndarray] = {}
     centroid_results: dict[str, dict] = {}
     for label_name, label_vec in labels_dict.items():
-        cc = concept_centroid(z_enc_pooled, label_vec)
+        cc = concept_centroid(z_enc_recency, label_vec)
         centroids[label_name] = cc["mean"]
         centroid_results[label_name] = {
             "n_positive": cc["n_positive"],
@@ -304,7 +303,7 @@ def main():
         "label_30d_readmit": label_30d,                   # (N,)
         "subject_ids": subject_ids,                       # (N,)
         "mask_pos": mask_pos,                             # (N,)
-        "z_enc_pooled": z_enc_pooled,                     # (N, D)
+        "z_enc_recency": z_enc_recency,                   # (N, D)
     }
     npz_path = results_dir / "trajectories.npz"
     np.savez_compressed(npz_path, **npz_data)

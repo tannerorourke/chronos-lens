@@ -4,6 +4,11 @@ Same encoder architecture as the JEPA variants (EncounterEncoder), but
 trained with explicit label supervision (BCEWithLogitsLoss) instead of
 self-supervised prediction.  Provides a representation-quality baseline
 for comparing JEPA embeddings.
+
+Components
+----------
+- encoder: EncounterEncoder - identical to JEPA context path
+- classifier: nn.Linear(embed_dim, 1) - binary logit head
 """
 
 import torch
@@ -15,10 +20,6 @@ from src.models.encoder import EncounterEncoder
 class SupervisedTransformer(nn.Module):
     """Supervised encoder + linear classifier.
 
-    Components
-    ----------
-    - encoder: EncounterEncoder - identical to JEPA context path
-    - classifier: nn.Linear(embed_dim, 1) - binary logit head
     """
 
     def __init__(
@@ -47,16 +48,37 @@ class SupervisedTransformer(nn.Module):
             token_enc_heads, token_enc_depth, token_enc_ffn_dim, pad_idx=pad_idx)
         self.classifier = nn.Linear(embed_dim, 1)
 
-    def forward(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode tokens per encounter via [CLS], then encode encounter sequence."""
-        tokens   = batch["ctx_tokens"]     # (B, C, T_tok)
-        tok_mask = batch["ctx_tok_mask"]   # (B, C, T_tok)
-        pad_mask = batch["ctx_pad_mask"]   # (B, C)
-        times    = batch["ctx_times"]      # (B, C)
+    def encode(self, batch: dict) -> torch.Tensor:
+        """Per-encounter context representation ``(B, C, D)``, identical in
+        shape/semantics to the JEPA ``z_enc``; analysis/extraction uses this so
+        the supervised baseline flows through the same pipeline. (The encounter
+        encoder returns the per-encounter sequence by default - no pooling.)
+        """
+        return self.encoder(
+            batch["ctx_tokens"], batch["ctx_tok_mask"],
+            batch["ctx_times"], batch["ctx_pad_mask"])
 
-        z_enc_pooled = self.encoder(tokens, tok_mask, times, pad_mask, pool=True)
-        logits = self.classifier(z_enc_pooled).squeeze(-1)
-        return z_enc_pooled, logits
+    def forward(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode context, then classify the most recent encounter's vector.
+
+        Returns ``(z_enc, logits)`` - the per-encounter ``z_enc (B, C, D)``
+        (parallel to the JEPA forwards, exposed for embed-health/probing) and the
+        binary logits. ``mask_pos`` is the target index ``k``, so ``mask_pos - 1``
+        is the last valid context slot (context is the chronological prefix,
+        right-padded with no interior gaps).
+
+        Readout: the classifier reads the **recency vector** ``z_enc[k-1]`` - the
+        representation of the most recent context encounter - not a pooled summary.
+        This keeps the supervised baseline recency-aware and matched to the static
+        last-encounter baseline. Only the *returned* vector is the full ``z_enc``;
+        the readout itself is unchanged.
+        """
+        z_enc = self.encode(batch)                                  # (B, C, D)
+        last_idx = (batch["mask_pos"] - 1).long()                   # (B,)
+        rows = torch.arange(z_enc.size(0), device=z_enc.device)
+        z_last = z_enc[rows, last_idx]                              # (B, D) recency readout
+        logits = self.classifier(z_last).squeeze(-1)
+        return z_enc, logits
 
     @property
     def transformer_layers(self):

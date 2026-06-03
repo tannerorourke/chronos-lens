@@ -298,44 +298,6 @@ def get_model_config(
 # Embedding IO
 # ============================================================================
 
-def save_embedding_vecs(
-    model_records: dict[str, list[np.ndarray]],
-    epoch: int | None = None,
-    save_dir: Path | None = None,
-) -> dict[str, np.ndarray]:
-    records: dict[str, np.ndarray] = {}
-    for k, v in model_records.items():
-        # print(k, [a.shape for a in v[:3]])
-        if k == "subject_ids":
-            records[k] = np.array(v, dtype=str)
-        elif k in ("z_encs", "ctx_pad_mask"):
-            max_c = max(arr.shape[1] for arr in v)
-            padded = []
-            for arr in v:
-                pad_width = [(0,0)] * arr.ndim
-                pad_width[1] = (0, max_c - arr.shape[1])
-                padded.append(np.pad(arr, pad_width))
-            records[k] = np.concatenate(padded, axis=0)
-        else:
-            records[k] = np.concatenate(v, axis=0)
-    
-    if save_dir is not None:
-        ep_str = f"_{epoch}" if epoch is not None else ""
-        file = (save_dir / f"embeddings{ep_str}").with_suffix(".npz")
-        save_dict = {
-            "z_encs":      records["z_encs"],
-            "z_pred":      records["z_pred"],
-            "z_target":    records["z_target"],
-            "subject_ids": records["subject_ids"],
-            "mask_pos":    records["mask_pos"],
-        }
-        if "ctx_pad_mask" in records:
-            save_dict["ctx_pad_mask"] = records["ctx_pad_mask"]
-        np.savez(file, **save_dict)  # type: ignore[arg-type]
-        print(f"    Saved embeddings -> {file.name} (epoch {epoch})")
-
-    return records
-
 def _embedding_epoch(name: str) -> int:
     """Epoch number parsed from an ``embeddings_<N>.npz`` filename (else -1)."""
     stem = Path(name).stem  # "embeddings_40"
@@ -345,15 +307,30 @@ def _embedding_epoch(name: str) -> int:
     return -1
 
 
+def _normalize_npz(name: str) -> str:
+    return name if name.endswith(".npz") else name + ".npz"
+
+
+def _latest_local(emb_dir) -> "str | None":
+    """Highest-epoch local embeddings_*.npz filename, or None."""
+    if not emb_dir.is_dir():
+        return None
+    names = [p.name for p in emb_dir.glob("embeddings_*.npz")]
+    if not names:
+        return None
+    names.sort(key=lambda n: (_embedding_epoch(n), n))
+    return names[-1]
+
+
 def load_embeddings(model_dir, embeddings_arg=None) -> Tuple[dict, Path]:
     """Load an embeddings ``.npz`` for a run, pulling exactly one object from S3
     on demand if it isn't already local.
 
     ``model_dir`` is the run dir (``RUNS_DIR/<run-id>/``); ``run-id`` is its name.
     Embeddings that are too big to keep locally are fetched one object at a time
-    via :func:`src.utils.s3.ensure_local` (``aws s3 cp``), never a bulk sync.
+    via :func:`src.infra.s3.ensure_local` (``aws s3 cp``), never a bulk sync.
     """
-    from src.utils.s3 import ensure_local, s3_list
+    from src.infra.s3 import ensure_local, s3_list
 
     model_dir = Path(model_dir)
     run_id = model_dir.name

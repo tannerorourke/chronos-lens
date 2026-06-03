@@ -2,10 +2,6 @@
 """
 Cross-architecture comparison between JEPA and supervised embeddings.
 
-Loads embeddings from both models, matches samples by (subject_id, mask_pos),
-computes geometric, trajectory, probe, and SAE comparison metrics.
-Saves structured results to JSON + NPZ.
-
 Usage
 -----
   python -m scripts.analyze_comparison \
@@ -23,10 +19,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.analysis.eval_infra import (
-    compute_derived_vectors,
-    load_escalation_labels, load_label_30d_at_k,
-    extract_icd_block_targets)
+from src.infra.vector_computation import compute_derived_vectors
+from src.infra.labels import (
+    load_escalation_labels, load_label_30d_at_k, extract_icd_block_targets)
 from src.analysis.geometry import (
     fit_pca, get_pca_stats, linear_cka, subspace_alignment, label_subspace)
 from src.analysis.trajectories import (
@@ -201,16 +196,15 @@ def main():
     print(f"JEPA embeddings: {jepa_emb_path}")
     sup_emb, sup_emb_path = load_embeddings(sup_exp_dir, args.sup_emb)
     print(f"Supervised embeddings: {sup_emb_path}")
+    
+    jepa_emb = compute_derived_vectors(jepa_emb)
+    sup_emb = compute_derived_vectors(sup_emb)
 
-    # Derive z_enc_pooled for JEPA if needed
-    if "z_enc_pooled" not in jepa_emb:
-        jepa_emb = compute_derived_vectors(jepa_emb)
-
-    jepa_z = jepa_emb["z_enc_pooled"]          # (N_j, D)
+    jepa_z = jepa_emb["z_enc_recency"]          # (N_j, D)
     jepa_sids = jepa_emb["subject_ids"]         # (N_j,)
     jepa_mpos = jepa_emb["mask_pos"]            # (N_j,)
 
-    sup_z = sup_emb["z_enc_pooled"]             # (N_s, D)
+    sup_z = sup_emb["z_enc_recency"]            # (N_s, D)
     sup_sids = sup_emb["subject_ids"]           # (N_s,)
     sup_mpos = sup_emb["mask_pos"]              # (N_s,)
 

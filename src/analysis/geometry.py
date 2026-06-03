@@ -31,7 +31,7 @@ def marchenko_pastur_upper(n: int, p: int, trace: float) -> float:
     The number of signal eigenvalues is the number of eigenvalues above this bound.
     """
     sigma_sq = trace / p
-    gamma    = p / n
+    gamma    = float(p / n)
     return sigma_sq * (1.0 + np.sqrt(gamma)) ** 2
 
 # -----------------

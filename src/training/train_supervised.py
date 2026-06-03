@@ -34,7 +34,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- optimization
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
-    patience    = opt_params.get("patience", 8)
     accum_steps = opt_params.get("accumulation_steps", 1)
     grad_clip   = opt_params.get("grad_clip", 5.0)
 
@@ -115,7 +114,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         if use_bfloat16 and device.type == "cuda"
         else nullcontext())
     
-    # --- early stopping (b_loss=inf so the first finite epoch loss wins)
     b_state, b_loss, b_epoch, since_imprv = None, float("inf"), 0, 0
     
     logger = TrainingLogger(
@@ -143,7 +141,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             }
 
             with cond_autocast_ctx:
-                z_enc_pooled, logits = model(batch_dev)
+                z_enc, logits = model(batch_dev)
                 loss = criterion(logits, batch_dev["labels"].float())
             loss.backward()
             
@@ -159,7 +157,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
             bs = batch_dev["tgt_times"].shape[0]
             history.append((loss.item(), bs))
             logger.log_batch(loss.item(), bs)
-            logger.update_embed_health_supv(z_enc_pooled)
+            logger.update_embed_health(z_enc, batch_dev["ctx_pad_mask"])
 
         # --------------------------------------------------------------
         model.eval()
@@ -171,7 +169,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         }
         logger.log_epoch(lr=optimizer.param_groups[0]["lr"], model=model, **metrics)
         
-        # --- early stopping
+        # --- cherry picking best checkpoints based on logging metrics
         if t_loss < b_loss:
             b_loss, b_epoch = t_loss, epoch
             b_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -189,10 +187,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
                 b_state, b_epoch = None, 0
             else:
                 print(f"  Checked for recent best - none to save.")
-        
-        if since_imprv >= patience:
-            print(f"Early stopping at epoch {epoch}")
-            break
 
     # ------------------------------------------------------------------
     # --- DONE ---------------------------------------------------------

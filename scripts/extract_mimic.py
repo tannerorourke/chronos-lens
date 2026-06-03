@@ -18,10 +18,16 @@ from src.utils.io import DATA_DIR, save_json, save_metadata, load_sequences
 from src.training.utils.datasets import build_vocab
 from src.analysis.plotting import plot_pat_enc_histogram
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # optional dotenv
+except:
+    pass
+
 # =============================================================================
 # MIMIC Settings - change as needed
-BQ_PROJECT_ID = "aihc-463505"
-BQ_PROJECT_NAME = "mimic-aihc"
+BQ_PROJECT_ID = os.environ["BQ_PROJECT_ID"]
+BQ_PROJECT_NAME = os.environ["BQ_PROJECT_NAME"]
 MIMIC_BQ_DATASET = "physionet-data.mimiciv_3_1_hosp"
 # =============================================================================
 

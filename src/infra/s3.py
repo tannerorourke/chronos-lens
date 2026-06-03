@@ -22,7 +22,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
-DEFAULT_BUCKET = "chronos-ml"
+# optional .env support
+try:
+    from dotenv import load_dotenv
+    load_dotenv() 
+except:
+    pass
 
 
 # =============================================================================
@@ -30,13 +35,13 @@ DEFAULT_BUCKET = "chronos-ml"
 # =============================================================================
 
 def get_bucket() -> str | None:
-    """Configured bucket name (env ``CHRONOS_S3_BUCKET``, default ``chronos-ml``)."""
-    return os.environ.get("CHRONOS_S3_BUCKET", DEFAULT_BUCKET) or None
+    """Configured bucket name (env ``CHRONOS_S3_BUCKET``)"""
+    return os.environ["CHRONOS_S3_BUCKET"] or None
 
 
 def fetch_disabled() -> bool:
     """True when ``CHRONOS_NO_FETCH=1`` (offline / air-gapped: fail fast)."""
-    return os.environ.get("CHRONOS_NO_FETCH") == "1"
+    return os.environ["CHRONOS_NO_FETCH"] == "1"
 
 
 def aws_available() -> bool:
@@ -76,7 +81,7 @@ class S3Syncer:
         if self.enabled and not aws_available():
             self._warn("aws CLI not found on PATH")
         if self.enabled and not self.bucket:
-            self._warn("no S3 bucket configured (set CHRONOS_S3_BUCKET)")
+            self._warn("no S3 bucket configured (set S3_BUCKET)")
 
     def _warn(self, msg: str) -> None:
         if not self._warned:

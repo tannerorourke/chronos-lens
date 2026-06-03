@@ -1,5 +1,7 @@
 from typing import Literal
 
+GCP_AUTH_URL = "https://www.googleapis.com/auth/cloud-platform"
+
 ARCHITECTURES = Literal["ema", "stopgrad", "supervised"]
 
 MODEL_VECS          = ["z_enc", "z_pred", "z_target"]

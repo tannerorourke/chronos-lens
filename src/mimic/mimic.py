@@ -1,6 +1,4 @@
 """
-MIMIC-IV Patient Sequence Feature Extraction Pipeline functions
-===================================================
 Build patient-level temporal sequences from MIMIC-IV v3.1 (BigQuery).
 
 Cohort: 
@@ -32,7 +30,7 @@ ICD code processing:
 
 BigQuery auth:
   gcloud auth application-default login
-  gcloud config set project aihc-463505
+  gcloud config set project <project-id>
 """
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -43,14 +41,12 @@ import google.auth
 from google.cloud import bigquery
 
 from src.utils.io import PARQUET_DIR
-
+from src.utils.constants import GCP_AUTH_URL
 
 def _authenticate():
     print(f"Authenticating...")
     try:
-        credentials, project = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
-        )
+        credentials, project = google.auth.default(scopes=[GCP_AUTH_URL])
         assert credentials is not None, "No credentials found"
         assert project is not None, "No project found in credentials"
         

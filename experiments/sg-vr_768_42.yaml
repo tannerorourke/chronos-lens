@@ -1,0 +1,59 @@
+# sg-vr_768_42.yaml  (embed_dim 768, stopgrad, seed 42) - generated from plan §1/§5
+model:
+    embed_dim: 768
+    encoder_heads: 12
+    encoder_depth: 6
+    encoder_ffn_dim: 3072        # ~4x embed_dim
+    token_enc_heads: 6
+    token_enc_depth: 2
+    token_enc_ffn_dim: 1536      # ~2x embed_dim
+    predictor_embed_dim: 384     # ~0.5x embed_dim (bottleneck)
+    predictor_heads: 8
+    predictor_depth: 4
+    predictor_ffn_dim: 1536      # ~2x embed_dim
+    projector_dim: 3072         # ~4x embed_dim (matters to VICReg)
+    architecture: stopgrad
+optimization:
+    epochs: 75
+    warmup_epochs: 8     # ~10% of optimizer steps
+    patience: 15
+    base_lr: 2e-4
+    min_lr: 1e-5
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    grad_clip: 2.0
+vicreg:
+    sim_wt: 1.0
+    var_wt: 1.0
+    cov_wt: 0.04       # .mean()-normalized -> D-invariant; nudge up only if cov creeps at 1024
+    on_enc: True
+    on_tgt: True
+    on_pred: False
+data:
+    batch_size: 256
+    accumulation_steps: 1
+    n_patients: 0
+    max_encounters: 20
+    pin_mem: true
+    num_workers: 8
+meta:
+    seed: 42
+    use_bfloat16: True
+    tag: "sg-vr_768"
+    description: "Stop-grad JEPA + VICReg, embed_dim 768, seed 42 (scaling ladder)"
+    resume_from: null
+    save_cycle: 5
+    sync_s3: false     # flip true on the Lambda node (see plan §7)
+sae_config:
+    z_enc:
+        n_features: 3072      # ~4x embed_dim
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512
+    pred_error:
+        n_features: 3072
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512

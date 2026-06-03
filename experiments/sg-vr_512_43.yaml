@@ -1,17 +1,17 @@
-# sg-vr_256_42.yaml  (embed_dim 256, stopgrad, seed 42) - generated from plan §1/§5
+# sg-vr_512_43.yaml  (embed_dim 512, stopgrad, seed 43) - generated from plan §1/§5
 model:
-    embed_dim: 256
+    embed_dim: 512
     encoder_heads: 8
-    encoder_depth: 4
-    encoder_ffn_dim: 1024        # ~4x embed_dim
-    token_enc_heads: 2
+    encoder_depth: 6
+    encoder_ffn_dim: 2048        # ~4x embed_dim
+    token_enc_heads: 4
     token_enc_depth: 2
-    token_enc_ffn_dim: 512      # ~2x embed_dim
-    predictor_embed_dim: 128     # ~0.5x embed_dim (bottleneck)
-    predictor_heads: 4
-    predictor_depth: 3
-    predictor_ffn_dim: 512      # ~2x embed_dim
-    projector_dim: 1024         # ~4x embed_dim (matters to VICReg)
+    token_enc_ffn_dim: 1024      # ~2x embed_dim
+    predictor_embed_dim: 256     # ~0.5x embed_dim (bottleneck)
+    predictor_heads: 8
+    predictor_depth: 4
+    predictor_ffn_dim: 1024      # ~2x embed_dim
+    projector_dim: 2048         # ~4x embed_dim (matters to VICReg)
     architecture: stopgrad
 optimization:
     epochs: 75
@@ -30,29 +30,29 @@ vicreg:
     on_tgt: True
     on_pred: False
 data:
-    batch_size: 64
-    accumulation_steps: 3
+    batch_size: 256
+    accumulation_steps: 1
     n_patients: 0
     max_encounters: 20
     pin_mem: true
-    num_workers: 0
+    num_workers: 8
 meta:
-    seed: 42
+    seed: 43
     use_bfloat16: True
-    tag: "sg-vr_256"
-    description: "Stop-grad JEPA + VICReg, embed_dim 256, seed 42 (scaling ladder)"
+    tag: "sg-vr_512"
+    description: "Stop-grad JEPA + VICReg, embed_dim 512, seed 43 (scaling ladder)"
     resume_from: null
     save_cycle: 5
     sync_s3: false     # flip true on the Lambda node (see plan §7)
 sae_config:
     z_enc:
-        n_features: 1024      # ~4x embed_dim
+        n_features: 2048      # ~4x embed_dim
         top_k: 32
         epochs: 30
         lr: 1e-3
         batch_size: 512
     pred_error:
-        n_features: 1024
+        n_features: 2048
         top_k: 32
         epochs: 30
         lr: 1e-3

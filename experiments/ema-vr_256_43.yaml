@@ -1,4 +1,4 @@
-# sg-vr_256_42.yaml  (embed_dim 256, stopgrad, seed 42) - generated from plan §1/§5
+# ema-vr_256_43.yaml  (embed_dim 256, ema, seed 43) - generated from plan §1/§5
 model:
     embed_dim: 256
     encoder_heads: 8
@@ -12,7 +12,7 @@ model:
     predictor_depth: 3
     predictor_ffn_dim: 512      # ~2x embed_dim
     projector_dim: 1024         # ~4x embed_dim (matters to VICReg)
-    architecture: stopgrad
+    architecture: ema
 optimization:
     epochs: 75
     warmup_epochs: 7     # ~10% of optimizer steps
@@ -22,12 +22,13 @@ optimization:
     weight_decay: 0.05
     betas: [0.9, 0.95]
     grad_clip: 2.0
+    ema: [0.996, 0.9995]
 vicreg:
     sim_wt: 1.0
     var_wt: 1.0
     cov_wt: 0.04       # .mean()-normalized -> D-invariant; nudge up only if cov creeps at 1024
     on_enc: True
-    on_tgt: True
+    on_tgt: False
     on_pred: False
 data:
     batch_size: 64
@@ -37,10 +38,10 @@ data:
     pin_mem: true
     num_workers: 0
 meta:
-    seed: 42
+    seed: 43
     use_bfloat16: True
-    tag: "sg-vr_256"
-    description: "Stop-grad JEPA + VICReg, embed_dim 256, seed 42 (scaling ladder)"
+    tag: "ema-vr_256"
+    description: "EMA JEPA + VICReg, embed_dim 256, seed 43 (collapse ablation)"
     resume_from: null
     save_cycle: 5
     sync_s3: false     # flip true on the Lambda node (see plan §7)

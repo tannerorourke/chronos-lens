@@ -5,7 +5,6 @@ import torch
 from src.utils.io import get_model_config, init_run_dir
 from src.utils.seed import set_global_seed, load_exp_seed
 from src.utils.constants import SAE_TARGETS
-from src.utils.tensors import set_cuda_precision
 
 
 parser = argparse.ArgumentParser(description="""Training pipeline for all models""")
@@ -56,7 +55,15 @@ def main():
     else:
         set_global_seed(params["meta"]["seed"])
         if device.type == "cuda":
-            set_cuda_precision(params["meta"].get("use_bfloat16", False))
+            use_bf16 = params["meta"].get("use_bfloat16", False)
+            torch.backends.cudnn.benchmark = True
+            if use_bf16:
+                torch.backends.cudnn.allow_tf32 = True
+                torch.backends.cuda.matmul.allow_tf32 = False
+            else:
+                torch.backends.cudnn.allow_tf32 = False
+                torch.backends.cuda.matmul.allow_tf32 = False
+                torch.set_float32_matmul_precision('high')
 
         # Scaffold the run dir: mkdir + freeze config.yaml + empty notes.md.
         init_run_dir(run_dir, params)

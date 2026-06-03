@@ -78,7 +78,7 @@ def load_scaffolding(
     seed            = meta_p["seed"]
     use_bfloat16    = meta_p["use_bfloat16"]
     is_supervised   = config["model"]["architecture"] == "supervised"
-    label_key       = (meta_p.get("label_key", "label_escalation_per_enc")
+    label_key       = (meta_p.get("label_key", "label_escalation")
                        if is_supervised else None)
 
     set_global_seed(seed)

@@ -59,13 +59,16 @@ class MimicDataset(Dataset):
     """One sample per (patient, masked-encounter-index).
 
     For patient with N encounters, N-2 samples are created. patients
-    have 3 encounters minimum (see 'src/mimic). Each sample uses 
-    encounters [0..mask_pos-1] as causal context and encounter [mask_pos] 
+    have 3 encounters minimum (see 'src/mimic). Each sample uses
+    encounters [0..mask_pos-1] as causal context and encounter [mask_pos]
     as prediction target.
-    
+
     In the non-supervised case, "tgt_x" is applied to target encoder.
-    In the supervised setting, "tgt_labels" is added. and the rest
-    are used to maintain subject reference.
+    In the supervised setting the sample carries the causal per-encounter
+    label at the masked position, `{label_key}_per_enc[mask_pos]` - the same
+    label the analysis side reads (`infra.labels.load_label`), so the
+    supervised baseline trains and is evaluated on identical targets. The
+    classifier reads the recency vector `z_enc[mask_pos-1]` to predict it.
     """
 
     def __init__(
@@ -92,9 +95,16 @@ class MimicDataset(Dataset):
             if max_enc is not None:
                 encs = encs[:max_enc]
             sid    = str(p["subject_id"])
-            tokens = [encode_encounter(e, vocab, self.pad_idx, use_np_int32) 
+            tokens = [encode_encounter(e, vocab, self.pad_idx, use_np_int32)
                       for e in encs]
             times  = [e.get("days_since_first", 0) for e in encs]
+
+            if self.is_supervised:
+                # -- causal per-encounter labels, indexed by mask_pos below
+                per_enc_key = f"{self.label_key}_per_enc"
+                label_per_enc = p.get(per_enc_key)
+                assert label_per_enc is not None, \
+                    f"[MimicDataset] per-encounter label '{per_enc_key}' missing for patient {sid}"
 
             for mask_pos in range(2, len(encs)):
                 s = {
@@ -105,8 +115,9 @@ class MimicDataset(Dataset):
                     "subject_id":    sid,
                 }
                 if self.is_supervised:
-                    assert label_key in p, f"[MimicDataset] label key missing for patient: {label_key}"
-                    s["label"] = p[label_key]
+                    assert mask_pos < len(label_per_enc), \
+                        f"[MimicDataset] mask_pos {mask_pos} out of range for '{per_enc_key}' (patient {sid})"
+                    s["label"] = int(label_per_enc[mask_pos])
                 self.samples.append(s)
         self.sample_lengths = [len(s["context"]) for s in self.samples]
 

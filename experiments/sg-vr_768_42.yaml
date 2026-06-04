@@ -1,21 +1,21 @@
-# (embed_dim 768, stopgrad, seed 42)
+# embed_dim 768, stopgrad, seed 42
 model:
     embed_dim: 768
     encoder_heads: 12
     encoder_depth: 6
-    encoder_ffn_dim: 3072        # ~4x embed_dim
+    encoder_ffn_dim: 3072 # ~4x embed_dim
     token_enc_heads: 6
     token_enc_depth: 2
-    token_enc_ffn_dim: 1536      # ~2x embed_dim
-    predictor_embed_dim: 384     # ~0.5x embed_dim (bottleneck)
+    token_enc_ffn_dim: 1536 # ~2x embed_dim
+    predictor_embed_dim: 384 # ~0.5x embed_dim (bottleneck)
     predictor_heads: 8
     predictor_depth: 4
-    predictor_ffn_dim: 1536      # ~2x embed_dim
-    projector_dim: 3072         # ~4x embed_dim (matters to VICReg)
+    predictor_ffn_dim: 1536 # ~2x embed_dim
+    projector_dim: 3072 # ~4x embed_dim (matters to VICReg)
     architecture: stopgrad
 optimization:
     epochs: 75
-    warmup_epochs: 8     # ~10% of optimizer steps
+    warmup_epochs: 8 # ~10% of optimizer steps
     patience: 15
     base_lr: 2e-4
     min_lr: 1e-5
@@ -38,15 +38,14 @@ data:
     num_workers: 8
 meta:
     seed: 42
-    use_bfloat16: True
     tag: "sg-vr_768"
     description: "Stop-grad JEPA + VICReg, embed_dim 768, seed 42 (scaling ladder)"
     resume_from: null
     save_cycle: 5
-    sync_s3: true      # S3 archive always on - embeddings/vectors get huge at scale; flag kept as off-switch
+    sync_s3: true
 sae_config:
     z_enc:
-        n_features: 3072      # ~4x embed_dim
+        n_features: 3072 # ~4x embed_dim
         top_k: 32
         epochs: 30
         lr: 1e-3

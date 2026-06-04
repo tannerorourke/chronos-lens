@@ -51,9 +51,7 @@ If a helper is needed by both training and analysis, it belongs in `infra` (or `
 
 ### Imports
 
-**All imports are hard imports of declared dependencies.** Do not hide a missing package behind
-`try: import X / except ImportError: ...` and a degraded fallback. If a feature needs a package,
-add it to `pyproject.toml` `[project].dependencies`, install it, and import it normally at module top.
+**All imports are hard imports of declared dependencies.** Never hide a missing package behind `try: import X / except ImportError: ...` and a degraded fallback. If a feature needs a package, add it to `pyproject.toml` `[project].dependencies`, install it, and import it normally at module top.
 
 Three intentional exceptions - keep these:
 
@@ -65,7 +63,7 @@ To add a new dependency: add it to `chronos-lens/pyproject.toml` and `chronos-le
 
 ### Paths and run identity
 
-All output path constants are defined in `src/utils/io.py`. Never redefine them elsewhere.
+All output path constants are defined in `src/utils/io.py`. Never redefined or changed elsewhere.
 
 | Constant | Default path | Purpose |
 | --- | --- | --- |

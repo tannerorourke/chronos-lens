@@ -287,6 +287,14 @@ class TrainingLogger:
         """Trigger a (non-blocking) S3 sync of the run dir. No-op unless enabled."""
         self._syncer.sync(blocking=blocking)
 
+    def push_checkpoint(self, local_path, *, verify: bool = True) -> bool:
+        """Blocking, verified S3 push of a single irreplaceable file (checkpoint or
+        final embeddings npz) under the run root. No-op unless ``sync_s3``.
+        """
+        local_path = Path(local_path)
+        rel = local_path.relative_to(self._run_root).as_posix()
+        return self._syncer.push(rel, verify=verify)
+
     # --- Utilities
     def lap(self):
         self._ep_start = time.time()

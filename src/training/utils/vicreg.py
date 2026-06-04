@@ -30,12 +30,13 @@ class VicRegLoss(nn.Module):
     VICReg regularization loss function, following Bardes et al., 2022
     ("VICReg: Variance-Invariance-Covariance Regularization for Self-Supervised Learning").
     
-    Only the variance and covariance terms are used here - the invariance role is
-    filled by the JEPA prediction loss. Auto-accumulates per-batch VICReg loss terms.
-    
+    Invariance = MSE prediction residual (forward); variance = two-sided (std->1)
+    penalty and covariance = off-diagonal decorrelation (vicreg helper), both on the
+    projected embeddings. Auto-accumulates per-batch loss terms for epoch logging.
+
     Parameters
     ----------
-    sim_wt : scalar multiplier for the similarity term
+    sim_wt : scalar multiplier for the invariance (MSE prediction residual) term
     var_wt : scalar multiplier for the variance (anti-collapse) term
     cov_wt : scalar multiplier for the covariance (decorrelation) term
     on_enc : bool, whether to apply VICReg regularization on z_enc
@@ -58,7 +59,7 @@ class VicRegLoss(nn.Module):
         self.var_wt = var_wt
         self.cov_wt = cov_wt
         
-        self.vicreg_accum = { "sim": 0.0 }
+        self.vicreg_accum = { "inv": 0.0, "cos_dist": 0.0 }
         if self.on_enc:
             self.vicreg_accum["var_enc"] = 0.0
             self.vicreg_accum["cov_enc"] = 0.0
@@ -91,9 +92,12 @@ class VicRegLoss(nn.Module):
             zero = z.new_tensor(0.0)
             return zero, zero, zero
 
-        # -- Var term: Per-dimension std over batch -> hinge penalty for dims with std <1
+        # -- Var term: per-dim std over batch -> two-sided penalty toward std=1.
+        #    (std-1)^2 floors collapse (std->0) AND caps runaway (std>>1); the cap is
+        #    the Phase-15 fix - a one-sided relu(1-std) hinge let the encoder satisfy
+        #    the floor by inflating scale without bound (Phase-14 magnitude runaway).
         std = torch.sqrt(z.var(dim=0) + 1e-4) # (D,)
-        var_loss = torch.mean(F.relu(1.0 - std))
+        var_loss = torch.mean((std - 1.0) ** 2)
 
         # --- Cov term: Center -> compute (D, D) covariance matrix
         z_centered = z - z.mean(dim=0)
@@ -113,16 +117,22 @@ class VicRegLoss(nn.Module):
         z_target_sg: torch.Tensor = None,
         projector: nn.Module = None
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        # -- sim term: cosine, normalized, using detached target (SG), or no grad target (EMA)
+        # -- invariance: MSE prediction residual on the raw (un-normalized) vectors,
+        #    using the detached target (SG) or no-grad target (EMA). MSE scores the
+        #    full displacement P-T incl. magnitude, so radius stays a meaningful axis
+        #    (evidence-magnitude; origin = null) - see TIMELINE Phase 15.
         tgt_for_sim = z_target_sg if z_target_sg is not None else z_target
-        
-        z_pred_n = F.normalize(z_pred, dim=-1)
-        z_tgt_n    = F.normalize(tgt_for_sim, dim=-1)
-        sim_loss = 1.0 - (z_pred_n * z_tgt_n).sum(dim=-1).mean()
-        
-        loss = (self.sim_wt * sim_loss)
-        loss_dict = { "sim": sim_loss.detach() }
-        
+        inv_loss = F.mse_loss(z_pred, tgt_for_sim)
+
+        loss = (self.sim_wt * inv_loss)
+        # -- cosine distance kept as a scale-free DIAGNOSTIC (not in the loss) so a
+        #    run shows direction- vs magnitude-learning side by side with the MSE
+        cos_dist = 1.0 - (F.normalize(z_pred, dim=-1)
+                          * F.normalize(tgt_for_sim, dim=-1)).sum(dim=-1).mean()
+        loss_dict = { "inv": inv_loss.detach(), "cos_dist": cos_dist.detach() }
+        self.vicreg_accum["inv"] += inv_loss.detach().item()
+        self.vicreg_accum["cos_dist"] += cos_dist.detach().item()
+
         if self.on_enc:
             z_enc_flat = z_enc[~ctx_pad_mask]
             

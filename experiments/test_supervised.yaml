@@ -30,7 +30,6 @@ data:
     num_workers: 0
 meta:
     seed: 42
-    use_bfloat16: False      # CPU: keep fp32
     label_key: "label_30d"   # read by loaders.load_scaffolding (meta.label_key)
     tag: "test_supervised"
     description: "Tiny local CPU smoke-test supervised baseline. Pairs with test.yaml for analyze_comparison."

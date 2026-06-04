@@ -17,6 +17,7 @@ circular import with :mod:`src.utils.io`.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -35,13 +36,13 @@ except:
 # =============================================================================
 
 def get_bucket() -> str | None:
-    """Configured bucket name (env ``CHRONOS_S3_BUCKET``)"""
-    return os.environ["CHRONOS_S3_BUCKET"] or None
+    """Configured bucket name (env ``CHRONOS_S3_BUCKET``), or None when unset."""
+    return os.environ.get("CHRONOS_S3_BUCKET") or None
 
 
 def fetch_disabled() -> bool:
     """True when ``CHRONOS_NO_FETCH=1`` (offline / air-gapped: fail fast)."""
-    return os.environ["CHRONOS_NO_FETCH"] == "1"
+    return os.environ.get("CHRONOS_NO_FETCH") == "1"
 
 
 def aws_available() -> bool:
@@ -106,6 +107,19 @@ class S3Syncer:
         except Exception as e:  # never crash a run over telemetry
             self._warn(f"sync failed ({e})")
 
+    def push(self, rel_path: str, *, verify: bool = True) -> bool:
+        """Blocking, **verified** single-object upload of ``run_dir/<rel_path>``.
+
+        Unlike :meth:`sync` (fire-and-forget bulk dir sync), this guarantees the
+        one irreplaceable object (a checkpoint or the final embeddings npz) lands
+        in S3 before returning, and confirms it. No-op (returns False) unless the
+        syncer is enabled.
+        """
+        if not self.enabled:
+            return False
+        return push_file(self.run_dir / rel_path, self.run_id, rel_path,
+                         verify=verify, bucket=self.bucket)
+
     def close(self) -> None:
         """Wait for outstanding async syncs, then do one final blocking full sync."""
         for p in self._procs:
@@ -114,6 +128,76 @@ class S3Syncer:
             except Exception:
                 pass
         self.sync(blocking=True)
+
+
+# =============================================================================
+# Blocking, verified single-object push (training -> S3)
+# =============================================================================
+
+def _verify_object(uri: str, expected_size: int) -> bool:
+    """True iff the S3 object at ``uri`` exists with ``ContentLength`` == expected."""
+    no_scheme = uri[len("s3://"):]
+    bucket, _, key = no_scheme.partition("/")
+    out = subprocess.run(
+        ["aws", "s3api", "head-object", "--bucket", bucket, "--key", key],
+        capture_output=True, text=True, check=False)
+    if out.returncode != 0:
+        return False
+    try:
+        return json.loads(out.stdout).get("ContentLength") == expected_size
+    except Exception:
+        return False
+
+
+def push_file(local_path, run_id: str, rel_path: str, *,
+              verify: bool = True, retries: int = 1, bucket: str | None = None) -> bool:
+    """Blocking upload of one file to ``s3://<bucket>/runs/<run-id>/<rel_path>``.
+
+    Checkpoints and the final embeddings npz are the only artifacts a run cannot
+    regenerate, so they get a verified push (size-checked via ``head-object``)
+    rather than the fire-and-forget bulk sync. Retries once on failure. Degrades
+    to a warn-and-continue no-op when the CLI or bucket is unavailable - archival
+    must never crash a finished run. Returns True on confirmed upload.
+    """
+    local_path = Path(local_path)
+    bucket = bucket or get_bucket()
+    if not bucket or not aws_available():
+        print(f"[push_file] skipped: aws/bucket unavailable; "
+              f"{local_path.name} stays local-only")
+        return False
+    if not local_path.exists():
+        print(f"[push_file] WARNING: {local_path} does not exist; nothing to upload")
+        return False
+
+    uri = s3_uri(run_id, rel_path, bucket)
+    size = local_path.stat().st_size
+    for attempt in range(retries + 1):
+        cp = subprocess.run(
+            ["aws", "s3", "cp", str(local_path), uri, "--only-show-errors"], check=False)
+        if cp.returncode == 0 and (not verify or _verify_object(uri, size)):
+            print(f"[push_file] uploaded {local_path.name} -> {uri}")
+            return True
+        print(f"[push_file] upload/verify failed for {uri} "
+              f"(attempt {attempt + 1}/{retries + 1})")
+    print(f"[push_file] ERROR: could not upload {local_path.name} -> {uri} "
+          f"after {retries + 1} attempts; file remains local at {local_path}")
+    return False
+
+
+def download_object(run_id: str, rel_path: str, dest) -> bool:
+    """Blocking ``aws s3 cp`` of one object to an explicit ``dest`` path (not the
+    canonical local cache). Used for transient (no-persist) fetches. Returns True
+    on success; quiet False when CLI/bucket/fetch are unavailable.
+    """
+    bucket = get_bucket()
+    if not bucket or not aws_available() or fetch_disabled():
+        return False
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    uri = s3_uri(run_id, rel_path, bucket)
+    cp = subprocess.run(
+        ["aws", "s3", "cp", uri, str(dest), "--only-show-errors"], check=False)
+    return cp.returncode == 0 and dest.exists()
 
 
 # =============================================================================

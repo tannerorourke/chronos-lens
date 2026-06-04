@@ -3,11 +3,10 @@
 #   train -> embeddings extract -> analyze_* -> SAE -> probe sweep.
 # Everything is shrunk: 32-d model, 200 patients, <=8 encounters, few epochs.
 #
-# NOTE on checkpoints: the EMA loop only saves once the predictor error has
-# peaked and started descending (train_ema.py is_descending gate). `epochs: 12`
-# + `save_cycle: 1` gives that gate room to trigger on this tiny run; if a run
-# happens not to descend, bump epochs. Supervised (test_supervised.yaml) saves
-# unconditionally and is the reliable checkpoint-producing smoke test.
+# NOTE on checkpoints: every loop now saves unconditionally - a rolling `last.pt`
+# every `save_cycle` epochs plus a preserved `checkpoint_<final_epoch>.pt` at the
+# end (no dependence on loss dynamics). The training entrypoint then always
+# extracts `embeddings_<final_epoch>.npz` from that final checkpoint.
 model:
     embed_dim: 32
     encoder_heads: 4         # must divide embed_dim
@@ -47,7 +46,6 @@ data:
     num_workers: 0
 meta:
     seed: 42
-    use_bfloat16: False      # CPU: keep fp32
     tag: "test"
     description: "Tiny local CPU smoke-test (EMA). Exercises train -> embeddings -> analyze -> SAE -> probe."
     resume_from: null
@@ -58,7 +56,7 @@ meta:
 # `python -m scripts.train --exp test sae --target <z_enc|pred_error>` locally.
 sae_config:
     z_enc:
-        n_features: 128       # ~4x embed_dim
+        n_features: 128  # ~4x embed_dim
         top_k: 8
         epochs: 2
         lr: 1e-3

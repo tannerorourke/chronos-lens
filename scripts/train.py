@@ -3,7 +3,7 @@ import argparse
 import torch
 
 from src.utils.io import get_model_config, init_run_dir
-from src.utils.seed import set_global_seed, load_exp_seed
+from src.utils.seed import set_global_seed, load_exp_seed, set_cuda_precision
 from src.utils.constants import SAE_TARGETS
 
 
@@ -37,8 +37,8 @@ sae.add_argument(
 def main():
     print("Configuring..")
     args = parser.parse_args()
-    command = args.command or "model"        # default action when no subcommand is given
-    target = getattr(args, "target", None)   # only defined under the `sae` subcommand
+    command = args.command or "model"
+    target = getattr(args, "target", None)
     # config_path: in-repo input spec (git-tracked). run_dir: out-of-repo outputs.
     config_path, run_dir, params = get_model_config(args.exp, command, target)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -48,24 +48,15 @@ def main():
     print(f"  Run dir: {run_dir}")
 
     if command == "sae":
-        # SAE operates inside an existing run dir; seed from its frozen config.
+        # SAE seeds from matching model run dir
         set_global_seed(load_exp_seed(run_dir))
         from src.training.train_sae import main as train_main
         train_main(params, run_dir, args.target, args.embeddings, device)
     else:
         set_global_seed(params["meta"]["seed"])
         if device.type == "cuda":
-            use_bf16 = params["meta"].get("use_bfloat16", False)
-            torch.backends.cudnn.benchmark = True
-            if use_bf16:
-                torch.backends.cudnn.allow_tf32 = True
-                torch.backends.cuda.matmul.allow_tf32 = False
-            else:
-                torch.backends.cudnn.allow_tf32 = False
-                torch.backends.cuda.matmul.allow_tf32 = False
-                torch.set_float32_matmul_precision('high')
+            set_cuda_precision(use_bf16=True)
 
-        # Scaffold the run dir: mkdir + freeze config.yaml + empty notes.md.
         init_run_dir(run_dir, params)
 
         arch = params["model"].get("architecture", "")

@@ -45,10 +45,11 @@ def save_checkpoint(
     epoch: int,
     global_step: int,
     loss_history: list,
-    save_dir: Path
-) -> None:
+    save_dir: Path,
+    filename: str | None = None,
+) -> Path:
     save_dir.mkdir(parents=True, exist_ok=True)
-    file = save_dir / f"checkpoint_{epoch}.pt"
+    file = save_dir / (filename or f"checkpoint_{epoch}.pt")
 
     torch.save({
         "model":        state_dict,
@@ -67,6 +68,44 @@ def save_checkpoint(
         },
     }, file)
     print(f"   Checkpoint saved: {save_dir.name}/{file.name} (epoch {epoch})")
+    return file
+
+
+def save_periodic(
+    model,
+    model_params: dict,
+    optimizer,
+    scheduler,
+    epoch: int,
+    total_epochs: int,
+    save_cycle: int | None,
+    global_step: int,
+    loss_history: list,
+    ckpt_dir: Path,
+    logger,
+) -> str | None:
+    """Save a rolling `last.pt` every `save_cycle` epochs and a preserved 
+    `checkpoint_<epoch>.pt` written on the final epoch. shared by every 
+    training loop.
+
+    Decouples persistence from training dynamics. Each write is followed by 
+    a blocking, verified S3 push via the logger (a no-op unless `sync_s3` 
+    is enabled). Returns the final-epoch checkpoint filename on the last 
+    epoch (so the orchestrator can extract embeddings from it), else None.
+    """
+    is_final = (epoch == total_epochs)
+    is_cycle = bool(save_cycle) and (epoch % save_cycle == 0)
+    if not (is_final or is_cycle):
+        return None
+
+    filename = f"checkpoint_{epoch}.pt" if is_final else "last.pt"
+    state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    path = save_checkpoint(
+        state, model_params, optimizer, scheduler,
+        epoch, global_step, loss_history, ckpt_dir, filename=filename)
+    logger.push_checkpoint(path)  # verified blocking push of the checkpoint
+    logger.sync()                 # non-blocking bulk sync of the rest (metrics/logs)
+    return filename
 
 
 def load_model_checkpoint(
@@ -76,6 +115,7 @@ def load_model_checkpoint(
     exp_dir: Path | None = None,
     ckpt_name: str | None = None
 ) -> tuple[JEPA_EMA | JEPAStopGrad | SupervisedTransformer, dict]:
+    """ Load model.eval() at a given checkpoint. """
     if path is None:
         assert exp_dir is not None and ckpt_name is not None
         path = exp_dir / "checkpoints" / ckpt_name
@@ -93,7 +133,7 @@ def load_model_checkpoint(
 
     model.eval()
     return model, checkpoint
-
+  
 
 def sync_model_checkpoint(
     model,

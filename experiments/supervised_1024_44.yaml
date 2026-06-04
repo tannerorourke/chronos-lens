@@ -1,16 +1,16 @@
-# (embed_dim 1024, supervised, seed 44)
+# embed_dim 1024, supervised, seed 44
 model:
     embed_dim: 1024
     encoder_heads: 16
     encoder_depth: 8
-    encoder_ffn_dim: 4096        # ~4x embed_dim
+    encoder_ffn_dim: 4096 # ~4x embed_dim
     token_enc_heads: 8
     token_enc_depth: 2
-    token_enc_ffn_dim: 2048      # ~2x embed_dim
+    token_enc_ffn_dim: 2048 # ~2x embed_dim
     architecture: supervised
 optimization:
     epochs: 75
-    warmup_epochs: 8     # ~10% of optimizer steps
+    warmup_epochs: 8 # ~10% of optimizer steps
     patience: 15
     base_lr: 2e-4
     min_lr: 1e-5
@@ -27,16 +27,15 @@ data:
     num_workers: 8
 meta:
     seed: 44
-    use_bfloat16: True
     label_key: "label_escalation"
     tag: "supervised_1024"
     description: "Supervised transformer baseline, embed_dim 1024, seed 44 (label_escalation)"
     resume_from: null
     save_cycle: 5
-    sync_s3: true      # S3 archive always on - embeddings/vectors get huge at scale; flag kept as off-switch
+    sync_s3: true
 sae_config:
     z_enc:
-        n_features: 4096      # ~4x embed_dim
+        n_features: 4096 # ~4x embed_dim
         top_k: 32
         epochs: 30
         lr: 1e-3

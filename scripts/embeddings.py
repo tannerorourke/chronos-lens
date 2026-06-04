@@ -21,12 +21,17 @@ Env: CHRONOS_S3_BUCKET (default chronos-ml), CHRONOS_NO_FETCH=1 to fail fast.
 """
 import argparse
 import subprocess
+import tempfile
+from pathlib import Path
 
+import numpy as np
 import torch
 
-from src.infra.loaders import load_scaffolding, stream_embeddings
+from src.infra.loaders import extract_and_write_embeddings
 from src.utils.io import RUNS_DIR, _embedding_epoch, _normalize_npz, _latest_local
-from src.infra.s3 import ensure_local, s3_list, s3_uri, get_bucket, aws_available
+from src.infra.s3 import (
+    ensure_local, s3_list, s3_uri, get_bucket, aws_available,
+    push_file, download_object)
 
 
 # =============================================================================
@@ -34,28 +39,72 @@ from src.infra.s3 import ensure_local, s3_list, s3_uri, get_bucket, aws_availabl
 # =============================================================================
 
 def _extract(run_id: str, ckpt_name: str, output_subdir: str = "embeddings") -> None:
-    """Extract embeddings from a checkpoint into RUNS_DIR/<run-id>/<output_subdir>/."""
+    """Extract embeddings from a checkpoint into RUNS_DIR/<run-id>/<output_subdir>/.
+
+    Thin CLI wrapper over :func:`src.infra.loaders.extract_and_write_embeddings`.
+    Seed is applied inside ``load_scaffolding`` (from the run's frozen meta.seed)
+    before the loader is built, so extraction order is deterministic.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # Seed is applied inside load_scaffolding (set_global_seed from the run's
-    # frozen meta.seed) before the shuffled DataLoader is built, so extraction
-    # order is deterministic. The list/fetch subcommands do no RNG work.
-    model, loader, run_dir, (checkpoint, config), (ds, is_supervised, label_key, _) = \
-        load_scaffolding(ckpt_name, run_id, device)
+    extract_and_write_embeddings(run_id, ckpt_name, device, output_subdir)
 
-    n_total = len(ds)
-    if config["data"].get("max_encounters"):
-        max_ctx = config["data"]["max_encounters"] - 1
-    else:
-        max_ctx = max(len(s["context"]) for s in ds.samples)
 
-    epoch = checkpoint["epoch"]
-    embed_dim = checkpoint["model_params"]["embed_dim"]
-    use_bf16 = config["meta"]["use_bfloat16"]
-    output_dir = run_dir / output_subdir
+def _resolve_name(run_id: str, name: str | None) -> str:
+    """Resolve an embeddings filename: normalize an explicit one, else the latest
+    available locally, else the latest in S3."""
+    if name:
+        return _normalize_npz(name)
+    latest_local = _latest_local(RUNS_DIR / run_id / "embeddings")
+    if latest_local:
+        return latest_local
+    remote = [n for n in s3_list(run_id, "embeddings") if n.endswith(".npz")]
+    if not remote:
+        raise SystemExit(
+            f"No embeddings found for run '{run_id}' (local or S3). Pass --emb, or "
+            f"`extract --ckpt <checkpoint.pt>`.")
+    remote.sort(key=lambda n: (_embedding_epoch(n), n))
+    return remote[-1]
 
-    stream_embeddings(model, loader, epoch, n_total, max_ctx, embed_dim,
-                      use_bf16, is_supervised, device, output_dir)
-    print(f"Extracted embeddings_{epoch}.npz -> {output_dir}")
+
+def fetch_embeddings(run_id: str, name: str | None = None, *, save: str = "none"):
+    """Resolve an embeddings .npz for a run under one of three persistence modes.
+
+    - ``none`` (default): return the loaded ``dict[str, np.ndarray]`` to the caller
+      without persisting a copy under the run's ``embeddings/`` dir. If a local copy
+      already exists it is read in place; otherwise the object is pulled to a temp
+      file, loaded, and the temp file is discarded.
+    - ``local``: ensure the object is in the canonical local cache
+      (``RUNS_DIR/<run-id>/embeddings/``) and return its ``Path``.
+    - ``s3``: ensure the object exists in S3 (pushing the local copy up if missing)
+      and return the local ``Path``.
+
+    The default is deliberately no-persist: embeddings can be tens of GB, so the
+    in-code analysis path that just needs the arrays should not litter local disk.
+    """
+    name = _resolve_name(run_id, name)
+    local = RUNS_DIR / run_id / "embeddings" / name
+
+    if save == "local":
+        return ensure_local(f"embeddings/{name}", run_id)
+
+    if save == "s3":
+        src = local if local.exists() else ensure_local(f"embeddings/{name}", run_id)
+        push_file(src, run_id, f"embeddings/{name}", verify=True)
+        return src
+
+    if save != "none":
+        raise ValueError(f"save must be one of none|local|s3, got '{save}'")
+
+    # none: prefer an existing local copy, else transient temp download
+    if local.exists():
+        return dict(np.load(local, allow_pickle=True))
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td) / name
+        if not download_object(run_id, f"embeddings/{name}", dest):
+            raise FileNotFoundError(
+                f"Could not fetch embeddings/{name} for run '{run_id}' from S3 "
+                f"(and no local copy). Check the bucket / aws CLI, or `list`.")
+        return dict(np.load(dest, allow_pickle=True))
 
 
 # =============================================================================
@@ -86,19 +135,13 @@ def cmd_fetch(args) -> None:
         subprocess.run(["aws", "s3", "sync", src, str(dst), "--only-show-errors"], check=False)
         return
 
-    # single object (default): check local, else cp exactly one
-    name = args.emb
-    if name is None:
-        remote = [n for n in s3_list(run_id, "embeddings") if n.endswith(".npz")]
-        if not remote:
-            raise SystemExit(
-                f"No embeddings found in S3 for run '{run_id}'. Try `list`, or pass --emb.")
-        remote.sort(key=lambda n: (_embedding_epoch(n), n))
-        name = remote[-1]
-    name = _normalize_npz(name)
-
-    path = ensure_local(f"embeddings/{name}", run_id)
-    print(f"Ready: {path}")
+    # single object: resolve under the requested persistence mode (default: none)
+    result = fetch_embeddings(run_id, args.emb, save=args.save)
+    if args.save == "none":
+        print(f"Fetched (not persisted) embeddings for '{run_id}': "
+              f"keys={list(result.keys())}. Use --save local to keep a copy on disk.")
+    else:
+        print(f"Ready ({args.save}): {result}")
 
 
 def cmd_extract(args) -> None:
@@ -163,6 +206,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help="run-id directory under RUNS_DIR")
     p_fetch.add_argument("--emb", type=str, default=None,
                          help="embeddings_<N>.npz to fetch (default: latest available)")
+    p_fetch.add_argument("--save", choices=["none", "local", "s3"], default="none",
+                         help="persistence: none=load+return (no disk copy, default); "
+                              "local=keep under embeddings/; s3=ensure object is in S3")
     p_fetch.add_argument("--all", action="store_true",
                          help="bulk-pull the entire embeddings/ folder (opt-in)")
     p_fetch.set_defaults(func=cmd_fetch)

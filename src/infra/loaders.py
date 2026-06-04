@@ -30,8 +30,7 @@ from src.models.supervised_transformer import SupervisedTransformer
 from src.training.utils.datasets import MimicDataset
 from src.training.utils.checkpoint import load_model_checkpoint
 from src.utils.io import RUNS_DIR, EXPERIMENTS_DIR, load_json, load_sequences
-from src.utils.seed import set_global_seed
-from src.utils.tensors import set_cuda_precision
+from src.utils.seed import set_global_seed, set_cuda_precision
 from src.infra.s3 import ensure_local
 
 
@@ -76,13 +75,12 @@ def load_scaffolding(
     # --- meta
     meta_p          = config["meta"]
     seed            = meta_p["seed"]
-    use_bfloat16    = meta_p["use_bfloat16"]
     is_supervised   = config["model"]["architecture"] == "supervised"
     label_key       = (meta_p.get("label_key", "label_escalation")
                        if is_supervised else None)
 
     set_global_seed(seed)
-    if device.type == "cuda": set_cuda_precision(use_bfloat16)
+    if device.type == "cuda": set_cuda_precision(use_bf16=True)
 
     # --- checkpoint (local first, else fetch the single heavy object from S3)
     local_ckpt = run_dir / "checkpoints" / ckpt_name
@@ -241,6 +239,40 @@ def stream_embeddings(
                     ctx_pad_mask=batch_dev["ctx_pad_mask"],
                     subject_ids=batch["subject_ids"],
                 )
+
+
+def extract_and_write_embeddings(
+    run_id: str,
+    ckpt_name: str,
+    device: torch.device,
+    output_subdir: str = "embeddings",
+) -> Path:
+    """Rebuild a run from a checkpoint and stream its embeddings to disk.
+
+    Reusable orchestration over :func:`load_scaffolding` + :func:`stream_embeddings`
+    (deterministic loader from the run's frozen config/seed). Shared by the
+    training entrypoint (auto-produce ``embeddings_<final_epoch>.npz`` at run end)
+    and the ``scripts.embeddings`` CLI. Returns the written ``.npz`` path.
+    """
+    model, loader, run_dir, (checkpoint, config), (ds, is_supervised, _label_key, _) = \
+        load_scaffolding(ckpt_name, run_id, device)
+
+    n_total = len(ds)
+    if config["data"].get("max_encounters"):
+        max_ctx = config["data"]["max_encounters"] - 1
+    else:
+        max_ctx = max(len(s["context"]) for s in ds.samples)
+
+    epoch = checkpoint["epoch"]
+    embed_dim = checkpoint["model_params"]["embed_dim"]
+    use_bf16 = config["meta"]["use_bfloat16"]
+    output_dir = run_dir / output_subdir
+
+    stream_embeddings(model, loader, epoch, n_total, max_ctx, embed_dim,
+                      use_bf16, is_supervised, device, output_dir)
+    out_path = output_dir / f"embeddings_{epoch}.npz"
+    print(f"Extracted {out_path.name} -> {output_dir}")
+    return out_path
 
 
 # =============================================================================

@@ -26,24 +26,25 @@ from torch.utils.data import DataLoader
 from src.models.jepa_ema import JEPA_EMA
 from src.training.utils.vicreg import VicRegLoss
 
-from src.training.utils.datasets import MimicDataset, NoisyBucketedSampler, build_vocab
+from src.training.utils.datasets import (MimicDataset, 
+                                         NoisyBucketedSampler, 
+                                         build_vocab)
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import TrainingLogger, DriftMonitor
-from src.training.utils.checkpoint import (
-    build_model,
-    save_checkpoint, sync_model_checkpoint,
-    count_improvement)
+from src.training.utils.checkpoint import (build_model,
+                                           save_periodic, 
+                                           sync_model_checkpoint)
 from src.utils.io import load_sequences, RUNS_DIR
 
 
-def main(params: Dict, run_dir: Path, device: torch.device) -> None:
+def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
     # --- optimization
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
     ema         = opt_params["ema"]
     accum_steps = opt_params.get("accumulation_steps", 1)
     grad_clip   = opt_params.get("grad_clip", 5.0)
-    assert params.get("vicreg"), "VICReg loss params not specified"
+    assert params.get("vicreg"), "VICReg loss params missing"
 
     # --- data
     data_params     = params["data"]
@@ -55,7 +56,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
 
     # --- meta
     meta_p          = params["meta"]
-    use_bfloat16    = meta_p["use_bfloat16"]
     save_cycle      = meta_p.get("save_cycle", epochs)
     m_tag           = meta_p.get("tag", None)
     m_desc          = meta_p.get("description", None)
@@ -68,7 +68,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # --- build sequences, vocab, dataset, loader
     patients = load_sequences(n=n_patients)
     print(f"Patients: {len(patients)}")
-    vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=True)  # freeze vocab in run dir
+    vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=True) # freeze vocab in run dir
     print(f"Vocab: {len(vocab)} tokens")
 
     ds = MimicDataset(
@@ -78,7 +78,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         max_enc=max_encounters)
     sampler = NoisyBucketedSampler(
         lengths=ds.sample_lengths,
-        batch_size=data_params["batch_size"],
+        batch_size=batch_size,
         shuffle=True, 
         drop_last=False,
         noise=2)
@@ -123,6 +123,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         return m0 + (m1 - m0) * (step / total_steps)
     
     # --- training monitors
+    ckpt = None
     logger = TrainingLogger(
         run_dir, arch=model_params["architecture"],
         epoch=start_epoch - 1,
@@ -140,14 +141,6 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
     # ------------------------------------------------------------------
     # --- TRAINING LOOP ------------------------------------------------
     # ------------------------------------------------------------------
-
-    # --- JEPA training is a game of "cat and mouse"
-    #     "good" representations ~= encoder stalling and the pred_err stalling after peaking
-    pred_err_peak, pred_err_peak_epoch = 0.0, 0
-    is_descending = False
-    zem_high, since_zem_imprv = float("-inf"), 0
-    pem_low, since_pem_imprv = float("inf"), 0
-    b_epoch, b_state = 0, None
 
     vic_reg_loss = VicRegLoss(**params["vicreg"])
 
@@ -195,53 +188,21 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> None:
         vr_log = vic_reg_loss.compute_accum(n_batches)
         ep_metrics = logger.log_epoch(lr=optimizer.param_groups[0]["lr"], model=model, **drift_log, **vr_log)
         
-        # --- cherry picking best checkpoints based on logging metrics
-        pem = ep_metrics["pred_err_l2_mean"]
-        zem = ep_metrics["embed_z_enc_std_mean"]
+        # --- informational collapse diagnostics
         zes_min = ep_metrics["embed_z_enc_std_min"]
         dop = ep_metrics["drift_over_pred"]
         if zes_min < 0.25:
             print(f"  WARNING: z_enc_std_min={zes_min:.4f} - possible dim collapse")
         if dop < 0.1 and zes_min < 0.4:
             print(f"  WARNING: drift_over_pred={dop:.4f} - possible partial collapse")
-        
-        # Only look for save points if prediction error is falling
-        if pem > pred_err_peak:
-            pred_err_peak, pred_err_peak_epoch = pem, epoch
-            
-        pred_down = (pem < pred_err_peak * 0.97)
-        pred_lag = (epoch > pred_err_peak_epoch + 3)
-        if not is_descending and pred_down and pred_lag:
-            is_descending = True
-            pem_low, b_epoch = pem, epoch
-            since_pem_imprv = 0
-            print(f"Predictor descending at epoch {epoch}.")
-        
-        # Track best or cycle save once prediction error peaks
-        if is_descending:
-            zem_high, since_zem_imprv, _ = \
-                count_improvement(zem, zem_high, since_zem_imprv, delta=0.003)
-            pem_low, since_pem_imprv, pem_imprvd = \
-                count_improvement(pem, pem_low, since_pem_imprv, delta=0.005)
-            if pem_imprvd:
-                b_epoch = epoch
-                b_state = { k:v.detach().cpu().clone() for k,v in model.state_dict().items() }
-            
-            # -- check for recent best, save, reset best
-            if (epoch % save_cycle == 0 or epoch == epochs):
-                if b_state is not None:
-                    save_checkpoint(
-                        b_state, model_params,
-                        optimizer, scheduler,
-                        b_epoch, logger.global_step,
-                        logger.loss_history,
-                        ckpt_dir)
-                    logger.sync()  # non-blocking S3 sync of the run dir
-                    b_state, b_epoch = None, 0
-                else:
-                    print(f"  Checked for recent best - none to save.")
-        
+
+        # --- rolling last.pt + final epoch
+        ckpt = save_periodic(
+            model, model_params, optimizer, scheduler,
+            epoch, epochs, save_cycle,
+            logger.global_step, logger.loss_history, ckpt_dir, logger) or ckpt
 
     # ------------------------------------------------------------------
     # --- DONE ---------------------------------------------------------
     logger.finalize()
+    return ckpt

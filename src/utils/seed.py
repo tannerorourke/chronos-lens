@@ -57,3 +57,20 @@ def load_exp_seed(exp_dir: Path) -> int:
 def get_rng(seed: int | None = None) -> np.random.Generator:
     """Return a fresh numpy Generator seeded with given seed or module-level SEED."""
     return np.random.default_rng(seed if seed is not None else SEED)
+  
+  
+def set_cuda_precision(use_bf16: bool) -> None:
+    """Configure CUDA matmul / cuDNN precision for a run.
+
+    bf16 runs allow TF32 in cuDNN convolutions but keep fp32 matmul accumulation;
+    fp32 runs pin TF32 off and raise matmul precision to 'high'. Single source of
+    truth for both the training entrypoint and the analysis loaders.
+    """
+    torch.backends.cudnn.benchmark = True
+    if use_bf16:
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = False
+    else:
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.set_float32_matmul_precision("high")

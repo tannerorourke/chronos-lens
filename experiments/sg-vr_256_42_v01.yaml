@@ -1,0 +1,67 @@
+# embed_dim 256, stopgrad, seed 42 - v01: VARIANCE re-aim (post reset-bug fix).
+# The "predictor losing" signal was a logging artifact (TIMELINE Phase 16); the
+# predictor tracks fine (pred_err falling, true cos~0.93). The real residual is
+# encoder variance-erosion (z_enc_std_mean 0.90->0.69, std_min~0.22). So the search
+# axis is var_wt, NOT predictor capacity: predictor settings = sg-vr_256_42 (standard);
+# var_wt overshot to confirm the two-sided term can pin std->1, then scale back.
+# Predictor warmup left OFF here to isolate var_wt as the single change.
+model:
+    embed_dim: 256
+    encoder_heads: 8
+    encoder_depth: 4
+    encoder_ffn_dim: 1024 # ~4x embed_dim
+    token_enc_heads: 2
+    token_enc_depth: 2
+    token_enc_ffn_dim: 512 # ~2x embed_dim
+    predictor_embed_dim: 128 # standard (same as sg-vr_256_42)
+    predictor_heads: 4
+    predictor_depth: 3
+    predictor_ffn_dim: 512
+    projector_dim: 1024 # ~4x embed_dim (matters to VICReg)
+    architecture: stopgrad
+optimization:
+    epochs: 35                 # variance probe length (std response visible by ~ep15)
+    warmup_epochs: 7 # LR-scheduler warmup (~10% of optimizer steps)
+    predictor_warmup_epochs: 0 # OFF - isolate var_wt; set >0 to enable predictor warmup
+    patience: 15
+    base_lr: 3e-4
+    min_lr: 1e-5
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    grad_clip: 2.0
+vicreg:
+    sim_wt: 1.0
+    var_wt: 4.0        # OVERSHOOT (was 1.0): does the 2-sided term pin std->1? scale back after
+    cov_wt: 0.04       # held fixed - var is the search axis
+    on_enc: True
+    on_tgt: True
+    on_pred: False
+data:
+    batch_size: 64
+    accumulation_steps: 3
+    n_patients: 0
+    max_encounters: 20
+    pin_mem: true
+    num_workers: 0
+meta:
+    seed: 42
+    tag: "sg-vr_256_v01"
+    description: "Stop-grad JEPA + VICReg, embed_dim 256, seed 42 - v01 variance re-aim (var_wt overshoot)"
+    resume_from: null
+    save_cycle: 5
+    log_tb: True
+    log_csv: True
+    sync_s3: true
+sae_config:
+    z_enc:
+        n_features: 1024 # ~4x embed_dim
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512
+    pred_error:
+        n_features: 1024
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512

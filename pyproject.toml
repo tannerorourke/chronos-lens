@@ -18,7 +18,6 @@ dependencies = [
     "phate",
     "pingouin",
     "tensorboard",
-    "wandb",
     "xgboost",
     "hdbscan",
     "scipy",

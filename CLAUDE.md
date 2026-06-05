@@ -53,9 +53,8 @@ If a helper is needed by both training and analysis, it belongs in `infra` (or `
 
 **All imports are hard imports of declared dependencies.** Never hide a missing package behind `try: import X / except ImportError: ...` and a degraded fallback. If a feature needs a package, add it to `pyproject.toml` `[project].dependencies`, install it, and import it normally at module top.
 
-Three intentional exceptions - keep these:
+Intentional exceptions to keep:
 
-- **Runtime init guards** that protect a multi-hour run from telemetry failure, e.g. the `try/except` around `wandb.init()` in `logging.py`.
 - **External-CLI availability checks**, e.g. `aws_available()` in `src/infra/s3.py`. S3 sync is a deliberate AWS-CLI workflow; absence of the CLI degrades to local-only, by design.
 - **Numerical guards** in analysis, e.g. `try/except numpy.linalg.LinAlgError` around SVD / degenerate fits in `src/analysis/{geometry,probing,composition,clustering}.py`.
 

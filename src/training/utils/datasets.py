@@ -18,7 +18,6 @@ def build_vocab(
     dir: Path,
     save: bool = True
 ) -> dict[str, int]:
-    print(f"[build_vocab] building vocab ([PAD]: {pad_idx})...")
     tokens: set[str] = set()
     for p in patients:
         for enc in p.get("encounters", []):
@@ -32,6 +31,7 @@ def build_vocab(
         with open(dir / "vocab.json", "w", encoding="utf-8") as fh:
             json.dump(vocab, fh, indent=2)
     
+    print(f"-- Vocab: {len(vocab)} tokens")
     return vocab
 
 

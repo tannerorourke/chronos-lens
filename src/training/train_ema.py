@@ -16,7 +16,6 @@ environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import gc
 from pathlib import Path
 from typing import Dict
-from contextlib import nullcontext
 
 from tqdm import tqdm
 import torch
@@ -63,13 +62,11 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
     
     print(f"Starting {m_tag if m_tag else 'up'}..")
     if m_desc:
-        print(f"  -- {params['meta'].get('description', '')}")
+        print(f"-- {params['meta'].get('description', '')}")
 
     # --- build sequences, vocab, dataset, loader
     patients = load_sequences(n=n_patients)
-    print(f"Patients: {len(patients)}")
     vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=True) # freeze vocab in run dir
-    print(f"Vocab: {len(vocab)} tokens")
 
     ds = MimicDataset(
         patients, 
@@ -132,8 +129,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
         total_epochs=epochs,
         log_tb=meta_p.get("log_tb", False),
         log_csv=meta_p.get("log_csv", False),
-        log_wandb=meta_p.get("log_wandb", False),
         sync_s3=meta_p.get("sync_s3", False))
+    
     drift_mon = DriftMonitor()
     probe_batch = next(iter(loader))
     drift_mon.set_probe(probe_batch)
@@ -145,11 +142,11 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
     vic_reg_loss = VicRegLoss(**params["vicreg"])
 
     for epoch in range(start_epoch, epochs + 1):
-        sampler.set_epoch(epoch) # re-seed noisy buckets per epoch
         model.train()
+        sampler.set_epoch(epoch) # re-seed noisy buckets per epoch
         logger.lap()
+        
         n_batches = 0
-
         for i, batch in tqdm(enumerate(loader), leave=False, total=len(loader),
                              unit="b", desc=f"[epoch {epoch}/{epochs}]"):
             batch_dev = {
@@ -177,18 +174,20 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
                     for param_q, param_k in zip(model.encoder.parameters(), model.target_encoder.parameters()):
                         param_k.data.mul_(m).add_((1. - m) * param_q.detach().data)
 
-            # --- stat logging
+            # --- batch logging
             logger.log_batch(loss.item(), batch_dev["tgt_times"].shape[0])
             logger.update_embed_health(z_enc, batch_dev["ctx_pad_mask"], z_pred, z_target)
             n_batches += 1
 
-        # --------------------------------------------------------------
+        # --- eval ----------------------------------------------------------
         model.eval()
-        drift_log = drift_mon.compute(model, device)
-        vr_log = vic_reg_loss.compute_accum(n_batches)
-        ep_metrics = logger.log_epoch(lr=optimizer.param_groups[0]["lr"], model=model, **drift_log, **vr_log)
+        ep_metrics = logger.log_epoch(
+          lr=optimizer.param_groups[0]["lr"], 
+          model=model, 
+          **drift_mon.compute(model, device), 
+          **vic_reg_loss.compute_epoch(n_batches))
         
-        # --- informational collapse diagnostics
+        # informational collapse diagnostics
         zes_min = ep_metrics["embed_z_enc_std_min"]
         dop = ep_metrics["drift_over_pred"]
         if zes_min < 0.25:
@@ -196,7 +195,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
         if dop < 0.1 and zes_min < 0.4:
             print(f"  WARNING: drift_over_pred={dop:.4f} - possible partial collapse")
 
-        # --- rolling last.pt + final epoch
+        # rolling last.pt + final epoch
         ckpt = save_periodic(
             model, model_params, optimizer, scheduler,
             epoch, epochs, save_cycle,

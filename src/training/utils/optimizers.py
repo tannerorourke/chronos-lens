@@ -19,7 +19,6 @@ class WarmupCosineAnnealing:
         self._step        = 0
         self._last_lr     = [self.min_lr]
         
-        # derived.logging
         self.log = log
         self.non_warmup_steps = max(0, total_steps - warmup_steps)
         self.T_max = max(1, self.non_warmup_steps)

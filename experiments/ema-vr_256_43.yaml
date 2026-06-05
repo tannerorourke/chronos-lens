@@ -43,6 +43,8 @@ meta:
     description: "EMA JEPA + VICReg, embed_dim 256, seed 43 (collapse ablation)"
     resume_from: null
     save_cycle: 5
+    log_tb: True
+    log_csv: True
     sync_s3: true
 sae_config:
     z_enc:

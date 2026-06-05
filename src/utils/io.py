@@ -73,21 +73,6 @@ def init_run_dir(run_dir: Path, params: dict | None = None) -> Path:
     return run_dir
 
 
-def _maybe_migration_hint(config_dir: Path, run_dir: Path) -> None:
-    """Print a one-line hint (do NOT move anything) when old in-repo outputs
-    exist but the new out-of-repo run dir is still empty."""
-    try:
-        legacy = any((config_dir / sub).exists()
-                     for sub in ["checkpoints", "logs", "embeddings"])
-        fresh = (not run_dir.exists()) or (not any(run_dir.iterdir()))
-        if legacy and fresh:
-            print(f"[migrate] legacy outputs found in '{config_dir}'. New runs write "
-                  f"to '{run_dir}'. Move them manually if you want them reused, e.g. "
-                  f"`mv {config_dir / 'checkpoints'} {run_dir / 'checkpoints'}`.")
-    except Exception:
-        pass
-
-
 # ============================================================================
 # JSON / Serialization / npz helpers
 # ============================================================================
@@ -159,6 +144,7 @@ def load_sequences(n=None, path: Path = DATA_DIR / "sequences.jsonl") -> list[di
     """Load sequences as iterable list of dicts (for training)"""
     src = Path(path) if path else DATA_DIR / "sequences.jsonl"
     sequences = []
+    
     try:
         with open(src) as f:
             for line in f:
@@ -169,10 +155,13 @@ def load_sequences(n=None, path: Path = DATA_DIR / "sequences.jsonl") -> list[di
                 sequences.append(record)
 
         if n is None or n == 0:
+            print(f"-- Patients: {len(sequences)}") 
             return sequences
         if n < 0:
             raise ValueError("n must be non-negative")
+        print(f"-- Patients: {len(sequences[:n])}")
         return sequences[:n]
+    
     except Exception as e:
         raise FileNotFoundError(f"[load_sequences] Error loading sequences from '{src}': {e}")
 
@@ -274,7 +263,7 @@ def get_model_config(
         f"parameter 'seed' missing in config.yaml['meta']"
 
     # Resume continues in the original run dir (run-id = first path component of
-    # resume_from); otherwise mint a fresh date-stamped run id.
+    # resume_from); otherwise start a fresh date-stamped run id.
     if params.get("resume_from"):
         run_id = Path(params["resume_from"]).parts[0]
     else:
@@ -289,8 +278,6 @@ def get_model_config(
             raise FileExistsError(
                 f"Run '{run_id}' already has artifacts in {run_dir}. Set "
                 f"config['resume_from'] to resume, or change meta.tag for a new run.")
-        # Legacy in-repo outputs (if any) sat under the old experiments/<run-id>/ dir.
-        _maybe_migration_hint(EXPERIMENTS_DIR / cfg_path.stem, run_dir)
 
     return cfg_path, run_dir, params
 
@@ -307,21 +294,6 @@ def _embedding_epoch(name: str) -> int:
     return -1
 
 
-def _normalize_npz(name: str) -> str:
-    return name if name.endswith(".npz") else name + ".npz"
-
-
-def _latest_local(emb_dir) -> "str | None":
-    """Highest-epoch local embeddings_*.npz filename, or None."""
-    if not emb_dir.is_dir():
-        return None
-    names = [p.name for p in emb_dir.glob("embeddings_*.npz")]
-    if not names:
-        return None
-    names.sort(key=lambda n: (_embedding_epoch(n), n))
-    return names[-1]
-
-
 def load_embeddings(model_dir, embeddings_arg=None) -> Tuple[dict, Path]:
     """Load an embeddings ``.npz`` for a run, pulling exactly one object from S3
     on demand if it isn't already local.
@@ -335,7 +307,7 @@ def load_embeddings(model_dir, embeddings_arg=None) -> Tuple[dict, Path]:
     model_dir = Path(model_dir)
     run_id = model_dir.name
 
-    # --- specific file requested -------------------------------------------
+    # --- specific file
     if embeddings_arg:
         name = embeddings_arg if embeddings_arg.endswith(".npz") else f"{embeddings_arg}.npz"
         # local first (direct, then recursive), else pull the single object.
@@ -346,7 +318,7 @@ def load_embeddings(model_dir, embeddings_arg=None) -> Tuple[dict, Path]:
         path = ensure_local(f"embeddings/{name}", run_id)  # fetch or clear error
         return dict(np.load(path, allow_pickle=True)), path
 
-    # --- latest epoch (no name given) --------------------------------------
+    # --- latest epoch
     candidates = list(model_dir.glob("**/embeddings*.npz"))
     if not candidates:
         candidates = list(model_dir.glob("**/embedding*.npz"))
@@ -354,7 +326,7 @@ def load_embeddings(model_dir, embeddings_arg=None) -> Tuple[dict, Path]:
         candidates.sort(key=lambda p: (_embedding_epoch(p.name), p.name))
         return dict(np.load(candidates[-1], allow_pickle=True)), candidates[-1]
 
-    # Nothing local: discover the latest available object in S3 and pull just it.
+    # Nothing local get latest object in S3 and pull it
     remote = [n for n in s3_list(run_id, "embeddings") if n.endswith(".npz")]
     if remote:
         remote.sort(key=lambda n: (_embedding_epoch(n), n))

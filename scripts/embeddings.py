@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 from src.infra.loaders import extract_and_write_embeddings
-from src.utils.io import RUNS_DIR, _embedding_epoch, _normalize_npz, _latest_local
+from src.utils.io import RUNS_DIR, _embedding_epoch
 from src.infra.s3 import (
     ensure_local, s3_list, s3_uri, get_bucket, aws_available,
     push_file, download_object)
@@ -53,17 +53,23 @@ def _resolve_name(run_id: str, name: str | None) -> str:
     """Resolve an embeddings filename: normalize an explicit one, else the latest
     available locally, else the latest in S3."""
     if name:
-        return _normalize_npz(name)
-    latest_local = _latest_local(RUNS_DIR / run_id / "embeddings")
-    if latest_local:
-        return latest_local
+        return name if name.endswith(".npz") else f"{name}.npz"
+      
+    local_dir = RUNS_DIR / run_id / "embeddings"
+    if local_dir.is_dir():
+        names = [p.name for p in local_dir.glob("embeddings_*.npz")]
+        if names:
+            names.sort(key=lambda n: (_embedding_epoch(n), n))
+            return names[-1]
+    
     remote = [n for n in s3_list(run_id, "embeddings") if n.endswith(".npz")]
-    if not remote:
-        raise SystemExit(
-            f"No embeddings found for run '{run_id}' (local or S3). Pass --emb, or "
-            f"`extract --ckpt <checkpoint.pt>`.")
-    remote.sort(key=lambda n: (_embedding_epoch(n), n))
-    return remote[-1]
+    if remote:
+        remote.sort(key=lambda n: (_embedding_epoch(n), n))
+        return remote[-1]
+    
+    raise SystemExit(
+        f"No embeddings found for run '{run_id}' (local or S3). Pass --emb, or "
+        f"`extract --ckpt <checkpoint.pt>`.")
 
 
 def fetch_embeddings(run_id: str, name: str | None = None, *, save: str = "none"):
@@ -145,6 +151,7 @@ def cmd_fetch(args) -> None:
 
 
 def cmd_extract(args) -> None:
+    
     _extract(args.exp, args.ckpt, args.output_subdir)
 
 
@@ -152,18 +159,22 @@ def cmd_get(args) -> None:
     """Cascade: local -> S3 fetch -> extract from --ckpt."""
     run_id = args.exp
     emb_dir = RUNS_DIR / run_id / "embeddings"
-    name = _normalize_npz(args.emb) if args.emb else None
-
-    # 1. local
-    if name is not None:
+    
+    name = None
+    if args.emb:
+        name = args.emb if args.emb.endswith(".npz") else f"{args.emb}.npz"
+        
         local = emb_dir / name
         if local.exists():
             print(f"Ready (local): {local}")
             return
-    else:
-        latest_local = _latest_local(emb_dir)
-        if latest_local is not None:
-            print(f"Ready (local): {emb_dir / latest_local}")
+    
+    # 1. local
+    if emb_dir.is_dir():
+        names = [p.name for p in emb_dir.glob("embeddings_*.npz")]
+        if names:
+            names.sort(key=lambda n: (_embedding_epoch(n), n))
+            print(f"Ready (local): {emb_dir / names[-1]}")
             return
 
     # 2. S3 (single object cp)
@@ -171,6 +182,7 @@ def cmd_get(args) -> None:
     if name is not None and name in remote:
         print(f"Ready (S3): {ensure_local(f'embeddings/{name}', run_id)}")
         return
+      
     if name is None and remote:
         remote.sort(key=lambda n: (_embedding_epoch(n), n))
         print(f"Ready (S3): {ensure_local(f'embeddings/{remote[-1]}', run_id)}")

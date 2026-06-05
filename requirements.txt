@@ -26,7 +26,6 @@ xgboost>=2.1.0
 
 # --- Logging ---
 tensorboard>=2.18.0
-wandb>=0.19.0
 
 # --- Google Cloud (MIMIC extraction; not needed for training-only runs) ---
 google-auth>=2.30.0

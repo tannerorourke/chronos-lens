@@ -14,7 +14,6 @@ environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import gc
 from pathlib import Path
 from typing import Dict
-from contextlib import nullcontext
 
 from tqdm import tqdm
 import torch
@@ -60,13 +59,11 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
     
     print(f"Starting {m_tag if m_tag else 'up'}..")
     if m_desc:
-        print(f"  -- {params['meta'].get('description', '')}")
+        print(f"-- {params['meta'].get('description', '')}")
 
     # --- build sequences, vocab, dataset, loader
     patients = load_sequences(n=n_patients)
-    print(f"Patients: {len(patients)}")
     vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=True) # freeze vocab in run dir
-    print(f"Vocab: {len(vocab)} tokens")
 
     ds = MimicDataset(
         patients,
@@ -102,17 +99,17 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
         ipe=len(loader) // accum_steps,
         num_epochs=epochs)
 
-    start_epoch, global_step, loss_history = 1, 1, []
-    # --- load checkpoint?
+    start_epoch, start_step, loss_history = 1, 1, []
+    # --- load checkpoint
     if params.get("resume_from"):
         ckpt_path = RUNS_DIR / params["resume_from"]
-        model, model_params, optimizer, scheduler, start_epoch, global_step, loss_history = \
+        model, model_params, optimizer, scheduler, start_epoch, start_step, loss_history = \
             sync_model_checkpoint(
                 model,
                 optimizer, scheduler,
                 ckpt_path, device, restore_rng=True)
 
-    print("Params:",
+    print("-- Params:",
           f"Total: {(sum(p.numel() for p in model.parameters()) / 1e6):.2f}M",
           f"Trainable: {(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6):.2f}M")
     
@@ -121,27 +118,25 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
     logger = TrainingLogger(
         run_dir, arch=model_params["architecture"],
         epoch=start_epoch - 1,
-        global_step=global_step,
+        global_step=start_step,
         loss_history=loss_history,
         total_epochs=epochs,
         log_tb=meta_p.get("log_tb", False),
         log_csv=meta_p.get("log_csv", False),
-        log_wandb=meta_p.get("log_wandb", False),
-        sync_s3=meta_p.get("sync_s3", False),
-    )
+        sync_s3=meta_p.get("sync_s3", False))
 
     # ------------------------------------------------------------------
     # --- TRAINING LOOP ------------------------------------------------
     # ------------------------------------------------------------------
     
-    criterion = nn.BCEWithLogitsLoss()
+    bce_loss = nn.BCEWithLogitsLoss()
     
     for epoch in range(start_epoch, epochs + 1):
         sampler.set_epoch(epoch) # re-seed noisy buckets per epoch
         model.train()
         logger.lap()
+        
         history = []
-
         for i, batch in tqdm(enumerate(loader), leave=False, total=len(loader),
                              unit="b", desc=f"[epoch {epoch}/{epochs}]"):
             batch_dev = {
@@ -151,7 +146,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 z_enc, logits = model(batch_dev)
-                loss = criterion(logits, batch_dev["labels"].float())
+                loss = bce_loss(logits, batch_dev["labels"].float())
             loss.backward()
             
             # --- grad accumulation
@@ -162,13 +157,13 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
                 optimizer.zero_grad(set_to_none=True)
                 scheduler.step()
             
-            # --- stat logging
+            # --- batch logging
             bs = batch_dev["labels"].shape[0]
             logger.log_batch(loss.item(), bs)
-            history.append((loss.item(), bs))
             logger.update_embed_health(z_enc, batch_dev["ctx_pad_mask"])
+            history.append((loss.item(), bs))
 
-        # --------------------------------------------------------------
+        # --- eval ----------------------------------------------------------
         model.eval()
         t_loss = sum([l[0] for l in history])
         metrics = {
@@ -176,9 +171,12 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
             "loss_p_batch": t_loss / len(history),
             "loss_p_sample": t_loss / sum([l[1] for l in history])
         }
-        logger.log_epoch(lr=optimizer.param_groups[0]["lr"], model=model, **metrics)
+        logger.log_epoch(
+          lr=optimizer.param_groups[0]["lr"],
+          model=model,
+          **metrics)
 
-        # --- rolling last.pt + final epoch
+        # rolling last.pt + final epoch
         ckpt = save_periodic(
             model, model_params, optimizer, scheduler,
             epoch, epochs, save_cycle,

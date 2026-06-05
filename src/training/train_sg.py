@@ -15,7 +15,6 @@ environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import gc
 from pathlib import Path
 from typing import Dict
-from contextlib import nullcontext
 
 from tqdm import tqdm
 import torch
@@ -36,12 +35,23 @@ from src.training.utils.checkpoint import (build_model,
 from src.utils.io import load_sequences, RUNS_DIR
 
 
+def _set_requires_grad(modules: list[nn.Module], flag: bool) -> None:
+    """Toggle grad for whole submodules - used to freeze the encoder + projector
+       during predictor warmup."""
+    for m in modules:
+        for p in m.parameters():
+            p.requires_grad = flag
+
+
 def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
     # --- optimization
-    opt_params  = params["optimization"]
-    epochs      = opt_params["epochs"]
-    accum_steps = opt_params.get("accumulation_steps", 1)
-    grad_clip   = opt_params.get("grad_clip", 5.0)
+    opt_params          = params["optimization"]
+    epochs              = opt_params["epochs"]
+    accum_steps         = opt_params.get("accumulation_steps", 1)
+    grad_clip           = opt_params.get("grad_clip", 5.0)
+    base_lr             = float(opt_params.get("base_lr", 0.0))
+    pred_warmup_epochs  = opt_params.get("predictor_warmup_epochs", 0)
+    pred_warmup_lr      = float(opt_params.get("predictor_warmup_lr", base_lr))
     assert params.get("vicreg"), "VICReg loss params missing"
 
     # --- data
@@ -61,13 +71,11 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
     
     print(f"Starting {m_tag if m_tag else 'up'}..")
     if m_desc:
-        print(f"  -- {params['meta'].get('description', '')}")
+        print(f"-- {params['meta'].get('description', '')}")
 
     # --- build sequences, vocab, dataset, loader
     patients = load_sequences(n=n_patients)
-    print(f"Patients: {len(patients)}")
     vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=True) # freeze vocab in run dir
-    print(f"Vocab: {len(vocab)} tokens")
 
     ds = MimicDataset(
         patients, 
@@ -97,10 +105,13 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
     
     
     # --- init optimizer / scheduler
+    # -- cosine is sized to the JOINT phase only; the warmup phase runs flat at
+    #    pred_warmup_lr (stepped separately below), so the encoder gets its full
+    #    min_lr->base_lr ramp re-anchored to unlock.
     optimizer, scheduler = init_optimizers(
         model, opt_params,
         ipe=len(loader) // accum_steps,
-        num_epochs=epochs)
+        num_epochs=epochs - pred_warmup_epochs)
 
     start_epoch, start_step, loss_history = 1, 1, []
     # --- load checkpoint
@@ -112,7 +123,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
                 optimizer, scheduler, 
                 ckpt_path, device, restore_rng=True)
 
-    print("Params:",
+    print("-- Params:",
           f"Total: {(sum(p.numel() for p in model.parameters()) / 1e6):.2f}M",
           f"Trainable: {(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6):.2f}M")
 
@@ -126,8 +137,8 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
         total_epochs=epochs,
         log_tb=meta_p.get("log_tb", False),
         log_csv=meta_p.get("log_csv", False),
-        log_wandb=meta_p.get("log_wandb", False),
         sync_s3=meta_p.get("sync_s3", False))
+    
     drift_mon = DriftMonitor()
     probe_batch = next(iter(loader))
     drift_mon.set_probe(probe_batch)
@@ -139,11 +150,30 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
     vic_reg_loss = VicRegLoss(**params["vicreg"])
 
     for epoch in range(start_epoch, epochs + 1):
-        sampler.set_epoch(epoch) # re-seed noisy buckets per epoch
         model.train()
+        sampler.set_epoch(epoch) # re-seed noisy buckets per epoch
         logger.lap()
-        n_batches = 0
 
+        # -- predictor warmup: for the first `pred_warmup_epochs`, freeze encoder +
+        #    projector and train the predictor alone (at a static pred_warmup_lr),
+        #    so it is not cold when it first pulls on the encoder. A cold predictor's
+        #    gradient drags the encoder toward a constant (representation collapse);
+        #    warming it first removes that pull. While frozen only the invariance
+        #    (MSE) term carries a gradient - var/cov sit on the constant encoder
+        #    output. The cosine scheduler does not step during this phase.
+        in_warmup = epoch <= pred_warmup_epochs
+        if pred_warmup_epochs:
+            _set_requires_grad([model.encoder, model.projector], not in_warmup)
+            if in_warmup:
+                for g in optimizer.param_groups:
+                    g["lr"] = pred_warmup_lr
+            if epoch == 1:
+                print(f"  -- predictor warmup: encoder+projector frozen for "
+                      f"{pred_warmup_epochs} epochs @ lr={pred_warmup_lr:g} (predictor-only)")
+            elif epoch == pred_warmup_epochs + 1:
+                print("  -- warmup done: encoder+projector unlocked")
+        
+        n_batches = 0
         for i, batch in tqdm(enumerate(loader), leave=False, total=len(loader),
                              unit="b", desc=f"[epoch {epoch}/{epochs}]"):
             batch_dev = {
@@ -163,20 +193,23 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
                 logger.log_grad_norm(pre_clip.item())
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                scheduler.step()
+                if not in_warmup:  # warmup runs flat at pred_warmup_lr; cosine starts at unlock
+                    scheduler.step()
 
-            # --- stat logging
+            # --- batch logging
             logger.log_batch(loss.item(), batch_dev["tgt_times"].shape[0])
             logger.update_embed_health(z_enc, batch_dev["ctx_pad_mask"], z_pred, z_target)
             n_batches += 1
 
-        # --------------------------------------------------------------
+        # --- eval ----------------------------------------------------------
         model.eval()
-        drift_log = drift_mon.compute(model, device)
-        vr_log = vic_reg_loss.compute_accum(n_batches)
-        ep_metrics = logger.log_epoch(lr=optimizer.param_groups[0]["lr"], model=model, **drift_log, **vr_log)
+        ep_metrics = logger.log_epoch(
+          lr=optimizer.param_groups[0]["lr"],
+          model=model,
+          **drift_mon.compute(model, device),
+          **vic_reg_loss.compute_epoch(n_batches))
 
-        # --- informational collapse diagnostics
+        # informational collapse diagnostics
         zes_min = ep_metrics["embed_z_enc_std_min"]
         dop = ep_metrics["drift_over_pred"]
         if zes_min < 0.25:
@@ -184,7 +217,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
         if dop < 0.1 and zes_min < 0.4:
             print(f"  WARNING: drift_over_pred={dop:.4f} - possible partial collapse")
 
-        # --- rolling last.pt + final epoch
+        # rolling last.pt + final epoch
         ckpt = save_periodic(
             model, model_params, optimizer, scheduler,
             epoch, epochs, save_cycle,

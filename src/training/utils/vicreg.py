@@ -70,15 +70,12 @@ class VicRegLoss(nn.Module):
             self.vicreg_accum["var_pred"] = 0.0
             self.vicreg_accum["cov_pred"] = 0.0
             
-    def reset_accum(self):
+    def compute_epoch(self, n_batches: int):
+        acc = {}
         for k in self.vicreg_accum.keys():
+            acc[k] = self.vicreg_accum[k] / max(n_batches, 1)
             self.vicreg_accum[k] = 0.0
-            
-    def compute_accum(self, n_batches: int):
-        return {
-            k: self.vicreg_accum[k] / max(n_batches, 1)
-            for k in self.vicreg_accum.keys()
-        }
+        return acc
         
     def vicreg(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Variance + covariance regularization for an embedding matrix.

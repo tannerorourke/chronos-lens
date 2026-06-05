@@ -9,7 +9,6 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
-import wandb
 from torch.utils.tensorboard import SummaryWriter
 
 from src.utils.constants import ARCHITECTURES
@@ -41,11 +40,10 @@ def plot_loss_curve(
 
 
 # ------------------------------------------------------------------
-# JSON helpers / sinks
+# JSON sink
 # ------------------------------------------------------------------
 
 def _json_default(o):
-    """Best-effort JSON coercion for numpy / torch scalars."""
     if isinstance(o, (np.integer,)):
         return int(o)
     if isinstance(o, (np.floating,)):
@@ -86,6 +84,72 @@ class JsonlWriter:
         except Exception:
             pass
 
+# ------------------------------------------------------------------
+# Drift Monitor
+# ------------------------------------------------------------------
+
+class DriftMonitor:
+    """Tracks encoder drift between online and target encoders on a fixed probe batch.
+
+    For EMA JEPA, the target encoder f_xi diverges from the online encoder f_theta.
+    This means the prediction residual P - T = predictor(f_theta(ctx)) - f_xi(x_t)
+    conflates (1) true prediction error and (2) encoder drift f_theta(x_t) - f_xi(x_t).
+    This monitor quantifies (2) so the confound can be reported and bounded.
+    
+    the ratio drift_over_pred tells us what fraction of the prediction residual is 
+    actually encoder drift. A single frozen cpu batch is measured to ensure 
+    trajectories are are comparable. If this ratio is >0.05, the the P - T confound
+    is not bounded and residual based cliams need strong caveats.
+    """
+
+    def __init__(self):
+        self._probe_batch = None  # stored on CPU
+
+    def set_probe(self, batch: dict) -> None:
+        """Store a fixed probe batch (CPU tensors). Called once at start of training."""
+        self._probe_batch = {
+            k: v.detach().cpu() if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+        }
+
+    @torch.no_grad()
+    def compute(self, model, device) -> dict:
+        """Run one forward pass on the probe and return drift metrics."""
+        if self._probe_batch is None:
+            return {}
+        pb = {
+            k: v.to(device) if isinstance(v, torch.Tensor) else v
+            for k, v in self._probe_batch.items()
+        }
+        model.eval()
+        
+        # Online and target encoder outputs on the same target tokens
+        z_online = model.encoder(pb["tgt_tokens"], pb["tgt_tok_mask"], pb["tgt_times"], pool=True)
+        target_encoder = getattr(model, "target_encoder", None)
+        z_target = (target_encoder(pb["tgt_tokens"], pb["tgt_tok_mask"], pb["tgt_times"], pool=True)
+                    if target_encoder is not None else z_online)  # SG: drift identically 0
+        
+        # Full forward pass for prediction residual
+        outputs = model(pb)
+        z_pred, z_t = outputs[1], outputs[2]
+        model.train()
+
+        # calculate drift
+        drift    = z_online - z_target                  # (B, D)
+        pred_err = z_pred - z_t                         # (B, D)
+
+        drift_l2    = drift.norm(dim=-1)                # (B,)
+        pred_err_l2 = pred_err.norm(dim=-1)             # (B,)
+
+        cos_drift_err = torch.nn.functional.cosine_similarity(drift, pred_err, dim=-1)
+
+        return {
+            "drift_l2_mean":     drift_l2.mean().item(),
+            "drift_l2_max":      drift_l2.max().item(),
+            "pred_err_l2_mean":  pred_err_l2.mean().item(),
+            "drift_over_pred":   (drift_l2.mean() / pred_err_l2.mean().clamp_min(1e-8)).item(),
+            "drift_cos_pred":    cos_drift_err.mean().item(),
+        }
 
 # ------------------------------------------------------------------
 # Streamed diagnostics
@@ -210,8 +274,7 @@ class TrainingLogger:
         log_jsonl: bool = True,
         log_csv: bool = False,
         log_tb: bool = False,
-        log_wandb: bool = False,
-        sync_s3: bool = False,
+        sync_s3: bool = True,
         verbose: bool = False,
         arch: ARCHITECTURES = "ema",
     ):
@@ -258,8 +321,6 @@ class TrainingLogger:
         if log_tb:  # only create tb_logs/ when explicitly enabled
             self._tb_writer = SummaryWriter(log_dir=str(logdir / "tb_logs"))
 
-        self._wandb = self._init_wandb(log_wandb)
-
         # --- optional non-blocking S3 archive of the run dir ----------------
         from src.infra.s3 import S3Syncer
         self._syncer = S3Syncer(self._run_root, enabled=sync_s3)
@@ -267,21 +328,7 @@ class TrainingLogger:
         self._ep_start = 0.0
         self._run_start = 0.0
         print(f"[TrainingLogger] streaming -> {self._run_root.name}/metrics.jsonl"
-              + (" +tb" if log_tb else "") + (" +csv" if log_csv else "")
-              + (" +wandb" if self._wandb else "") + (" +s3" if self._syncer.enabled else ""))
-
-    def _init_wandb(self, log_wandb: bool):
-        """W&B sink"""
-        if not log_wandb:
-            return None
-        try:
-            run = wandb.init(project="chronos-lens", name=self._run_root.name,
-                             dir=str(self._run_root), resume="allow")
-            return run
-        except Exception as e:
-            print(f"[TrainingLogger] wandb.init failed ({e}); continuing on "
-                  f"metrics.jsonl + CLI.")
-            return None
+              + (" +tb" if log_tb else "") + (" +csv" if log_csv else "") + (" +s3" if self._syncer.enabled else ""))
 
     def sync(self, *, blocking: bool = False) -> None:
         """Trigger a (non-blocking) S3 sync of the run dir. No-op unless enabled."""
@@ -336,8 +383,7 @@ class TrainingLogger:
                 "lr": self._last_lr,
                 "z_pred_err_l2": self._last_pred_err,
             })
-        if self._wandb is not None:
-            self._wandb.log({"step/loss": step_loss}, step=self.global_step)
+
 
     def log_grad_norm(self, grad_norm: int | float) -> None:
         self.grad_norms.append(float(grad_norm))
@@ -454,14 +500,6 @@ class TrainingLogger:
             assert self._csv_writer is not None, "CSV writer not initialized in log_epoch"
             self._csv_writer.write(log_metrics)
 
-        if self._wandb is not None:
-            wandb_scalars = {
-                (f"epoch/{k}" if not k.startswith("embed_") else f"embed/{k[len('embed_'):]}"): float(v)
-                for k, v in raw_metrics.items()
-                if k not in ("epoch", "wall_sec", "steps") and isinstance(v, (int, float))
-            }
-            self._wandb.log(wandb_scalars, step=self.global_step)
-
         if self._log_tb:
             assert self._tb_writer is not None, "TensorBoard writer not initialized in log_epoch"
             if lr is not None:
@@ -499,18 +537,13 @@ class TrainingLogger:
         if self._tb_writer is not None:
             self._tb_writer.flush()
             self._tb_writer.close()
-        if self._wandb is not None:
-            try:
-                self._wandb.finish()
-            except Exception:
-                pass
 
         # Final full S3 sync so teardown is consequence-free (no-op unless enabled).
         self._syncer.close()
         self._closed = True
         print(f"\n[TrainingLogger] Run complete in {self._pp_time(total_time)}")
 
-    # -- Utility
+    # -- Print utility
     @staticmethod
     def _fmt(v) -> str:
         if v is None: return ""
@@ -525,67 +558,3 @@ class TrainingLogger:
         if h > 0:
             return f"{h}h {m}m {s}s"
         return f"{m}m {s}s"
-
-
-class DriftMonitor:
-    """Tracks encoder drift between online and target encoders on a fixed probe batch.
-
-    For EMA JEPA, the target encoder f_ξ diverges from the online encoder f_θ.
-    This means the prediction residual P - T = predictor(f_θ(ctx)) - f_ξ(x_t)
-    conflates (1) true prediction error and (2) encoder drift f_θ(x_t) - f_ξ(x_t).
-    This monitor quantifies (2) so the confound can be reported and bounded.
-    
-    the ratio drift_over_pred tells us what fraction of the prediction residual is 
-    actually encoder drift. A single frozen cpu batch is measured to ensure 
-    trajectories are are comparable. If this ratio is >0.05, the the P - T confound
-    is not bounded and residual based cliams need strong caveats.
-    """
-
-    def __init__(self):
-        self._probe_batch = None  # stored on CPU
-
-    def set_probe(self, batch: dict) -> None:
-        """Store a fixed probe batch (CPU tensors). Called once at start of training."""
-        self._probe_batch = {
-            k: v.detach().cpu() if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
-
-    @torch.no_grad()
-    def compute(self, model, device) -> dict:
-        """Run one forward pass on the probe and return drift metrics."""
-        if self._probe_batch is None:
-            return {}
-        pb = {
-            k: v.to(device) if isinstance(v, torch.Tensor) else v
-            for k, v in self._probe_batch.items()
-        }
-        model.eval()
-        
-        # Online and target encoder outputs on the same target tokens
-        z_online = model.encoder(pb["tgt_tokens"], pb["tgt_tok_mask"], pb["tgt_times"], pool=True)
-        target_encoder = getattr(model, "target_encoder", None)
-        z_target = (target_encoder(pb["tgt_tokens"], pb["tgt_tok_mask"], pb["tgt_times"], pool=True)
-                    if target_encoder is not None else z_online)  # SG: drift identically 0
-        
-        # Full forward pass for prediction residual
-        outputs = model(pb)
-        z_pred, z_t = outputs[1], outputs[2]
-        model.train()
-
-        # calculate drift
-        drift    = z_online - z_target                  # (B, D)
-        pred_err = z_pred - z_t                         # (B, D)
-
-        drift_l2    = drift.norm(dim=-1)                # (B,)
-        pred_err_l2 = pred_err.norm(dim=-1)             # (B,)
-
-        cos_drift_err = torch.nn.functional.cosine_similarity(drift, pred_err, dim=-1)
-
-        return {
-            "drift_l2_mean":     drift_l2.mean().item(),
-            "drift_l2_max":      drift_l2.max().item(),
-            "pred_err_l2_mean":  pred_err_l2.mean().item(),
-            "drift_over_pred":   (drift_l2.mean() / pred_err_l2.mean().clamp_min(1e-8)).item(),
-            "drift_cos_pred":    cos_drift_err.mean().item(),
-        }

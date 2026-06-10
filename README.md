@@ -63,8 +63,7 @@ gcloud auth application-default login
 gcloud config set project <your-project-id>
 ```
 
-4. Update `BQ_PROJECT_ID` in `scripts/extract_mimic.py`
-5. Run extraction:
+4. Run extraction:
 
 ```bash
 python -m scripts.extract_mimic

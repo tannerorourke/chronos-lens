@@ -1,9 +1,6 @@
 """
 SAE analysis utilities.
 
-Primary workflow: label-driven feature identification, then clinical content
-inspection for interpretation.
-
 Functions
 ---------
   load_sae                    : reconstruct a SparseAutoencoder from checkpoint
@@ -15,7 +12,6 @@ Functions
   inspect_sae_feature_content : clinical content enrichment (secondary, post-identification)
   sae_cluster_crossref        : cross-reference SAE features with HDBSCAN clusters
   sae_seed_stability          : dictionary direction stability across seeds
-  decompose_patient           : per-patient SAE decomposition
 """
 
 from pathlib import Path
@@ -24,52 +20,45 @@ from collections import Counter
 import numpy as np
 import torch
 
+from src.models import SparseAutoencoder
 from src.infra.metrics import odds_ratio
-from src.models.sae import SparseAutoencoder
 from src.utils.io import load_sequences_dict
 from src.mimic.helper import parse_dt
 
-from src.utils.seed import SEED
+from src.utils.system import SEED
 
 
 # =========================================================================
 # Loading & extraction
 # =========================================================================
 
-def load_sae(checkpoint_path: Path, device: torch.device = torch.device("cpu")) -> SparseAutoencoder:
-    """Load a trained SAE from checkpoint."""
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    model = SparseAutoencoder(
-        embed_dim=ckpt["embed_dim"],
-        n_features=ckpt["n_features"],
-        top_k=ckpt["top_k"],
-    ).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    return model
-
-
-def extract_sae_activations(
+def extract_activations(
     model: SparseAutoencoder,
     vec: np.ndarray,
+    device: torch.device,
+    save_dir: Path = None,
 ) -> np.ndarray:
     """Run a trained SAE on a latent vector and return sparse activations."""
     model.eval()
     device = next(model.parameters()).device
     with torch.no_grad():
         x = torch.tensor(vec, dtype=torch.float32, device=device)
-        _, activations = model(x)
-    return activations.cpu().numpy()
+        _, act = model(x)
+    act_np = act.cpu().numpy()
+    
+    if save_dir is not None:
+        np.save(save_dir / "activations.npy", act_np)
+    return act_np
 
 
 # =========================================================================
-# Label-driven feature analysis (primary workflow)
+# feature analysis
 # =========================================================================
 
 def sae_label_enrichment(
     activations: np.ndarray,
     labels: np.ndarray,
-    label_name: str = "",
+    _verbose: bool = False
 ) -> list[dict]:
     """Per-feature Fisher exact test with Benjamini-Hochberg FDR correction.
 
@@ -88,8 +77,9 @@ def sae_label_enrichment(
     list of dicts (one per feature with activation_frac >= 0.01):
         feature_idx, odds_ratio, p_value, fdr_q, n_active,
         n_pos_active, activation_frac
-    """
+    """ 
     from scipy.stats import fisher_exact
+    
     N, n_features = activations.shape
     labels = np.asarray(labels, dtype=int)
     active_mask = activations != 0  # (N, n_features)
@@ -116,6 +106,7 @@ def sae_label_enrichment(
     fdr_q_vals = np.ones(m)
     for rank, (_, _, p, _, _, _) in enumerate(raw_results, 1):
         fdr_q_vals[rank - 1] = p * m / rank
+    
     # enforce monotonicity (step-up)
     for i in range(m - 2, -1, -1):
         fdr_q_vals[i] = min(fdr_q_vals[i], fdr_q_vals[i + 1])
@@ -132,12 +123,18 @@ def sae_label_enrichment(
             "n_pos_active": n_pos_active,
             "activation_frac": round(act_frac, 4),
         })
+        
+    if _verbose:
+        n_sig = sum(1 for e in result if e["fdr_q"] < 0.05)
+        print(f"  {len(result)} features tested, {n_sig} significant (FDR<0.05)")
+        
     return result
 
 
 def feature_label_specificity(
     activations: np.ndarray,
     labels_dict: dict[str, np.ndarray],
+    _verbose: bool = False
 ) -> dict:
     """Lift matrix: P(label=1 | feature active) / P(label=1).
 
@@ -153,7 +150,6 @@ def feature_label_specificity(
         label_names     : column order
         feature_indices : row order (non-dead features only)
     """
-    N, n_features = activations.shape
     active_mask = activations != 0
     label_names = sorted(labels_dict.keys())
     n_labels = len(label_names)
@@ -176,6 +172,12 @@ def feature_label_specificity(
             p_label_given_active = lbl[feat_on].mean() if n_on > 0 else 0.0
             lift_matrix[row, j] = p_label_given_active / p_label
 
+    if _verbose:
+        print(
+            f"  Lift matrix: {lift_matrix.shape} "
+            f"({len(active_feat_idx.tolist())} features x {len(label_names)} labels)"
+        )
+
     return {
         "lift_matrix": lift_matrix,
         "label_names": label_names,
@@ -184,7 +186,8 @@ def feature_label_specificity(
 
 
 def sae_coactivation_matrix(
-    activations: np.ndarray,
+    activations: np.ndarray, 
+    _verbose: bool = False
 ) -> dict:
     """Normalized co-activation lift between feature pairs.
 
@@ -200,8 +203,8 @@ def sae_coactivation_matrix(
     dict with:
         lift_matrix     : (n_active, n_active) symmetric lift values, diagonal = 1
         feature_indices : which original feature indices are included (non-dead)
-    """
-    N, n_features = activations.shape
+    """ 
+    N, _ = activations.shape
     active_mask = (activations != 0).astype(np.float64)
     feat_freq = active_mask.mean(axis=0)  # P(feature active)
     active_feat_idx = np.where(feat_freq > 0)[0]
@@ -217,6 +220,10 @@ def sae_coactivation_matrix(
 
     lift_matrix = cooccur / expected
     np.fill_diagonal(lift_matrix, 1.0)
+    
+    if _verbose:
+        print(f"  Matrix: {lift_matrix.shape}")
+        print(f"  {n_active} active features")
 
     return {
         "lift_matrix": lift_matrix,
@@ -228,6 +235,7 @@ def sae_temporal_enrichment(
     activations: np.ndarray,
     times: np.ndarray,
     rel_times: np.ndarray,
+    _verbose: bool = False
 ) -> list[dict]:
     """Per-feature temporal enrichment analysis.
 
@@ -285,17 +293,58 @@ def sae_temporal_enrichment(
 
         results.append({
             "feature_idx": feat_idx,
-            "time_corr": round(float(r_time), 4),
-            "rel_time_corr": round(float(r_rel), 4),
-            "early_activation_frac": round(early_frac, 4),
-            "late_activation_frac": round(late_frac, 4),
+            "time_corr": float(r_time),
+            "rel_time_corr": float(r_rel),
+            "early_activation_frac": early_frac,
+            "late_activation_frac": late_frac,
         })
+        
+    if _verbose:
+        print(f"  {len(results)} features")
+        n_time_corr = sum(1 for t in results if abs(t["time_corr"]) > 0.1)
+        print(f"  {n_time_corr} with |time_corr| > 0.1")
+        # print(f"  {early_frac} have activation in first quartile")
+        # print(f"  {late_frac} have activation in last quartile")
 
     return results
 
 
+def cross_sae_overlap(
+    W_jepa: np.ndarray, # JEPA decoder weights
+    W_spv: np.ndarray, # supervised decoder weights
+    cosine_threshold: float = 0.85,
+    device: str = "cpu",
+) -> dict:
+    """Hungarian matching of decoder directions between two SAEs.
+
+    Adapted from sae_seed_stability in src/analysis/sae.py.
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    # W_jepa = jepa_sae.decoder.weight.detach().cpu().float()   # (D, n_features_j)
+    # W_spv = sup_sae.decoder.weight.detach().cpu().float()     # (D, n_features_s)
+
+    # L2-normalize columns
+    W_jepa = W_jepa / W_jepa.norm(dim=0, keepdim=True).clamp(min=1e-8)
+    W_spv = W_spv / W_spv.norm(dim=0, keepdim=True).clamp(min=1e-8)
+
+    cos_sim = (W_jepa.T @ W_spv).numpy()  # (n_j, n_s)
+    row_idx, col_idx = linear_sum_assignment(1.0 - cos_sim)
+    matched_cosines = cos_sim[row_idx, col_idx]
+
+    stable_mask = matched_cosines > cosine_threshold
+    return {
+        "mean_cosine": float(matched_cosines.mean()),
+        "median_cosine": float(np.median(matched_cosines)),
+        "frac_stable": float(stable_mask.mean()),
+        "n_stable": int(stable_mask.sum()),
+        "n_matched": len(matched_cosines),
+        "matched_cosines": matched_cosines,  # raw array for NPZ
+    }
+    
 # =========================================================================
-# feature content inspection (secondary - "what does this feature detect?")
+# FEATURE CONTENT INSPECTION
+# - driven by labels and metadata related to those labels
 # =========================================================================
 
 def inspect_sae_feature_content(
@@ -664,9 +713,8 @@ def sae_cluster_crossref(
 
 
 # =========================================================================
-# Validation of dictionary directions across seed (as done in Anthropic papers)
+# Validation of dictionary directions across seed
 # =========================================================================
-
 
 def sae_seed_stability(
     checkpoint_paths: list[Path],
@@ -733,79 +781,3 @@ def sae_seed_stability(
         },
     }
     return summary
-
-
-# =========================================================================
-# SAE decomposition for a single patient
-# =========================================================================
-
-def decompose_patient(
-    patient_idx: int,
-    vectors_dict: dict[str, np.ndarray],
-    sae_models_dict: dict[str, SparseAutoencoder],
-    feature_cards_dict: dict[str, list[dict]],
-    top_k: int = 8,
-) -> dict:
-    """Decompose one patient's vectors through their respective SAEs.
-
-    Parameters
-    ----------
-    patient_idx    : row index into the (N, D) arrays
-    vectors_dict   : {name: (N, D)} arrays (e.g. pred_error, z_pred, z_target)
-    sae_models_dict    : {name: SparseAutoencoder} - trained, eval-mode
-    feature_cards_dict : {name: [card, ...]} - from inspect_sae_features
-    top_k          : max active features to return per vector
-
-    Returns
-    -------
-    dict keyed by vector name, each value a list of dicts:
-        {feature_idx, magnitude, label, decoder_direction}
-    sorted descending by magnitude.
-    """
-    def _card_lookup(cards: list[dict]) -> dict[int, str | None]:
-        lookup: dict[int, str | None] = {}
-        for card in cards:
-            idx = card["feature_idx"]
-            label = None
-            enriched = card.get("top_enriched_icd", [])
-            if enriched:
-                label = enriched[0].get("code")
-            if label is None:
-                enriched_meds = card.get("top_enriched_meds", [])
-                if enriched_meds:
-                    label = enriched_meds[0].get("med")
-            lookup[idx] = label
-        return lookup
-
-    result = {}
-    for name, sae in sae_models_dict.items():
-        if name not in vectors_dict:
-            continue
-        vec = vectors_dict[name][patient_idx]
-        cards = feature_cards_dict.get(name, [])
-        card_lookup = _card_lookup(cards)
-
-        device = next(sae.parameters()).device
-        with torch.no_grad():
-            x = torch.tensor(vec, dtype=torch.float32, device=device).unsqueeze(0)
-            activations = sae.encode(x).squeeze(0).cpu().numpy()
-
-        decoder_weight = sae.decoder.weight.detach().cpu().numpy()  # (embed_dim, n_features)
-
-        active_idx = np.nonzero(activations)[0]
-        magnitudes = activations[active_idx]
-        order = np.argsort(-np.abs(magnitudes))[:top_k]
-        active_idx = active_idx[order]
-        magnitudes = magnitudes[order]
-
-        features = []
-        for fi, mag in zip(active_idx, magnitudes):
-            features.append({
-                "feature_idx": int(fi),
-                "magnitude": float(mag),
-                "label": card_lookup.get(int(fi)),
-                "decoder_direction": decoder_weight[:, int(fi)].tolist(),
-            })
-        result[name] = features
-
-    return result

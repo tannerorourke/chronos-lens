@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Embeddings tooling for a run: list / fetch / extract / get.
 
-A run's embeddings live at ``RUNS_DIR/<run-id>/embeddings/embeddings_<epoch>.npz``.
+A run's embeddings live at ``EXPS_DIR/<run-id>/embeddings/embeddings_<epoch>.npz``.
 They are too big to keep locally, so the canonical read path is "check local, else
 pull just that one object from S3" (a single ``aws s3 cp``, never a bulk sync). When
 no ``.npz`` exists yet, they are *extracted* from a checkpoint by a forward pass.
@@ -13,11 +13,18 @@ Subcommands
 -----------
   list     python -m scripts.embeddings list    --exp <run-id>
   fetch    python -m scripts.embeddings fetch   --exp <run-id> [--emb embeddings_40.npz] [--all]
-  extract  python -m scripts.embeddings extract --exp <run-id> --ckpt checkpoint_100.pt
-  get      python -m scripts.embeddings get     --exp <run-id> [--emb embeddings_40.npz] [--ckpt checkpoint_100.pt]
-           # cascade: local -> S3 fetch -> extract from --ckpt
+  extract  python -m scripts.embeddings extract --exp <run-id> [--ckpt checkpoint_100.pt] [--save s3]
+  get      python -m scripts.embeddings get     --exp <run-id> [--emb embeddings_40.npz] [--ckpt ...] [--save local|s3]
+           # unified entry. cascade: local -> S3 fetch -> extract. The checkpoint
+           # is auto-resolved from --exp (local then S3) when --ckpt is omitted;
+           # --save controls persistence of a freshly extracted .npz.
 
-Env: CHRONOS_S3_BUCKET (default chronos-ml), CHRONOS_NO_FETCH=1 to fail fast.
+The checkpoint resolver prefers the highest-epoch ``checkpoint_<N>.pt`` over the
+rolling ``last.pt``. Extraction always writes the .npz locally (streaming writer),
+so on the extract path ``--save none`` and ``--save local`` are equivalent on disk
+and ``--save s3`` additionally pushes it to ``runs/<run-id>/embeddings/``.
+
+Env: AWS_S3_BUCKET (default chronos-ml), CHRONOS_NO_FETCH=1 to fail fast.
 """
 import argparse
 import subprocess
@@ -27,231 +34,100 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.infra.loaders import extract_and_write_embeddings
-from src.utils.io import RUNS_DIR, _embedding_epoch
-from src.infra.s3 import (
-    ensure_local, s3_list, s3_uri, get_bucket, aws_available,
-    push_file, download_object)
+import logging
+logger = logging.getLogger(__name__)
 
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-def _extract(run_id: str, ckpt_name: str, output_subdir: str = "embeddings") -> None:
-    """Extract embeddings from a checkpoint into RUNS_DIR/<run-id>/<output_subdir>/.
-
-    Thin CLI wrapper over :func:`src.infra.loaders.extract_and_write_embeddings`.
-    Seed is applied inside ``load_scaffolding`` (from the run's frozen meta.seed)
-    before the loader is built, so extraction order is deterministic.
-    """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    extract_and_write_embeddings(run_id, ckpt_name, device, output_subdir)
-
-
-def _resolve_name(run_id: str, name: str | None) -> str:
-    """Resolve an embeddings filename: normalize an explicit one, else the latest
-    available locally, else the latest in S3."""
-    if name:
-        return name if name.endswith(".npz") else f"{name}.npz"
-      
-    local_dir = RUNS_DIR / run_id / "embeddings"
-    if local_dir.is_dir():
-        names = [p.name for p in local_dir.glob("embeddings_*.npz")]
-        if names:
-            names.sort(key=lambda n: (_embedding_epoch(n), n))
-            return names[-1]
-    
-    remote = [n for n in s3_list(run_id, "embeddings") if n.endswith(".npz")]
-    if remote:
-        remote.sort(key=lambda n: (_embedding_epoch(n), n))
-        return remote[-1]
-    
-    raise SystemExit(
-        f"No embeddings found for run '{run_id}' (local or S3). Pass --emb, or "
-        f"`extract --ckpt <checkpoint.pt>`.")
-
-
-def fetch_embeddings(run_id: str, name: str | None = None, *, save: str = "none"):
-    """Resolve an embeddings .npz for a run under one of three persistence modes.
-
-    - ``none`` (default): return the loaded ``dict[str, np.ndarray]`` to the caller
-      without persisting a copy under the run's ``embeddings/`` dir. If a local copy
-      already exists it is read in place; otherwise the object is pulled to a temp
-      file, loaded, and the temp file is discarded.
-    - ``local``: ensure the object is in the canonical local cache
-      (``RUNS_DIR/<run-id>/embeddings/``) and return its ``Path``.
-    - ``s3``: ensure the object exists in S3 (pushing the local copy up if missing)
-      and return the local ``Path``.
-
-    The default is deliberately no-persist: embeddings can be tens of GB, so the
-    in-code analysis path that just needs the arrays should not litter local disk.
-    """
-    name = _resolve_name(run_id, name)
-    local = RUNS_DIR / run_id / "embeddings" / name
-
-    if save == "local":
-        return ensure_local(f"embeddings/{name}", run_id)
-
-    if save == "s3":
-        src = local if local.exists() else ensure_local(f"embeddings/{name}", run_id)
-        push_file(src, run_id, f"embeddings/{name}", verify=True)
-        return src
-
-    if save != "none":
-        raise ValueError(f"save must be one of none|local|s3, got '{save}'")
-
-    # none: prefer an existing local copy, else transient temp download
-    if local.exists():
-        return dict(np.load(local, allow_pickle=True))
-    with tempfile.TemporaryDirectory() as td:
-        dest = Path(td) / name
-        if not download_object(run_id, f"embeddings/{name}", dest):
-            raise FileNotFoundError(
-                f"Could not fetch embeddings/{name} for run '{run_id}' from S3 "
-                f"(and no local copy). Check the bucket / aws CLI, or `list`.")
-        return dict(np.load(dest, allow_pickle=True))
-
+from src.infra.inference import load_embeddings_for_analysis
+from src.utils.io import EXPS_DIR
+from src.infra.s3 import S3Client
 
 # =============================================================================
 # Subcommands
 # =============================================================================
 
-def cmd_list(args) -> None:
-    run_id = args.exp
-    names = [n for n in s3_list(run_id, "embeddings") if n.endswith(".npz")]
-    if not names:
-        print(f"No embeddings listed at {s3_uri(run_id, 'embeddings/')} "
-              f"(bucket={get_bucket()}, aws={'yes' if aws_available() else 'no'}).")
-        return
-    print(f"Embeddings available for run '{run_id}':")
-    for n in sorted(names, key=lambda n: (_embedding_epoch(n), n)):
-        print(f"  {n}")
-
-
 def cmd_fetch(args) -> None:
     run_id = args.exp
-
-    # bulk pull (opt-in)
-    if args.all:
-        src = s3_uri(run_id, "embeddings/")
-        dst = RUNS_DIR / run_id / "embeddings"
-        dst.mkdir(parents=True, exist_ok=True)
-        print(f"Bulk pull {src} -> {dst}")
-        subprocess.run(["aws", "s3", "sync", src, str(dst), "--only-show-errors"], check=False)
-        return
-
-    # single object: resolve under the requested persistence mode (default: none)
-    result = fetch_embeddings(run_id, args.emb, save=args.save)
-    if args.save == "none":
-        print(f"Fetched (not persisted) embeddings for '{run_id}': "
-              f"keys={list(result.keys())}. Use --save local to keep a copy on disk.")
-    else:
-        print(f"Ready ({args.save}): {result}")
-
-
-def cmd_extract(args) -> None:
+    run_dir = EXPS_DIR / run_id
+    if not run_dir.is_dir():
+        raise FileNotFoundError(f"Run {run_id} not found in ../{run_dir.parts[-2]}")
     
-    _extract(args.exp, args.ckpt, args.output_subdir)
+    ow = args.overwrite
+    with S3Client(run_dir, s3_subdir="runs", strict=True) as s3:
+        if args.file is not None:
+            if not ow and (run_dir / args.file).exists():
+                logger.info(f"Skipping existing {args.file}")
+                return
+            s3.fetch(args.file)
+        elif args.folder is not None:
+            folder = Path(args.folder).as_posix().strip("/")
+            s3.fetch_folder(folder, _overwrite=ow, _async=False)
+        else:
+            return
 
-
-def cmd_get(args) -> None:
-    """Cascade: local -> S3 fetch -> extract from --ckpt."""
+def cmd_sync(args) -> None:
     run_id = args.exp
-    emb_dir = RUNS_DIR / run_id / "embeddings"
+    run_dir = EXPS_DIR / run_id
+    if not run_dir.is_dir():
+        run_dir.mkdir(parents=True)
     
-    name = None
-    if args.emb:
-        name = args.emb if args.emb.endswith(".npz") else f"{args.emb}.npz"
+    ow = args.overwrite
+    with S3Client(run_dir, s3_subdir="runs", strict=True) as s3:
+        if args.file is not None:
+            if args.source == "local":
+                if not ow and s3.exists(args.file):
+                    logger.info(f"Skipping existing {args.file}")
+                    return
+                s3.upload(args.file)
+            elif args.source == "s3":
+                if not ow and (run_dir / args.file).exists():
+                    logger.info(f"Skipping existing {args.file}")
+                    return
+                s3.fetch(args.file)
         
-        local = emb_dir / name
-        if local.exists():
-            print(f"Ready (local): {local}")
-            return
-    
-    # 1. local
-    if emb_dir.is_dir():
-        names = [p.name for p in emb_dir.glob("embeddings_*.npz")]
-        if names:
-            names.sort(key=lambda n: (_embedding_epoch(n), n))
-            print(f"Ready (local): {emb_dir / names[-1]}")
-            return
-
-    # 2. S3 (single object cp)
-    remote = [n for n in s3_list(run_id, "embeddings") if n.endswith(".npz")]
-    if name is not None and name in remote:
-        print(f"Ready (S3): {ensure_local(f'embeddings/{name}', run_id)}")
-        return
-      
-    if name is None and remote:
-        remote.sort(key=lambda n: (_embedding_epoch(n), n))
-        print(f"Ready (S3): {ensure_local(f'embeddings/{remote[-1]}', run_id)}")
-        return
-
-    # 3. extract from checkpoint
-    if args.ckpt:
-        print("No embeddings found locally or in S3; extracting from checkpoint...")
-        _extract(run_id, args.ckpt, args.output_subdir)
-        return
-
-    raise SystemExit(
-        f"No embeddings found locally or in S3 for run '{run_id}', and no --ckpt "
-        f"given to extract. Pass --ckpt <checkpoint.pt> to compute them.")
+        elif args.folder is not None:
+            folder = args.folder.strip("/")
+            ldir = run_dir / f"{folder}"
+            
+            if args.source == "local":
+                s3.upload_folder(ldir, _overwrite=ow, _validate=True)
+                    
+            elif args.source == "s3":
+                s3.fetch_folder(folder, _overwrite=ow, _async=False)
+                
+                
 
 
-# =============================================================================
-# CLI
-# =============================================================================
+parser = argparse.ArgumentParser(
+    description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+parser.add_argument('--exp', required=True,
+                    help="Run-id naming the input config 'experiments/<exp>.yaml'")
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = parser.add_subparsers(dest="command", required=True)
+sub = parser.add_subparsers(dest="command", required=True)
+p_fetch = sub.add_parser("fetch", help="download `S3/runs/<exp>/<file>` to local `artifacts/<exp>/<file>`")
+p_fetch.add_argument("--overwrite", type=bool, default=False, 
+    help="if existing file should be overwritten")
+p_fetch.add_argument("--file", type=str, default=None, 
+    help="file path to fetch from S3")
+p_fetch.add_argument("--folder", type=str, default=None, 
+    help="folder path to fetch from S3")
+p_fetch.set_defaults(func=cmd_fetch)
 
-    p_list = sub.add_parser("list", help="list embeddings available in S3 for a run")
-    p_list.add_argument("--exp", "--run-id", dest="exp", required=True,
-                        help="run-id directory under RUNS_DIR")
-    p_list.set_defaults(func=cmd_list)
-
-    p_fetch = sub.add_parser("fetch", help="pull an existing .npz from S3")
-    p_fetch.add_argument("--exp", "--run-id", dest="exp", required=True,
-                         help="run-id directory under RUNS_DIR")
-    p_fetch.add_argument("--emb", type=str, default=None,
-                         help="embeddings_<N>.npz to fetch (default: latest available)")
-    p_fetch.add_argument("--save", choices=["none", "local", "s3"], default="none",
-                         help="persistence: none=load+return (no disk copy, default); "
-                              "local=keep under embeddings/; s3=ensure object is in S3")
-    p_fetch.add_argument("--all", action="store_true",
-                         help="bulk-pull the entire embeddings/ folder (opt-in)")
-    p_fetch.set_defaults(func=cmd_fetch)
-
-    p_extract = sub.add_parser("extract", help="compute embeddings from a checkpoint")
-    p_extract.add_argument("--exp", "--run-id", dest="exp", required=True,
-                           help="run-id directory under RUNS_DIR")
-    p_extract.add_argument("--ckpt", required=True, type=str,
-                           help="checkpoint .pt filename in the run's checkpoints/ dir")
-    p_extract.add_argument("--output-subdir", default="embeddings",
-                           help="subdir of the run dir to write into (default: embeddings)")
-    p_extract.set_defaults(func=cmd_extract)
-
-    p_get = sub.add_parser("get", help="resolve embeddings: local -> S3 -> extract")
-    p_get.add_argument("--exp", "--run-id", dest="exp", required=True,
-                       help="run-id directory under RUNS_DIR")
-    p_get.add_argument("--emb", type=str, default=None,
-                       help="embeddings_<N>.npz to resolve (default: latest available)")
-    p_get.add_argument("--ckpt", type=str, default=None,
-                       help="checkpoint to extract from if no .npz exists locally or in S3")
-    p_get.add_argument("--output-subdir", default="embeddings",
-                       help="subdir of the run dir to write into (default: embeddings)")
-    p_get.set_defaults(func=cmd_get)
-
-    return parser
+p_sync = sub.add_parser("sync", 
+    help="Sync a file between local `artifacts/<exp>/<file>` and `S3/runs/<exp>/<file>`")
+p_sync.add_argument("--source", type=str, choices=["local", "s3"], required=True, 
+    help="which source to push from")
+p_sync.add_argument("--overwrite", type=bool, default=False, 
+    help="if destination should be overwritten")
+p_sync.add_argument("--file", type=str, default=None, 
+    help="file path to sync")
+p_fetch.add_argument("--folder", type=str, default=None, 
+    help="folder path to sync")
+p_sync.set_defaults(func=cmd_sync)
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    args = parser.parse_args()
     args.func(args)
-
 
 if __name__ == "__main__":
     main()

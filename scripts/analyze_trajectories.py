@@ -21,47 +21,25 @@ import json
 import numpy as np
 import torch
 
-from src.infra.loaders import load_scaffolding, extract_embeddings
-from src.infra.vector_computation import compute_derived_vectors
+from src.infra.inference import load_embeddings_for_analysis
+# from src.infra.vector_computation import append_derived_vectors
 from src.infra.labels import (
-    load_escalation_labels, load_label_30d_at_k, extract_icd_block_targets)
+    load_escalation_labels, load_label_30d_at_k, 
+    extract_icd_block_targets, get_absolute_enc_times
+)
 from src.analysis.trajectories import (
     extract_trajectories,
     trajectory_velocity, trajectory_temporal_velocity,
     trajectory_curvature, trajectory_arc_length,
     concept_centroid, drift_toward_concept, temporal_drift_rate,
     prospective_trajectory_probe)
-from src.utils.io import (
-    RUNS_DIR, DATA_DIR,
-    load_embeddings, load_sequences_dict)
-from src.utils.seed import load_exp_seed, set_global_seed
+from src.utils.io import EXPS_DIR, DATA_DIR, load_sequences_dict
+from src.utils.system import load_exp_seed, set_global_seed
 
 
 # =============================================================================
 # Helpers
 # =============================================================================
-
-def _encounter_times(
-    patients_dict: dict[str, dict],
-    subject_ids: np.ndarray,
-    mask_pos: np.ndarray,
-) -> np.ndarray:
-    """Extract days_since_first for each (subject_id, mask_pos) sample.
-
-    Falls back to encounter index if days_since_first is not available.
-    """
-    N = len(subject_ids)
-    times = np.zeros(N, dtype=np.float64)
-    for i in range(N):
-        sid = str(subject_ids[i])
-        pos = int(mask_pos[i])
-        encs = patients_dict[sid]["encounters"]
-        if pos < len(encs):
-            times[i] = encs[pos].get("days_since_first", pos)
-        else:
-            times[i] = pos
-    return times
-
 
 def _build_labels_per_step(
     sample_labels: np.ndarray,
@@ -102,53 +80,64 @@ def _build_labels_per_step(
 
 
 # =============================================================================
-# Main
 # =============================================================================
+parser = argparse.ArgumentParser(description="Trajectory analysis for JEPA embeddings")
+parser.add_argument("--exp", type=str, required=True,
+                    help="Run-id of a completed run (under artifacts/training-runs/)")
+group = parser.add_mutually_exclusive_group(required=True)
+group.add_argument("--emb", type=str, default=None,
+                    help="Embeddings .npz file name (e.g. checkpoint_40.npz)")
+group.add_argument("--ckpt", type=str, default=None,
+                    help="Checkpoint .pt file to extract embeddings from")
+
+parser.add_argument("--save-emb-local", default=False, action="store_true")
+parser.add_argument("--save-emb-s3", default=False, action="store_true")
+parser.add_argument("--no-s3", default=False, action="store_true")
+
 
 def main():
-    parser = argparse.ArgumentParser(description="Trajectory analysis for JEPA embeddings")
-    parser.add_argument("--exp", type=str, required=True,
-                        help="Run-id of a completed run (under artifacts/training-runs/)")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--emb", type=str, default=None,
-                       help="Embeddings .npz file name (e.g. embeddings_40.npz)")
-    group.add_argument("--ckpt", type=str, default=None,
-                       help="Checkpoint .pt file to extract embeddings from")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    exp_dir = RUNS_DIR / args.exp   # --exp is the run-id under RUNS_DIR
+    exp_id = args.exp
+    exp_dir = EXPS_DIR / exp_id
+    
+    set_global_seed(load_exp_seed(exp_dir))
 
-    # -- Load or extract embeddings -------------------------------------------
-    if args.emb:
-        set_global_seed(load_exp_seed(exp_dir))
-        emb, emb_path = load_embeddings(exp_dir, args.emb)
-        print(f"Loaded embeddings: {emb_path}")
-    else:
-        model, loader, exp_dir, (ckpt, config), _ = \
-            load_scaffolding(args.ckpt, args.exp, device)
-        emb = extract_embeddings(model, loader, device)
-        emb = compute_derived_vectors(emb)
-        print(f"Extracted embeddings from {args.ckpt}")
+    # -- Load or extract embeddings
+    emb_stream, (model, config) = load_embeddings_for_analysis(
+        exp_id, args.emb, device, 
+        args.save_emb_local, args.save_emb_s3, args.no_s3
+    )
 
-    z_enc_recency = emb["z_enc_recency"]   # (N, D) recency encounter z_enc[k-1]
-    subject_ids = emb["subject_ids"]       # (N,)
-    mask_pos = emb["mask_pos"]             # (N,)
+    with emb_stream as es:
+        z_encs = es["z_encs"]
+        subject_ids = es["subject_ids"]    # (N,)
+        mask_pos = es["mask_pos"]          # (N,)
+        
+        # compute derive vectors
+        if config["model"]["architecture"] in ["ema", "stopgrad"]:
+            z_pred = es["z_pred"]
+            z_target = es["z_target"]
+            z_perr = z_pred - z_target
+        last_idx = (np.asarray(mask_pos) - 1).astype(int)   # (N,) last valid slot
+        rows = np.arange(z_encs.shape[0])
+        z_enc_recency = z_encs[rows, last_idx]   # (N, D)
 
     N, D = z_enc_recency.shape
     print(f"Samples: {N}, Dim: {D}, Patients: {len(np.unique(subject_ids))}")
 
-    # -- Load patient data for labels and times --------------------------------
-    sequences_path = DATA_DIR / "sequences.jsonl"
-    patients_dict = load_sequences_dict(sequences_path)
-    times = _encounter_times(patients_dict, subject_ids, mask_pos)
+    # -- Load patient data for labels and times
+    lpath_sequences = DATA_DIR / "sequences"
+    patients_dict = load_sequences_dict(lpath_sequences)
+    times = get_absolute_enc_times(patients_dict, subject_ids, mask_pos)
 
-    # -- Extract trajectories --------------------------------------------------
+    # -- Extract trajectories
     traj_dict = extract_trajectories(z_enc_recency, subject_ids, mask_pos, times=times)
     P, T_max = traj_dict["trajectories"].shape[:2]
     print(f"Trajectories: {P} patients, T_max={T_max}")
 
-    # -- Geometric primitives --------------------------------------------------
+    # -- Geometric primitives
     vel, vel_mask = trajectory_velocity(traj_dict)
     temp_vel, _ = trajectory_temporal_velocity(traj_dict)
     curv, curv_mask = trajectory_curvature(traj_dict)
@@ -164,11 +153,11 @@ def main():
     print(f"  Curvature: median={np.nanmedian(curv):.4f}")
     print(f"  Arc length: median={np.median(arc_lengths):.4f}")
 
-    # -- Labels ----------------------------------------------------------------
+    # -- Labels
     label_esc = load_escalation_labels(patients_dict, subject_ids, mask_pos)
     label_30d = load_label_30d_at_k(patients_dict, subject_ids, mask_pos)
     icd_targets, icd_chapters = extract_icd_block_targets(
-        sequences_path, subject_ids, mask_pos)
+        lpath_sequences, subject_ids, mask_pos)
 
     labels_dict = {
         "escalation": label_esc,

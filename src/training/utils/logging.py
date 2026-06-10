@@ -11,7 +11,9 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
-from src.utils.constants import ARCHITECTURES
+from src.models import MODEL_TYPE_STR
+from src.infra.s3 import S3Client
+from src.training.utils.checkpoint import save_checkpoint
 
 
 _TITLE_PT = 10
@@ -58,7 +60,7 @@ def _json_default(o):
 class JsonlWriter:
     """Append-only JSON-lines metrics sink - the canonical streamed sink.
 
-    One ``json.dumps(record)`` per line, flushed immediately so it is tail-able
+    One `json.dumps(record)` per line, flushed immediately so it is tail-able
     live under VS Code Remote-SSH::
 
         tail -f metrics.jsonl | jq 'select(.type=="epoch")'
@@ -157,20 +159,15 @@ class DriftMonitor:
 
 
 def extract_time_scale(model) -> float | None:
-    """Return the learnable temporal ``time_scale`` parameter (encoder), or None.
-
-    Robust to nesting: searches ``named_parameters()`` for the ``time_scale``
-    leaf rather than hard-coding an attribute path.
+    """Return self.encoder.temporal_encoding.time_scale by searching
+       named_parameters()` for the `time_scale` leaf
     """
-    if model is None:
-        return None
     try:
         for name, p in model.named_parameters():
             if name.rsplit(".", 1)[-1] == "time_scale":
                 return float(p.detach().cpu().reshape(-1)[0])
     except Exception:
         return None
-    return None
 
 
 class CsvWriter:
@@ -259,252 +256,184 @@ class EmbeddingTracker:
 class TrainingLogger:
     """All-in-one metrics logger for loss, grad norms, JEPA embeddings, etc.
 
-    ``metrics.jsonl`` (run root) is the canonical streamed sink - always on,
+    `metrics.jsonl` (run root) is the canonical streamed sink - always on,
     tail-able live, S3-syncable, durable across teardown. TensorBoard, CSV, and
     Weights & Biases are strictly OPTIONAL (default OFF) and degrade gracefully.
     Minimal memory overhead to fit on a single GPU.
     """
     def __init__(
         self,
-        logdir: Path,
-        epoch: int = 0,
+        run_dir: Path,
+        arch: MODEL_TYPE_STR,
         global_step: int = 0,
-        loss_history: list[float] = [],
+        epoch: int = 0,
         total_epochs: int | None = None,
-        log_jsonl: bool = True,
+        loss_history: list[float] = [],
+        ckpt_cycle: int = -1,
+        sync_s3: bool = True,
         log_csv: bool = False,
         log_tb: bool = False,
-        sync_s3: bool = True,
-        verbose: bool = False,
-        arch: ARCHITECTURES = "ema",
     ):
-        self.is_jepa = arch in ["ema", "stopgrad"]
+        self._is_jepa = arch in ["ema", "stopgrad"]
         self._closed = False
-        self._verbose = verbose
         self._total_epochs = total_epochs
-        self._run_root = Path(logdir)
+        self._run_root = Path(run_dir)
         self._logdir = self._run_root / "logs"
-        self._embdir = self._run_root / "embeddings"
-
-        self._ep_samples: int = 0
-        self.epoch_losses: list[float] = []
-        self.loss_history: list[float] = loss_history
-        self.epoch = epoch
+        self._ckptdir = self._run_root / "checkpoints"
+        self._logdir.mkdir(parents=True, exist_ok=True)
+        
         self.global_step = global_step
-        self.grad_norms: list[float] = []
+        self.epoch = epoch
+        self.loss_history: list[float] = loss_history
+        self.ckpt_cycle = ckpt_cycle
+        
+        # -- p/epoch metrics
+        self.ep_samples: int = 0
+        self.ep_losses: list[float] = []
+        self.ep_grad_norms: list[float] = []
 
-        # last-seen per-step values, stashed for the streamed step record
-        self._last_grad_norm: float | None = None
-        self._last_pred_err: float | None = None
-        self._last_lr: float | None = None
-
-        # Embedding health trackers (updated p/batch, p/epoch)
-        if self.is_jepa:
-            self.embed_tracker_z_enc    = EmbeddingTracker()
-            self.embed_tracker_z_pred   = EmbeddingTracker()
-            self.embed_tracker_z_target = EmbeddingTracker()
+        # -- p/batch metrics
+        if self._is_jepa:
+            self.trackers = {
+              "z_enc": EmbeddingTracker(),
+              "z_pred": EmbeddingTracker(),
+              "z_target": EmbeddingTracker(),
+            }
         else:
-            self.embed_tracker_z_enc    = EmbeddingTracker()
+            self.trackers = { "z_enc": EmbeddingTracker() }
 
-        # --- canonical sink: metrics.jsonl at the run root (always on) ------
-        self._log_jsonl = log_jsonl
-        self._jsonl = JsonlWriter(self._run_root / "metrics.jsonl") if log_jsonl else None
+        # --- default always: metrics.jsonl and s3
+        self._jsonl = JsonlWriter(self._logdir / "metrics.jsonl")
+        self._sync_s3 = sync_s3
 
-        # --- optional sinks (default OFF) -----------------------------------
+        # --- optional sinks
         self._log_csv = log_csv
-        self._csv_writer = (
-            CsvWriter(logdir=self._logdir, fn=f"{self._run_root.name}_metrics.csv")
-            if log_csv else None)
-
         self._log_tb = log_tb
-        self._tb_writer = None
-        if log_tb:  # only create tb_logs/ when explicitly enabled
-            self._tb_writer = SummaryWriter(log_dir=str(logdir / "tb_logs"))
-
-        # --- optional non-blocking S3 archive of the run dir ----------------
-        from src.infra.s3 import S3Syncer
-        self._syncer = S3Syncer(self._run_root, enabled=sync_s3)
-
+        self._csv_writer = (CsvWriter(logdir=self._logdir, fn=f"{self._run_root.name}_metrics.csv")
+                            if log_csv else None)
+        self._tb_writer = (SummaryWriter(log_dir=str(self._logdir))
+                           if log_tb else None)
+        
+        # ----------
         self._ep_start = 0.0
         self._run_start = 0.0
-        print(f"[TrainingLogger] streaming -> {self._run_root.name}/metrics.jsonl"
-              + (" +tb" if log_tb else "") + (" +csv" if log_csv else "") + (" +s3" if self._syncer.enabled else ""))
+        print(f"[TM] streaming @ {self._run_root.name} :: metrics.jsonl +s3"
+              + (" +tb" if log_tb else "") + (" +csv" if log_csv else ""))
 
-    def sync(self, *, blocking: bool = False) -> None:
-        """Trigger a (non-blocking) S3 sync of the run dir. No-op unless enabled."""
-        self._syncer.sync(blocking=blocking)
-
-    def push_checkpoint(self, local_path, *, verify: bool = True) -> bool:
-        """Blocking, verified S3 push of a single irreplaceable file (checkpoint or
-        final embeddings npz) under the run root. No-op unless ``sync_s3``.
-        """
-        local_path = Path(local_path)
-        rel = local_path.relative_to(self._run_root).as_posix()
-        return self._syncer.push(rel, verify=verify)
-
-    # --- Utilities
-    def lap(self):
-        self._ep_start = time.time()
-        if self._run_start == 0.0:
-            self._run_start = time.time()
-        
-    def log_step_scalar(self, name: str, value: float) -> None:
+    # --- Internal Utilities
+    def log_tb_scalar(self, name: str, value: float, step: int) -> None:
         # Log a single scalar at the current global_step to TensorBoard
-        if self._log_tb:
-            assert self._tb_writer is not None, "TensorBoard writer not initialized in log_step_scalar"
-            self._tb_writer.add_scalar(name, value, self.global_step)
+        if not self._log_tb or self._tb_writer is None:
+            return
+        self._tb_writer.add_scalar(name, value, step)
         
     def get_norm_metrics(self) -> dict:
-        if not self.grad_norms: return {}
+        if not self.ep_grad_norms: return {}
         return {
-            "grad_norm_mean": stats.mean(self.grad_norms),
-            "grad_norm_max": max(self.grad_norms),
-            "grad_norm_min": min(self.grad_norms),
-            "grad_norm_std": stats.stdev(self.grad_norms) if len(self.grad_norms) > 1 else 0.0,
+            "grad_norm_mean": stats.mean(self.ep_grad_norms),
+            "grad_norm_max": max(self.ep_grad_norms),
+            "grad_norm_min": min(self.ep_grad_norms),
+            "grad_norm_std": stats.stdev(self.ep_grad_norms) if len(self.ep_grad_norms) > 1 else 0.0,
         }
-        
-    # --- step/epoch logging
-    def log_batch(self, loss, s):
-        self._ep_samples += s
-        self.epoch_losses.append(float(loss))
-        self.global_step += 1
-        step_loss = float(loss) / s
-        if self._log_tb:
-            assert self._tb_writer is not None, "TensorBoard writer not initialized in log_batch"
-            self._tb_writer.add_scalar("step/loss", step_loss, self.global_step)
-        # canonical per-step record (loss, grad_norm, lr, z_pred_err_l2)
-        if self._jsonl is not None:
-            self._jsonl.write({
-                "type": "step",
-                "step": self.global_step,
-                "epoch": self.epoch,
-                "loss": step_loss,
-                "grad_norm": self._last_grad_norm,
-                "lr": self._last_lr,
-                "z_pred_err_l2": self._last_pred_err,
-            })
-
-
-    def log_grad_norm(self, grad_norm: int | float) -> None:
-        self.grad_norms.append(float(grad_norm))
-        self._last_grad_norm = float(grad_norm)
-        self.log_step_scalar("step/grad_norm", grad_norm)
-
-    def update_embed_health(
+    
+    # --- batch logging
+    def record_embeds(
         self,
         z_enc:        torch.Tensor,         # (B, C, D)
         ctx_pad_mask: torch.Tensor,         # (B, C) True = padding
         z_pred:       torch.Tensor = None,  # (B, D), JEPA only
         z_target:     torch.Tensor = None,  # (B, D), JEPA only
     ) -> None:
-        """Track `z_enc` collapse health over the **flattened valid encounters**
-        `z_enc[~ctx_pad_mask]` - the same per-encounter population VICReg
-        regularizes - identically for every arch. JEPA additionally passes
-        `z_pred`/`z_target` for predictor-side health + the pred-error scalar.
-        """
-        z_enc_np = z_enc.detach().cpu().float().numpy()           # (B, C, D)
-        valid    = ~ctx_pad_mask.detach().cpu().bool().numpy()    # (B, C) True = real
-        self.embed_tracker_z_enc.update(z_enc_np[valid])          # (N_valid, D)
+        """ Track various embedding metrics """
+        z_enc_np = z_enc.detach().cpu().float().numpy()
+        valid    = ~ctx_pad_mask.detach().cpu().bool().numpy()
+        self.trackers["z_enc"].update(z_enc_np[valid])
 
         if z_pred is None or z_target is None:
             return
 
-        z_pred_np   = z_pred.detach().cpu().float().numpy()       # (B, D)
-        z_target_np = z_target.detach().cpu().float().numpy()     # (B, D)
-        self.embed_tracker_z_pred.update(z_pred_np)
-        self.embed_tracker_z_target.update(z_target_np)
+        z_pred_np   = z_pred.detach().cpu().float().numpy()
+        z_target_np = z_target.detach().cpu().float().numpy()
+        self.trackers["z_pred"].update(z_pred_np)
+        self.trackers["z_target"].update(z_target_np)
 
         pred_err_l2 = np.linalg.norm(z_pred_np - z_target_np, axis=-1)
-        self._last_pred_err = float(pred_err_l2.mean())
-        self.log_step_scalar("step/z_pred_err_l2_mean", self._last_pred_err)
-
-    # --- Final logging
-    def log_epoch(self, lr: float | None = None, model=None, **metrics) -> dict:
-        if self._log_csv:
-            self._logdir.mkdir(parents=True, exist_ok=True)
-
-        self.epoch += 1
-        self._last_lr = lr
+        self.log_tb_scalar("step/z_pred_err_l2_mean", pred_err_l2, self.global_step)
+        
+    def record_batch(self, loss, n_smpls):
+        self._logdir.mkdir(parents=True, exist_ok=True)
+      
+        self.global_step += 1
+        self.ep_samples += n_smpls
+        self.ep_losses.append(float(loss))
+        step_loss = float(loss) / n_smpls
+        
+        if self._jsonl is not None:
+            self._jsonl.write({
+                "type": "step",
+                "step": self.global_step,
+                "epoch": self.epoch,
+                "step_loss": step_loss,
+                "grad_norm": self.batch_gn
+            })
+        if self._log_tb:
+            self.log_tb_scalar("step/loss", step_loss, self.global_step)
+            if self.batch_gn is not None:
+                self.log_tb_scalar("step/grad_norm", self.batch_gn, self.global_step) 
+            
+        self.batch_gn = None
+    
+    # --- epoch logging
+    def record_epoch(self, lr: float, ts: float | None, **metrics) -> dict:
         wall_time = time.time() - self._run_start
         ep_time = time.time() - self._ep_start
-        epoch_loss = float(sum(self.epoch_losses) / self._ep_samples)
+        epoch_loss = float(sum(self.ep_losses) / self.ep_samples)
         self.loss_history.append(epoch_loss)
-        self.epoch_losses.clear()
 
         raw_metrics = {
             "epoch": self.epoch,
+            "steps": self.global_step,
             "wall_sec": wall_time,
             "lr": lr,
             "loss": epoch_loss,
+            **{ k: v for k, v in self.get_norm_metrics().items() }
         }
-
-        ts = extract_time_scale(model)
-        if ts is not None:
-            raw_metrics["time_scale"] = ts
-
-        cli_pp: dict = {
-            "lr": self._fmt(lr),
-            "loss": self._fmt(epoch_loss)
-        }
-
-        # --- grad norms
-        if len(self.grad_norms) > 0:
-            for k, v in self.get_norm_metrics().items():
-                raw_metrics[k] = v
-                if k == "grad_norm_mean" or self._verbose:
-                    cli_pp[k] = self._fmt(v)
-        self.grad_norms.clear()
-
-        # -- always-on: embed health
-        trackers = [("z_enc", self.embed_tracker_z_enc)]
-        if self.is_jepa:
-            trackers.append(("z_pred", self.embed_tracker_z_pred))
-            trackers.append(("z_target", self.embed_tracker_z_target))
-        for tag, tracker in trackers:
-            m = tracker.get_metrics()
-            for k, v in m.items():
+        
+        for tag, tracker in self.trackers.items():
+            for k, v in tracker.get_metrics().items():
                 raw_metrics[f"embed_{tag}_{k}"] = v
-            tracker.reset()
 
-        # -- extras from caller (always CSV/TB/jsonl, verbose-gated CLI)
-        raw_metrics["steps"] = self.global_step
+        # -- extras raw metrics
         for k, v in metrics.items():
             raw_metrics[k] = v
-        if self._verbose:
-            cli_pp["steps"] = self.global_step
-            for k, v in metrics.items():
-                cli_pp[k] = self._fmt(v)
-
-        # -- GPU memory (gb)
+        if ts is not None:
+            raw_metrics["time_scale"] = ts
         if torch.cuda.is_available():
             raw_metrics["mem_allocated_gb"] = torch.cuda.memory_allocated() / 1e9
             raw_metrics["mem_peak_gb"] = torch.cuda.max_memory_allocated() / 1e9
-
-        # -- formatted for CSV/TB
-        log_metrics = {k: self._fmt(v) if k not in ("epoch", "wall_sec", "steps") else v
-                      for k, v in raw_metrics.items()}
-
-        # -- log to CLI
-        print(" | ".join(
-            [f"[{self.epoch}]"] +
-            [f"{k}={self._fmt(v)}" for k, v in cli_pp.items() if k != "wall_sec"] +
-            [f"[{self._pp_time(ep_time)} ({ep_time:.0f})]"]
-        ))
-
-        # -- canonical per-epoch record
+        
+        # --- output to logs
+        # CLI
+        cli_pp = f"[{self.epoch}] | "
+        cli_pp += f"lr={lr:.6f} loss={self._fmt(epoch_loss):.5f} gn_mean={self._fmt(raw_metrics['grad_norm_mean']):.5f} | "
+        cli_pp += f"[{self._pp_time(ep_time)} ({self._pp_time(wall_time)})]"
+        print(cli_pp)
+        
+        # JSONL
         if self._jsonl is not None:
             self._jsonl.write({"type": "epoch", **raw_metrics})
-
-        # -- optional sinks
+            
+        # CSV and TensorBoard
+        ext_metrics = {k: self._fmt(v) if k not in ("epoch", "wall_sec", "steps") else v
+                      for k, v in raw_metrics.items()}
+        
         if self._log_csv:
             assert self._csv_writer is not None, "CSV writer not initialized in log_epoch"
-            self._csv_writer.write(log_metrics)
-
+            self._csv_writer.write(ext_metrics)
+            
         if self._log_tb:
-            assert self._tb_writer is not None, "TensorBoard writer not initialized in log_epoch"
-            if lr is not None:
-                self._tb_writer.add_scalar("epoch/lr", lr, self.epoch)
-            for key, value in log_metrics.items():
+            self.log_tb_scalar("epoch/lr", lr, self.epoch)
+            for key, value in ext_metrics.items():
                 if key in ("epoch", "wall_sec", "steps") or value in (None, ""):
                     continue
                 v = int(value) if isinstance(value, bool) else float(value)
@@ -512,18 +441,53 @@ class TrainingLogger:
                     tb_key = f"embed/{key[len('embed_'):]}"
                 else:
                     tb_key = f"epoch/{key}"
-                self._tb_writer.add_scalar(tb_key, v, self.epoch)
-            self._tb_writer.flush()
-
+                self.log_tb_scalar(tb_key, v, self.epoch)
+            
         return raw_metrics
+    
+    def save_checkpoint(self, state_dict, model_params, optimizer, scheduler):
+        """ rolling `last.pt` every epoch, and preserved `checkpoint_<N>.pt` every ckpt_cycle """
+        is_cycle = bool(self.ckpt_cycle) and self.epoch % self.ckpt_cycle == 0
+        is_final = self.epoch == self._total_epochs
+        fn = "last.pt"
+        if is_cycle and not is_final:
+            fn = f"checkpoint_{self.epoch}.pt"
+        
+        ckpt_path = save_checkpoint(
+            state_dict, model_params, optimizer, scheduler,
+            self.epoch, self.global_step, self.loss_history, self._ckptdir, 
+            fn)
+        
+        if self._sync_s3:
+            with S3Client(self._run_root, s3_subdir="runs", strict=False) as s3:
+                s3.upload(file=ckpt_path, _async=False, _validate=True)
+                s3.upload(file=self._logdir / "metrics.jsonl", _async=True)
+        
+        return ckpt_path
+    
+    def lap(self):
+        """ reset all metrics, incr. epoch and timer """
+        self.ep_samples = 0
+        self.ep_losses.clear()
+        self.ep_grad_norms.clear()
+        for tracker in self.trackers.values():
+            tracker.reset()
+            
+        if self._tb_writer is not None:
+            self._tb_writer.flush()
+        
+        # lap
+        self.epoch += 1
+        self._ep_start = time.time()
+        if self._run_start == 0.0:
+            self._run_start = time.time()
 
+    # --- end logging
     def finalize(self):
         from datetime import datetime
 
         total_time = time.time() - self._run_start
-
-        # run_summary.json at the run root. Loss curves stay reconstructable from
-        # metrics.jsonl rather than depending on TB event files.
+        self._logdir.mkdir(parents=True, exist_ok=True)
         with open(self._run_root / "run_summary.json", "w") as f:
             json.dump({
                 "total_epochs": self.epoch,
@@ -538,10 +502,8 @@ class TrainingLogger:
             self._tb_writer.flush()
             self._tb_writer.close()
 
-        # Final full S3 sync so teardown is consequence-free (no-op unless enabled).
-        self._syncer.close()
         self._closed = True
-        print(f"\n[TrainingLogger] Run complete in {self._pp_time(total_time)}")
+        print(f"\n[TM] Run complete in {self._pp_time(total_time)}")
 
     # -- Print utility
     @staticmethod

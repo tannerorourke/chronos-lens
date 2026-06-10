@@ -18,7 +18,6 @@ stratified k-fold CV, for each available label (label_30d, label_escalation).
 
 import argparse
 import gc
-import json
 from pathlib import Path
 
 import numpy as np
@@ -32,7 +31,7 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from src.utils.io import DATA_DIR, load_json, load_sequences, save_json
-from src.utils.seed import SEED, set_global_seed
+from src.utils.system import SEED, set_global_seed
 
 
 LABEL_KEYS = ["label_30d", "label_escalation"]

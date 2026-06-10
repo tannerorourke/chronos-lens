@@ -9,8 +9,8 @@ Functions
   probe_encounter_level         : per-encounter probing with patient-grouped CV
   run_probing_sweep             : layer-by-layer probe sweep for signal localization
 """
-import numpy as np
 import torch
+import numpy as np
 from torch.utils.data import DataLoader
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GroupKFold, StratifiedKFold
@@ -19,19 +19,19 @@ from sklearn.metrics import (
     average_precision_score, f1_score, 
     roc_auc_score, brier_score_loss)
 
-from src.models.jepa_ema import JEPA_EMA
+from src.models import MODEL_TYPE, JEPA_EMA
 from src.infra.vector_computation import (
     flatten_valid_encounters,
     select_terminal_by_patient)
 from src.infra.metrics import compute_all_metrics
-from src.utils.seed import SEED
+from src.utils.system import SEED
 
 # =============================================================================
 # Setup
 # =============================================================================
 
 def extract_layer_representations(
-    model: JEPA_EMA | torch.nn.Module,
+    model: MODEL_TYPE,
     loader: DataLoader,
     device: torch.device,
 ) -> dict:
@@ -39,7 +39,7 @@ def extract_layer_representations(
 
     Registers a forward hook on each transformer encoder layer to capture
     intermediate outputs. Both layer outputs and the final z_enc are reduced to
-    the recency encounter ``z_enc[k-1]`` (the most-recent context slot), not a
+    the recency encounter `z_enc[k-1]` (the most-recent context slot), not a
     context mean - the recency point is the consistent per-encounter vector.
 
     Returns
@@ -138,21 +138,19 @@ def probe_vectors(
     to_patient  : if True, reduce to one row per patient (their terminal sample,
                   largest mask_pos) before probing - prevents data leakage for
                   patient-level labels with multiple mask positions per patient.
-                  Requires ``mask_pos``.
+                  Requires `mask_pos`.
     mask_pos    : (N,) target encounter index per sample; required when
-                  ``to_patient`` is True.
+                  `to_patient` is True.
     n_splits    : number of stratified CV folds
 
     Returns
     -------
     dict mapping vector name -> evaluate_binary_probe metrics dict
     """
-    if to_patient and mask_pos is None:
-        raise ValueError("probe_vectors(to_patient=True) requires mask_pos")
-
     results = {}
     for name, emb in vectors.items():
         if to_patient:
+            assert mask_pos is not None, "probe_vectors(to_patient=True) requires mask_pos"
             emb_p, _ = select_terminal_by_patient(emb, subject_ids, mask_pos)
             # patient labels are constant per patient -> first occurrence suffices
             _, first_idx = np.unique(np.asarray(subject_ids, dtype=str), return_index=True)
@@ -554,7 +552,7 @@ def run_probing_sweep(
     Parameters
     ----------
     layer_representations : output of :func:`extract_layer_representations` -
-        dict with ``layer_0`` .. ``layer_{n-1}``, ``final``, and ``n_layers``.
+        dict with `layer_0` .. `layer_{n-1}`, `final`, and `n_layers`.
     labels : (N,) binary labels aligned to the representation rows.
     n_splits : number of stratified CV folds.
 

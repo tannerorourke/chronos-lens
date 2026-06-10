@@ -33,7 +33,7 @@ If a helper is needed by both training and analysis, it belongs in `infra` (or `
 | `models/` | Network definitions only: `encoder.py` (encounter encoder), `predictor.py`, `jepa_ema.py`, `jepa_stopgrad.py`, `supervised_transformer.py`, `sae.py`. Every model `forward` returns `z_enc (B, C, D)` as its first output (see `src/utils/types.md` for the full shape contract). |
 | `mimic/` | MIMIC-IV extraction and causal label computation: `mimic.py`, `labels.py` (escalation state machine, 30-day readmission), `helper.py`, `metadata.py`, `baselines.py`. Upstream of training; produces `data/processed/sequences.jsonl`. |
 | `training/` | Training loops (`train_ema.py`, `train_sg.py`, `train_supervised.py`) and supporting utils (`datasets.py`, `checkpoint.py`, `optimizers.py`, `logging.py`, `vicreg.py`). |
-| `infra/` | `loaders.py` - model/loader scaffolding, in-memory `extract_embeddings`, streaming `stream_embeddings` + `EmbeddingWriter`s. `labels.py` - per-sample labels, ICD-block targets, temporal split, subset masks. `metrics.py` - AUROC / AUPRC / F1 / Brier / ECE. `vector_computation.py` - recency / pred-error derivation, patient/encounter reshaping. `s3.py` - run-dir sync and on-demand fetch. |
+| `infra/` | `loaders.py` - model/loader scaffolding, in-memory `get_embeds_from_checkpoint`, streaming `stream_embeddings` + `EmbeddingWriter`s. `labels.py` - per-sample labels, ICD-block targets, temporal split, subset masks. `metrics.py` - AUROC / AUPRC / F1 / Brier / ECE. `vector_computation.py` - recency / pred-error derivation, patient/encounter reshaping. `s3.py` - run-dir sync and on-demand fetch. |
 | `analysis/` | `geometry.py` (PCA, CKA, label subspaces), `composition.py` (SAE decomposition), `sae.py` (feature enrichment), `probing.py` (linear probes, layer sweep), `trajectories.py` (velocity / curvature / drift), `clustering.py`, `plotting.py`. |
 | `utils/` | `io.py` - paths, config / npz / sequences I/O, and the single source of truth for all output path constants. `seed.py`, `constants.py` (`set_cuda_precision`), `types.md` (shape contract). |
 
@@ -67,12 +67,12 @@ All output path constants are defined in `src/utils/io.py`. Never redefined or c
 | Constant | Default path | Purpose |
 | --- | --- | --- |
 | `EXPERIMENTS_DIR` | `chronos-lens/experiments/` | git-tracked flat input configs (`<run-id>.yaml`) |
-| `RUNS_DIR` | `artifacts/training-runs/` | all training outputs (checkpoints, embeddings, logs) |
+| `EXPS_DIR` | `artifacts/training-runs/` | all training outputs (checkpoints, embeddings, logs) |
 | `ANALYSIS_DIR` | `artifacts/analysis/` | generated analysis artifacts |
 
 A run is identified by `<run-id>`: `experiments/<run-id>.yaml` (input config) ↔ `artifacts/training-runs/<run-id>/` (all outputs) ↔ the `--exp` argument to any script. The `experiments/*/` rule in `.gitignore` enforces no per-run subdirectories in `experiments/` - do not remove it.
 
-Override `RUNS_DIR` with the `CHRONOS_ARTIFACTS_ROOT` env var when the artifacts root changes (e.g. on a remote GPU node).
+Override `EXPS_DIR` with the `CHRONOS_ARTIFACTS_ROOT` env var when the artifacts root changes (e.g. on a remote GPU node).
 
 ### Code style
 

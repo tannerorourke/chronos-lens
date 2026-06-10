@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.infra.loaders import load_scaffolding, extract_embeddings
+from src.infra.inference import load_scaffolding, get_embeds_from_checkpoint
 from src.infra.labels import (
     load_label, load_escalation_labels, compute_escalation_criterions,
     compute_subset_mask, compute_temporal_split, extract_icd_block_targets)
@@ -40,8 +40,8 @@ from src.analysis.probing import (
     evaluate_binary_probe, evaluate_binary_probe_temporal, 
     probe_icd_blocks, probe_icd_blocks_temporal)
 from src.utils.constants import ESCALATION_CRITERIA, MODEL_PRED_VECS, ALL_TASKS
-from src.utils.io import load_sequences_dict, DATA_DIR, RUNS_DIR
-from src.utils.seed import set_global_seed, load_exp_seed
+from src.utils.io import load_sequences_dict, DATA_DIR, EXPS_DIR
+from src.utils.system import set_global_seed, load_exp_seed
 
 # =============================================================================
 # Core evaluation
@@ -77,7 +77,6 @@ def run_tasks(
         if vecs.get(name) is not None
     }
 
-    # -- Patient-level vectors: each patient's terminal sample (largest mask_pos) --
     pat_vectors, pat_ids = (
         select_terminal_by_patient(enc_vectors, subject_ids, mask_pos)
         if mask_pos is not None else (None, None)
@@ -276,7 +275,7 @@ def build_diagnostic_ctx(args: argparse.Namespace, tasks: list[str]) -> dict:
     print("\n  Extracting embeddings...")
     # Single extraction path for every arch: z_encs (N, C, D); JEPA also yields
     # z_pred/z_target. compute_derived_vectors adds z_enc_recency (+ pred_error).
-    vecs = extract_embeddings(model, loader, device)
+    vecs = get_embeds_from_checkpoint(model, loader, device)
     vecs = compute_derived_vectors(vecs)
     print(f"  z_enc_recency shape: {vecs['z_enc_recency'].shape}")
 
@@ -356,7 +355,7 @@ def main():
     # Seed at entry from the run's frozen config (load_scaffolding re-applies the
     # same seed when it rebuilds the model; setting it here makes the run's
     # determinism explicit and independent of that call order).
-    set_global_seed(load_exp_seed(RUNS_DIR / args.exp))
+    set_global_seed(load_exp_seed(EXPS_DIR / args.exp))
 
     # [2] -- Gather context (model, loader, embeddings, masks) ----------------
     ctx = build_diagnostic_ctx(args, tasks)

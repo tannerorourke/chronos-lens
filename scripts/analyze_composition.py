@@ -22,113 +22,74 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.infra.loaders import load_scaffolding, extract_embeddings
-from src.infra.vector_computation import compute_derived_vectors
 from src.infra.labels import (
-    load_escalation_labels, load_label_30d_at_k, extract_icd_block_targets)
+    load_escalation_labels, 
+    load_label_30d_at_k, 
+    extract_icd_block_targets
+)
 from src.analysis.geometry import (
-    label_subspace, multi_label_subspace, effective_rank_of_label)
-from src.analysis.composition import (
-    compositional_decomposition)
-from src.analysis.sae import load_sae
-from src.utils.io import (
-    RUNS_DIR, DATA_DIR,
-    load_embeddings, load_sequences_dict)
-from src.utils.seed import load_exp_seed, set_global_seed
+    label_subspace, 
+    multi_label_subspace, 
+    effective_rank_of_label,
+    label_subspace_alignment
+)
+from src.analysis.composition import sae_decomposition
+from src.infra.inference import load_embeddings_for_analysis, load_sae_info
+from src.utils.io import EXPS_DIR, DATA_DIR, load_sequences_dict
+from src.utils.system import load_exp_seed, set_global_seed
 
 
-# =============================================================================
-# Helpers
-# =============================================================================
-
-def _find_sae_dir(exp_dir: Path, sae_name: str) -> Path:
-    """Locate SAE directory under experiment. Accepts name or path."""
-    sae_dir = exp_dir / sae_name
-    if sae_dir.is_dir():
-        return sae_dir
-    sae_dir = exp_dir / f"sae_{sae_name}"
-    if sae_dir.is_dir():
-        return sae_dir
-    candidates = list(exp_dir.glob(f"sae_{sae_name}*"))
-    if candidates:
-        candidates.sort()
-        return candidates[0]
-    raise FileNotFoundError(
-        f"SAE directory not found: tried {exp_dir / sae_name} and {exp_dir / f'sae_{sae_name}'}")
-
-
-def _label_subspace_alignment(dirs_a: np.ndarray, dirs_b: np.ndarray) -> dict:
-    """Principal angles between two direction matrices (rank_a, D) and (rank_b, D)."""
-    k = min(dirs_a.shape[0], dirs_b.shape[0])
-    M = dirs_a @ dirs_b.T
-    _, s, _ = np.linalg.svd(M, full_matrices=False)
-    cos_angles = np.clip(s[:k], 0.0, 1.0)
-    return {
-        "cos_principal_angles": cos_angles.tolist(),
-        "mean_alignment": float(cos_angles.mean()),
-        "min_alignment": float(cos_angles.min()),
-    }
-
-
-# =============================================================================
-# Main
-# =============================================================================
+parser = argparse.ArgumentParser(description="Compositional decomposition analysis")
+parser.add_argument("--exp", type=str, required=True,
+                    help="Run-id of a completed run (under artifacts/training-runs/)")
+parser.add_argument("--sae", type=str, required=True,
+                    help="SAE directory name (e.g. sae_pred_error)")
+group = parser.add_mutually_exclusive_group(required=True)
+group.add_argument("--emb", type=str, default=None,
+                    help="Embeddings .npz file name (e.g. embeddings_40.npz)")
+group.add_argument("--ckpt", type=str, default=None,
+                    help="Checkpoint .pt file to extract embeddings from")
+parser.add_argument("--rank", type=int, default=5,
+                    help="Subspace rank for label_subspace (default: 5)")
+parser.add_argument("--threshold", type=float, default=0.8,
+                    help="Coverage threshold for compositional decomposition (default: 0.8)")
 
 def main():
-    parser = argparse.ArgumentParser(description="Compositional decomposition analysis")
-    parser.add_argument("--exp", type=str, required=True,
-                        help="Run-id of a completed run (under artifacts/training-runs/)")
-    parser.add_argument("--sae", type=str, required=True,
-                        help="SAE directory name (e.g. sae_pred_error)")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--emb", type=str, default=None,
-                       help="Embeddings .npz file name (e.g. embeddings_40.npz)")
-    group.add_argument("--ckpt", type=str, default=None,
-                       help="Checkpoint .pt file to extract embeddings from")
-    parser.add_argument("--rank", type=int, default=5,
-                        help="Subspace rank for label_subspace (default: 5)")
-    parser.add_argument("--threshold", type=float, default=0.8,
-                        help="Coverage threshold for compositional decomposition (default: 0.8)")
     args = parser.parse_args()
 
+    exp_id = args.exp
+    exp_dir = EXPS_DIR / exp_id
+
+    set_global_seed(load_exp_seed(exp_dir))
+    
+    # -- Load or extract embeddings
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    exp_dir = RUNS_DIR / args.exp   # --exp is the run-id under RUNS_DIR
+    emb_stream, (_, _) = load_embeddings_for_analysis(
+        exp_id, args.emb, device, 
+        False, False, False
+    )
+    with emb_stream as es:
+        z_enc = es["z_encs"]
+        subject_ids = es["subject_ids"]    # (N,)
+        mask_pos = es["mask_pos"]          # (N,)
+        
+        # compute derive vectors
+        # if config["model"]["architecture"] in ["ema", "stopgrad"]:
+            # z_pred = es["z_pred"]
+            # z_target = es["z_target"]
+            # z_perr = z_pred - z_target
+        # last_idx = (np.asarray(mask_pos) - 1).astype(int)   # (N,) last valid slot
+        # rows = np.arange(z_enc.shape[0])
+        # z_enc_recency = z_enc[rows, last_idx]   # (N, D)
 
-    # -- Load or extract embeddings -------------------------------------------
-    if args.emb:
-        set_global_seed(load_exp_seed(exp_dir))
-        emb, emb_path = load_embeddings(exp_dir, args.emb)
-        print(f"Loaded embeddings: {emb_path}")
-    else:
-        model, loader, exp_dir, (ckpt, config), _ = \
-            load_scaffolding(args.ckpt, args.exp, device)
-        emb = extract_embeddings(model, loader, device)
-        emb = compute_derived_vectors(emb)
-        print(f"Extracted embeddings from {args.ckpt}")
-
-    subject_ids = emb["subject_ids"]    # (N,)
-    mask_pos = emb["mask_pos"]          # (N,)
     N = len(subject_ids)
-
-    # Per-sample analysis vector: the recency encounter z_enc[k-1] (fall back to z_pred)
-    z_enc = emb.get("z_enc_recency")
-    if z_enc is None:
-        z_enc = emb.get("z_pred")
-    if z_enc is None:
-        raise KeyError(
-            f"No 'z_enc_recency' or 'z_pred' in embeddings for run '{args.exp}' "
-            f"(available keys: {sorted(emb.keys())}).")
     D = z_enc.shape[1]
-    print(f"z_enc: ({N}, {D})")
 
-    # -- Load SAE -------------------------------------------------------------
-    sae_dir = _find_sae_dir(exp_dir, args.sae)
-    sae_ckpt_path = sae_dir / "sae_checkpoint.pt"
-    sae_model = load_sae(sae_ckpt_path, device)
-    print(f"Loaded SAE: {sae_ckpt_path} "
-          f"(n_features={sae_model.n_features}, top_k={sae_model.top_k})")
+    # -- Load SAE
+    sae_model, sae_dir, sae_params, dec_weights, activations = load_sae_info(exp_dir, args.sae, device)
+    print(f"Loaded SAE: n_features={sae_model.n_features}, top_k={sae_model.top_k}")
 
-    # -- Load labels ----------------------------------------------------------
+    # -- Load labels
     sequences_path = DATA_DIR / "sequences.jsonl"
     patients_dict = load_sequences_dict(sequences_path)
 
@@ -149,7 +110,9 @@ def main():
     label_names = sorted(labels_dict.keys())
     print(f"Labels: {label_names}")
 
-    # -- Per-label: label_subspace + effective_rank + compositional decomp -----
+
+    # --- ANALYSIS ---
+    # -- Per-label: label_subspace + effective_rank + compositional decomp
     print("\n--- Label Subspace Analysis ---")
     subspace_results: dict[str, dict] = {}
     rank_results: dict[str, int] = {}
@@ -172,7 +135,7 @@ def main():
         rank_results[lname] = eff_rank
 
         # Compositional decomposition
-        decomp = compositional_decomposition(sub, sae_model, threshold=args.threshold)
+        decomp = sae_decomposition(sub, sae_model, threshold=args.threshold)
         decomp_results[lname] = {
             "selected_features": decomp["selected_features"],
             "principal_angles": decomp["principal_angles"],
@@ -192,8 +155,7 @@ def main():
     label_matrix = np.column_stack([labels_dict[ln] for ln in label_names])
     multi_sub = multi_label_subspace(z_enc, label_matrix, rank=args.rank,
                                      label_names=label_names)
-    print(f"  Top canonical correlations: "
-          f"{[round(c, 4) for c in multi_sub['correlations'][:5]]}")
+    print(f"  Top canonical correlations: {[round(c, 4) for c in multi_sub['correlations'][:5]]}")
 
     # -- Cross-label subspace alignment ---------------------------------------
     print("\n--- Cross-label Subspace Alignment ---")
@@ -202,7 +164,7 @@ def main():
         for j, ln_b in enumerate(label_names):
             if j <= i:
                 continue
-            alignment = _label_subspace_alignment(label_dirs[ln_a], label_dirs[ln_b])
+            alignment = label_subspace_alignment(label_dirs[ln_a], label_dirs[ln_b])
             key = f"{ln_a}_vs_{ln_b}"
             alignment_results[key] = alignment
             print(f"  {key}: mean={alignment['mean_alignment']:.4f}, "

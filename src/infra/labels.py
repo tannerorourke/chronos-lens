@@ -1,10 +1,4 @@
-"""Label / target / split / subset preparation for analysis (infra).
-
-Turns the frozen sequences (and a loaded ``patients_dict``) into the per-sample
-label, multi-label target, temporal-split, and subset-mask arrays the analysis
-scripts probe against. One step above raw I/O - reads sequences/labels and
-derives causal per-encounter analysis inputs. No model dependencies.
-"""
+""" Label / target / split / subset preparation """
 import json
 from pathlib import Path
 
@@ -12,7 +6,7 @@ import numpy as np
 
 
 # =============================================================================
-# Per-sample binary labels (causal, at the masked encounter)
+# Patient Sequences (dict ) -> labels
 # =============================================================================
 
 def load_label_30d_at_k(
@@ -20,8 +14,8 @@ def load_label_30d_at_k(
     subject_ids: np.ndarray,
     mask_pos: np.ndarray,
 ) -> np.ndarray:
-    """Load per-sample causal 30d readmission label at each sample's mask position.
-
+    """
+    Load per-sample causal 30d readmission label at each sample's mask position.
     Reads patient["label_30d_per_enc"][k] for each (subject_id, mask_pos=k) pair.
     """
     labels = np.zeros(len(subject_ids), dtype=np.int64)
@@ -69,7 +63,7 @@ def load_escalation_labels(
     subject_ids: np.ndarray,
     mask_pos: np.ndarray,
 ) -> np.ndarray:
-    """Load per-sample per-encounter escalation labels at each sample's mask position."""
+    """ Load per-sample per-encounter escalation labels at each sample's mask position """
     labels = np.zeros(len(subject_ids), dtype=np.int64)
     for i, (sid, pos) in enumerate(zip(subject_ids, mask_pos)):
         patient = patients_dict[str(sid)]
@@ -79,6 +73,10 @@ def load_escalation_labels(
             labels[i] = per_enc[pos]
     return labels
 
+
+# =============================================================================
+# Re-run the escalation state machine
+# =============================================================================
 
 def compute_escalation_criterions(
     patients_dict: dict[str, dict],
@@ -141,10 +139,6 @@ def compute_escalation_criterions(
     return criteria_labels
 
 
-# =============================================================================
-# Subset filtering
-# =============================================================================
-
 def compute_subset_mask(patients: dict[str, dict], subject_ids: np.ndarray, subset):
     n_tot = len(subject_ids)
     if subset == "all":
@@ -162,10 +156,48 @@ def compute_subset_mask(patients: dict[str, dict], subject_ids: np.ndarray, subs
     print(f"  Subset: {subset} -> {int(subset_mask.sum())}/{n_tot} samples")
 
     return subset_mask
-
-
+  
+  
+def get_absolute_enc_times(
+    patients_dict: dict[str, dict],
+    subject_ids: np.ndarray,
+    mask_pos: np.ndarray,
+) -> np.ndarray:
+    """Extract days_since_first for each (subject_id, mask_pos) sample."""
+    N = len(subject_ids)
+    times = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        sid = str(subject_ids[i])
+        pos = int(mask_pos[i])
+        encs = patients_dict[sid]["encounters"]
+        if pos < len(encs):
+            times[i] = encs[pos].get("days_since_first", pos)
+        else:
+            times[i] = pos
+    return times
+  
+def get_relative_enc_times(
+    patients_dict: dict[str, dict],
+    subject_ids: np.ndarray,
+    mask_pos: np.ndarray,
+) -> np.ndarray:
+    """Extract days since previous encounter for each (subject_id, mask_pos) sample.
+      First encounters get 0.
+    """
+    N = len(subject_ids)
+    rel = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        sid = str(subject_ids[i])
+        pos = int(mask_pos[i])
+        encs = patients_dict[sid]["encounters"]
+        if pos > 0 and pos < len(encs):
+            t_cur = encs[pos].get("days_since_first", pos)
+            t_prev = encs[pos - 1].get("days_since_first", pos - 1)
+            rel[i] = t_cur - t_prev
+    return rel
+  
 # =============================================================================
-# Temporal Splitting
+# Patient sequence computations
 # =============================================================================
 
 def compute_temporal_split(

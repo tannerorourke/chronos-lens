@@ -41,7 +41,7 @@ meta:
     tag: "sg-vr_256"
     description: "Stop-grad JEPA + VICReg, embed_dim 256, seed 42 (scaling ladder)"
     resume_from: null
-    save_cycle: 5
+    ckpt_cycle: 5
     log_tb: True
     log_csv: True
     sync_s3: true

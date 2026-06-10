@@ -31,8 +31,8 @@ from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from src.models.sae import SparseAutoencoder
-from src.utils.seed import SEED
+from src.models import SparseAutoencoder
+from src.utils.system import SEED
 
 
 # =============================================================================
@@ -43,7 +43,7 @@ def extract_trajectories(
     z_sample: np.ndarray,
     subject_ids: np.ndarray,
     mask_pos: np.ndarray,
-    times: np.ndarray | None = None,
+    times: np.ndarray,
 ) -> dict:
     """Group sample-level embeddings into per-patient temporal trajectories.
 
@@ -71,9 +71,7 @@ def extract_trajectories(
     subject_ids = np.asarray(subject_ids, dtype=str)
     mask_pos = np.asarray(mask_pos, dtype=int)
     D = z_sample.shape[1]
-    has_times = times is not None
-    if has_times:
-        times = np.asarray(times, dtype=float)
+    times = np.asarray(times, dtype=float)
 
     unique_ids = np.unique(subject_ids)
     P = len(unique_ids)
@@ -92,14 +90,13 @@ def extract_trajectories(
 
     trajectories = np.zeros((P, T_max, D), dtype=z_sample.dtype)
     validity_mask = np.zeros((P, T_max), dtype=bool)
-    time_mat = np.zeros((P, T_max), dtype=np.float64) if has_times else None
+    time_mat = np.zeros((P, T_max), dtype=np.float64)
 
     for p_idx, sid in enumerate(unique_ids):
         for t, (_, sample_idx) in enumerate(patient_groups[sid]):
             trajectories[p_idx, t] = z_sample[sample_idx]
             validity_mask[p_idx, t] = True
-            if has_times:
-                time_mat[p_idx, t] = times[sample_idx]
+            time_mat[p_idx, t] = times[sample_idx]
 
     return {
         "trajectories": trajectories,
@@ -138,7 +135,7 @@ def trajectory_velocity(traj_dict: dict) -> tuple[np.ndarray, np.ndarray]:
 def trajectory_temporal_velocity(traj_dict: dict) -> tuple[np.ndarray, np.ndarray]:
     """Velocity in per-day units: Δz / Δt.
 
-    Requires ``times`` in traj_dict. Δt is clipped to a minimum of 1 day
+    Requires `times` in traj_dict. Δt is clipped to a minimum of 1 day
     to avoid inf from same-day encounters.
 
     Parameters
@@ -295,7 +292,7 @@ def temporal_drift_rate(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-day drift rate toward a concept centroid.
 
-    Same as drift_toward_concept divided by Δt. Requires ``times`` in
+    Same as drift_toward_concept divided by Δt. Requires `times` in
     traj_dict. Δt clipped to min 1 day for inf-safety.
 
     Parameters
@@ -432,11 +429,11 @@ def prospective_trajectory_probe(
 
             # Drift toward concept at step k-1
             if has_centroid:
-                feats.append(drift[p, k - 1] if drift_mask[p, k - 1] else 0.0)
+                feats.append(drift[p, k - 1] if drift_mask[p, k - 1] else 0.0) # type: ignore
 
             # Temporal drift rate at step k-1
             if has_centroid and has_times:
-                feats.append(tdrift[p, k - 1] if drift_mask[p, k - 1] else 0.0)
+                feats.append(tdrift[p, k - 1] if drift_mask[p, k - 1] else 0.0) # type: ignore
 
             # Δt from step k-1 to step k
             if has_times:
@@ -520,8 +517,8 @@ def matched_trajectory_neighbors(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Find nearest neighbors using fixed-length early trajectory prefixes.
 
-    Computes Euclidean distance on the flattened first ``prefix_len`` steps
-    of each trajectory.  Only patients with at least ``prefix_len`` valid
+    Computes Euclidean distance on the flattened first `prefix_len` steps
+    of each trajectory.  Only patients with at least `prefix_len` valid
     steps are included.
 
     Parameters

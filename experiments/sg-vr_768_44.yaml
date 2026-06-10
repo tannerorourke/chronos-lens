@@ -41,7 +41,7 @@ meta:
     tag: "sg-vr_768"
     description: "Stop-grad JEPA + VICReg, embed_dim 768, seed 44 (scaling ladder)"
     resume_from: null
-    save_cycle: 5
+    ckpt_cycle: 5
     sync_s3: true
 sae_config:
     z_enc:

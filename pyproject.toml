@@ -21,6 +21,8 @@ dependencies = [
     "xgboost",
     "hdbscan",
     "scipy",
+    "dotenv>=0.9.9",
+    "boto3>=1.43.24",
 ]
 
 [tool.setuptools.packages.find]

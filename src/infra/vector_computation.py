@@ -1,13 +1,12 @@
-"""Vector manipulation for analysis (infra).
-
-Pure-numpy transforms of already-extracted embedding vectors - no model forward,
-no disk I/O. Derives analysis vectors (recency, pred-error), reshapes between
-sample / encounter / patient levels, and selects patients of interest.
+"""
+Vector computation & manipulation for analysis
+- Pure-numpy transforms of already-extracted embedding vectors 
+- no model forward, disk I/O.
 """
 import numpy as np
 
 
-def compute_derived_vectors(raw_vecs: dict) -> dict:
+def get_derived_vectors(raw_vecs: dict) -> tuple[np.ndarray, np.ndarray]:
     """Compute
         pred_error    = z_pred - z_target
         z_enc_recency = z_encs[k-1] - the most-recent context encounter per sample
@@ -18,18 +17,17 @@ def compute_derived_vectors(raw_vecs: dict) -> dict:
     prefix-length dependent) - the last context slot z_enc[k-1] is the one
     consistent "one point per encounter" and matches the model readout.
     """
-    vecs = dict(raw_vecs)
+    pred_error: np.ndarray = np.asarray([])
+    z_enc_recency: np.ndarray = np.asarray([])
+    if "z_pred" in raw_vecs and "z_target" in raw_vecs:
+        pred_error = raw_vecs["z_pred"] - raw_vecs["z_target"]
 
-    if "z_pred" in vecs and "z_target" in vecs:
-        vecs["pred_error"] = vecs["z_pred"] - vecs["z_target"]
+    if "z_encs" in raw_vecs and "mask_pos" in raw_vecs:
+        last_idx = (np.asarray(raw_vecs["mask_pos"]) - 1).astype(int)
+        rows = np.arange(raw_vecs["z_encs"].shape[0])
+        z_enc_recency = raw_vecs["z_encs"][rows, last_idx] # (N, D)
 
-    if "z_encs" in vecs and "mask_pos" in vecs:
-        z_encs = vecs["z_encs"]                          # (N, C, D)
-        last_idx = (np.asarray(vecs["mask_pos"]) - 1).astype(int)   # (N,) last valid slot
-        rows = np.arange(z_encs.shape[0])
-        vecs["z_enc_recency"] = z_encs[rows, last_idx]   # (N, D)
-
-    return vecs
+    return pred_error, z_enc_recency
 
 
 def broadcast_to_samples(patient_data, patient_ids, subject_ids) -> np.ndarray:
@@ -40,12 +38,10 @@ def broadcast_to_samples(patient_data, patient_ids, subject_ids) -> np.ndarray:
 
 
 def flatten_valid_encounters(z_encs, ctx_pad_mask, subject_ids) -> tuple:
-    """Flatten z_enc from (N, C, D) to (N_valid, D) using pad masks. Usually called
-       in order to pool encounters over patients. enc_positions[i] is the context
-       position index for the i-th valid encounter.
-
-    Returns (z_enc_flat, enc_subject_ids, enc_positions).
-
+    """
+    Flatten z_enc from (N, C, D) to (N_valid, D) using pad masks. Usually called
+    in order to pool encounters over patients for patient-level analysius.
+    enc_positions[i] is the context position index for the i-th valid encounter.
     """
     valid_mask = ~ctx_pad_mask.astype(bool)
     z_enc_flat = z_encs[valid_mask]
@@ -60,13 +56,11 @@ def select_terminal_by_patient(
     mask_pos: np.ndarray,
     key_suffix: str = ""
 ) -> tuple:
-    """Reduce sample-level vector(s) to one row per patient by selecting each
-    patient's terminal sample - the largest ``mask_pos`` (most-informed state) -
-    rather than averaging. A mean across a patient's samples smooths over the
-    trajectory; the terminal sample is the patient's latest encoded state.
+    """
+    One row per patient by selecting each patient's terminal sample
 
     Accepts a single (N, D) array or a dict of {name: (N, D)} arrays. Returns
-    (terminal, unique_subject_ids); for dict input ``terminal`` is a dict with
+    (terminal, unique_subject_ids); for dict input `terminal` is a dict with
     the same (optionally suffixed) keys.
     """
     sids = np.asarray(subject_ids, dtype=str)
@@ -109,8 +103,8 @@ def select_interesting_patients(
     escalation_cases  : patients with escalation label = 1
     random_sample     : random selection
     """
-    from src.utils.seed import get_rng
-    rng  = get_rng()
+    from src.utils.system import get_numpy_rng
+    rng  = get_numpy_rng()
 
     N = z_pred.shape[0]
 

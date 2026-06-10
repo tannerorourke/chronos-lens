@@ -18,19 +18,6 @@ from src.utils.io import DATA_DIR, save_json, save_metadata, load_sequences
 from src.training.utils.datasets import build_vocab
 from src.analysis.plotting import plot_pat_enc_histogram
 
-# optional dotenv support
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except:
-    pass
-
-# =============================================================================
-# MIMIC Settings - change as needed
-BQ_PROJECT_ID = os.environ["CHRONOS_BQ_PROJECT_ID"]
-BQ_PROJECT_NAME = os.environ["CHRONOS_BQ_PROJECT_NAME"]
-MIMIC_BQ_DATASET = "physionet-data.mimiciv_3_1_hosp"
-# =============================================================================
 
 parser = argparse.ArgumentParser(description="""MIMIC-IV Patient Sequence extraction pipeline
     - Requires a PhysioNet-linked BigQuery project, or cached parquet files in data/parquet/.
@@ -143,8 +130,7 @@ def main():
         sequences = load_sequences(path=args.seq_path)
         print(f"  Loaded {len(sequences):,} sequences")
     else:
-        admissions, patients, diagnoses, prescriptions = load_tables(MIMIC_BQ_DATASET,
-                                                                     BQ_PROJECT_ID)
+        admissions, patients, diagnoses, prescriptions = load_tables()
         encounters = get_clean_encounters(admissions, diagnoses, prescriptions,
                                           label_prefix=LABEL_ICD10_PREFIX)
         sequences = build_patient_sequences(encounters,

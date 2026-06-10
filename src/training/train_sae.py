@@ -2,12 +2,14 @@
 Trains a TopK sparse autoencoder on a JEPA latent vector.
 """
 
+import gc
 from pathlib import Path
+
+import logging
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import matplotlib
-
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
@@ -15,66 +17,108 @@ import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 
 from src.models.sae import SparseAutoencoder
-from src.utils.io import load_embeddings, save_json
+from src.infra.inference import load_embeddings_for_analysis
+from src.analysis.sae import extract_activations
+from src.utils.io import save_json
 from src.training.utils.logging import plot_loss_curve
+
+
+
+def save_sae_results(
+    model: SparseAutoencoder,
+    data_vec: np.ndarray,
+    loss_history: list,
+    sae_exp_dir: Path,
+    device: torch.device
+):
+    """Save SAE checkpoint, dictionary, activations, and loss curve"""
+    # -- Checkpoint
+    ckpt_path = sae_exp_dir / "sae.pt"
+    torch.save({
+        "model": model.state_dict(),
+        "model_params": {
+            "embed_dim": model.embed_dim,
+            "n_features": model.n_features,
+            "top_k": model.top_k,
+        },
+        "loss_history": loss_history,
+    }, ckpt_path)
+
+    # -- Dictionary (decoder weights)
+    # decoder.weight is (embed_dim, n_features); save as (n_features, embed_dim)
+    dictionary = model.decoder.weight.data.cpu().numpy().T
+    dict_path = sae_exp_dir / "decoder_weights.npy"
+    np.save(dict_path, dictionary)
+
+    # -- Activations on full dataset
+    with torch.no_grad():
+        x = torch.tensor(data_vec, dtype=torch.float32, device=device)
+        _, act = model(x)
+    act_np = act.cpu().numpy()
+    np.save(sae_exp_dir / "activations.npy", act_np)
+
+    # -- Loss curve
+    plot_loss_curve(loss_history, save_path=sae_exp_dir / "sae_loss_curve",
+                    title="SAE Training Loss")
+
+    # -- Summary JSON
+    summary_path = sae_exp_dir / "sae_summary.json"
+    save_json({
+        "embed_dim": model.embed_dim,
+        "n_features": model.n_features,
+        "top_k": model.top_k,
+        "n_samples": data_vec.shape[0],
+        "final_loss": loss_history[-1] if loss_history else None,
+        "n_epochs": len(loss_history),
+        "n_dead_features": int(((act_np != 0).sum(axis=0) == 0).sum()),
+        "mean_active_per_sample": float((act_np != 0).sum(axis=1).mean()),
+    }, summary_path)
+
+    logger.info(f"SAE results saved in {sae_exp_dir}")
 
 # =========================================================================
 # Training
 # =========================================================================
 
 def main(
-    params: dict,
-    exp_dir: Path,
+    sae_params: dict,
+    sae_exp_dir: Path,
     target: str,
     embeddings: str,
     device: torch.device,
 ) -> None:
-    print(f"Configuring SAE for {target} :)")
+    base_model_dir = sae_exp_dir.parent
     
-    # --- Locate embeddings file
-    emb_npz, emb_path = load_embeddings(exp_dir, embeddings)
-    print(f"  Embeddings: {emb_path.name}")
+    logger.info("Setting up SAE training..")
+    logger.info(f"  Target: {target}")
+    n_features  = sae_params["n_features"]
+    top_k       = sae_params["top_k"]
+    epochs      = sae_params["epochs"]
+    lr          = float(sae_params["lr"])
+    batch_size  = sae_params["batch_size"]
     
-    # -- get output directory
-    output_dir = exp_dir / f"sae_{target}"
-    i = 0
-    if output_dir.exists(): i = 2
-    while output_dir.exists():
-        output_dir = exp_dir / f"sae_{target}_v{i}"; i += 1
-    print(f"  Output directory: {'/'.join(output_dir.parts[-3:])}")
-
-    # --- Load target vector
-    if target == "z_enc":
-        z_encs = emb_npz["z_encs"]                              # (N, C, D)
-        ctx_pad_mask = emb_npz["ctx_pad_mask"].astype(bool)    # (N, C)
-        data_vec = z_encs[~ctx_pad_mask].astype(np.float64)     # (N_valid, D)
-        print(f"  Flattened z_encs: {z_encs.shape} -> {data_vec.shape} valid encounters")
-    elif target == "pred_error":
-        data_vec = (emb_npz["z_pred"] - emb_npz["z_target"]).astype(np.float64)
-        print(f"  Computed pred_error = z_pred - z_target")
-    else:
-        data_vec = emb_npz[target].astype(np.float64)
-    N, D = data_vec.shape
+    # --- Load target vector into tensor dataset
+    logger.info(f"Loading embedding vec to reconstruct from {embeddings}")
+    emb_stream, _ = load_embeddings_for_analysis(base_model_dir.name, name=embeddings, device=device)
+    with emb_stream as emb:
+        if target == "z_enc":
+            ctx_pad_mask = emb["ctx_pad_mask"].astype(bool)
+            data_vec = emb["z_encs"][~ctx_pad_mask].astype(np.float64)
+        elif target == "pred_error":
+            data_vec = (emb["z_pred"] - emb["z_target"]).astype(np.float64)
+        else:
+            data_vec = emb[target].astype(np.float64)
+            
+    dv_N, dv_D = data_vec.shape
+    logger.info(f"    N={dv_N} samples, D={dv_D} embed_dim")
     
-    print("  Training config:")
-    print(f"    N={N} samples, D={D} embed_dim")
-    for k, v in params.items():
-        print(f"    {k}: {v}")
-    
-    n_features  = params["n_features"]
-    top_k       = params["top_k"]
-    epochs      = params["epochs"]
-    lr          = float(params["lr"])
-    batch_size  = params["batch_size"]
-
-    # --- Dataset
-    N, embed_dim = data_vec.shape
+    logger.info("Initializing all the parts..")
     tensor_data_vec = torch.tensor(data_vec, dtype=torch.float32)
-    dataset = TensorDataset(tensor_data_vec)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
-
-    # --- Model
-    model = SparseAutoencoder(embed_dim, n_features, top_k).to(device)
+    ds = TensorDataset(tensor_data_vec)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, drop_last=False)
+    del ds; gc.collect()
+    
+    model = SparseAutoencoder(dv_D, n_features, top_k).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     # --- Training loop
@@ -119,7 +163,7 @@ def main(
                 else:
                     mean_cos = 0.0
 
-            print(
+            logger.info(
                 f"[Epoch {epoch:4d}/{epochs}]  "
                 f"  loss={mean_loss:.6f}  "
                 f"  active/sample={active_per_sample:.1f}  "
@@ -128,79 +172,6 @@ def main(
             )
             model.train()
 
-    print("\nTraining Complete.")
-    print("=" * 60)
-    save_sae_results(model, data_vec, loss_history, output_dir)
-
-
-# =========================================================================
-# Save results
-# =========================================================================
-
-def save_sae_results(
-    model: SparseAutoencoder,
-    disp_vec: np.ndarray,
-    loss_history: list,
-    output_dir: Path,
-) -> dict:
-    """Save SAE checkpoint, dictionary, activations, and loss curve"""
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # --- Checkpoint ---
-    ckpt_path = output_dir / "sae_checkpoint.pt"
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "embed_dim": model.embed_dim,
-        "n_features": model.n_features,
-        "top_k": model.top_k,
-        "loss_history": loss_history,
-    }, ckpt_path)
-
-    # --- Dictionary (decoder weights)
-    # decoder.weight is (embed_dim, n_features); save as (n_features, embed_dim)
-    dictionary = model.decoder.weight.data.cpu().numpy().T
-    dict_path = output_dir / "sae_dictionary.npy"
-    np.save(dict_path, dictionary)
-
-    # --- Activations on full dataset
+    logger.info("\nTraining Complete!")
     model.eval()
-    with torch.no_grad():
-        tensor_disp_vec = torch.tensor(disp_vec, dtype=torch.float32)
-        _, activations = model(tensor_disp_vec.to(next(model.parameters()).device))
-        act_np = activations.cpu().numpy()
-    act_path = output_dir / "sae_activations.npy"
-    np.save(act_path, act_np)
-
-    # --- Loss curve
-    loss_fig_path = output_dir / "sae_loss_curve.png"
-    plot_loss_curve(loss_history, save_path=output_dir / "sae_loss_curve",
-                    title="SAE Training Loss")
-
-    # --- Summary JSON
-    summary_path = output_dir / "sae_summary.json"
-    save_json({
-        "embed_dim": model.embed_dim,
-        "n_features": model.n_features,
-        "top_k": model.top_k,
-        "n_samples": disp_vec.shape[0],
-        "final_loss": loss_history[-1] if loss_history else None,
-        "n_epochs": len(loss_history),
-        "n_dead_features": int(((act_np != 0).sum(axis=0) == 0).sum()),
-        "mean_active_per_sample": float((act_np != 0).sum(axis=1).mean()),
-    }, summary_path)
-
-    print(f"SAE results saved")
-    print(f"  checkpoint:   {ckpt_path.name}")
-    print(f"  dictionary:   {dict_path.name} | shape={dictionary.shape}")
-    print(f"  activations:  {act_path.name} | shape={act_np.shape}")
-    print(f"  loss curve:   {loss_fig_path.name}")
-    print(f"  summary:      {summary_path.name}")
-
-    return {
-        "checkpoint": ckpt_path,
-        "dictionary": dict_path,
-        "activations": act_path,
-        "loss_curve": loss_fig_path,
-        "summary": summary_path,
-    }
+    save_sae_results(model, data_vec, loss_history, sae_exp_dir, device)

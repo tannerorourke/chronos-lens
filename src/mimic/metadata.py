@@ -25,13 +25,11 @@ Escalation features     (10) - requires labels.py to have run first
 Trajectory features     (3)
 """
 
-import argparse
 from collections import Counter
 from typing import Callable
 
 import numpy as np
 
-from src.utils.io import DATA_DIR, save_metadata, load_sequences
 from src.utils.constants import DRUG_CLASSES, ESCALATION_CRITERIA, SEVERITY_LOOKUP
 from src.mimic.helper import parse_dt, has_drug_in_class
 

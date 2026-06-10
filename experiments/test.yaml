@@ -4,7 +4,7 @@
 # Everything is shrunk: 32-d model, 200 patients, <=8 encounters, few epochs.
 #
 # NOTE on checkpoints: every loop now saves unconditionally - a rolling `last.pt`
-# every `save_cycle` epochs plus a preserved `checkpoint_<final_epoch>.pt` at the
+# every `ckpt_cycle` epochs plus a preserved `checkpoint_<final_epoch>.pt` at the
 # end (no dependence on loss dynamics). The training entrypoint then always
 # extracts `embeddings_<final_epoch>.npz` from that final checkpoint.
 model:
@@ -49,7 +49,7 @@ meta:
     tag: "test"
     description: "Tiny local CPU smoke-test (EMA). Exercises train -> embeddings -> analyze -> SAE -> probe."
     resume_from: null
-    save_cycle: 1
+    ckpt_cycle: 1
     save_emb_every: 1
 # SAE leaf configs are never code-generated (only read at io.py:251) and are
 # frozen into the run, so authoring them here is what enables

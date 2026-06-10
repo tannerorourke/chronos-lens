@@ -17,8 +17,7 @@ import umap as umap_module
 import phate as phate_module
 import pingouin as pg
 
-
-from src.utils.seed import SEED
+from src.utils.system import SEED
 
 # =============================================================================
 # PCA Decomp
@@ -139,245 +138,6 @@ def fit_phate(
         verbose=0
     )
     return reducer.fit(vec)
-
-# =============================================================================
-# Divergent pairs analysis
-# =============================================================================
-
-# -----------------
-
-def find_divergent_pairs(
-    context_sims: np.ndarray,
-    pred_dists:   np.ndarray,
-    eps:          float = 0.9,
-    delta:        float = 0.5,
-) -> tuple:
-    """
-    Find pairs with similar contexts but divergent predictions.
-
-    Upper-triangle pairs where context cosine similarity > eps
-    but prediction cosine distance > delta.
-
-    Parameters
-    ----------
-    context_sims : (N, N) cosine similarity matrix (e.g. z_target or z_enc)
-    pred_dists   : (N, N) cosine distance matrix of predictions (z_pred)
-    eps          : context similarity lower bound
-    delta        : prediction divergence lower bound
-
-    Returns
-    -------
-    (row_idx, col_idx) : integer arrays indexing the N samples
-                         (upper triangle only;  row_idx < col_idx)
-    """
-    N  = context_sims.shape[0]
-    iu = np.triu_indices(N, k=1)
-    mask = (context_sims[iu] > eps) & (pred_dists[iu] > delta)
-    return iu[0][mask], iu[1][mask]
-
-
-def regress_divergence(
-    context_sims: np.ndarray,
-    pred_dists:   np.ndarray,
-) -> dict:
-    """
-    OLS regression of prediction divergence on context similarity.
-
-    Continuous version of divergence analysis: residuals from the
-    regression are the "unexplained" prediction divergence signal.
-
-    Parameters
-    ----------
-    context_sims : (N, N) cosine similarity matrix (e.g. z_target or z_enc)
-    pred_dists   : (N, N) cosine distance matrix of predictions (z_pred)
-
-    Returns
-    -------
-    dict with keys:
-      slope, intercept, r, p, stderr - OLS statistics
-      residuals                       - (n_pairs,) signed residuals (y - ŷ)
-      ctx_sim_flat                    - (n_pairs,) upper-triangle context sims
-      pred_dist_flat                  - (n_pairs,) upper-triangle pred dists
-      n_pairs                         - number of unique pairs evaluated
-    """
-    N  = context_sims.shape[0]
-    iu = np.triu_indices(N, k=1)
-    x  = context_sims[iu]
-    y  = pred_dists[iu]
-
-    lr        = stats.linregress(x, y)
-    slope     = float(lr.slope) # type: ignore[arg-type]
-    intercept = float(lr.intercept) # type: ignore[arg-type]
-    residuals = y - (slope * x + intercept)
-
-    return {
-        "slope":          slope,
-        "intercept":      intercept,
-        "r":              float(lr.rvalue),  # type: ignore[arg-type]
-        "p":              float(lr.pvalue),  # type: ignore[arg-type]
-        "stderr":         float(lr.stderr),  # type: ignore[arg-type]
-        "residuals":      residuals,
-        "ctx_sim_flat":   x,
-        "pred_dist_flat": y,
-        "n_pairs":        int(len(x)),
-    }
-    
-
-def project_pair_divergence_vectors(
-    z_pred:         np.ndarray,
-    pair_indices:   tuple,
-    pca_components: np.ndarray,
-) -> np.ndarray:
-    """
-    Compute prediction divergence vectors d_ij = z_pred_i - z_pred_j
-    and project onto top-k PCA axes.
-    """
-    row_idx, col_idx = pair_indices
-    k = pca_components.shape[0]
-    if len(row_idx) == 0:
-        return np.empty((0, k), dtype=np.float64)
-    div_vecs = z_pred[row_idx] - z_pred[col_idx]    # (n_pairs, D)
-    return div_vecs @ pca_components.T              # (n_pairs, k)
-
-
-def divergence_variance_comparison(
-    z_pred:         np.ndarray,
-    pair_indices:   tuple,
-    pca_components: np.ndarray,
-) -> tuple:
-    """
-    Per-PC projection variance of prediction-divergent pairs vs. random baseline.
-
-    If divergent-pair vectors concentrate along a PC axis (high variance
-    ratio), that axis encodes prediction divergence structure - not noise.
-    """
-    from src.utils.seed import get_rng
-    rng  = get_rng()
-    
-    row_idx, col_idx = pair_indices
-    k     = pca_components.shape[0]
-    n_div = len(row_idx)
-
-    if n_div == 0:
-        return np.full(k, np.nan), np.full(k, np.nan)
-
-    # Divergent pair projections
-    div_proj   = project_pair_divergence_vectors(z_pred, pair_indices, pca_components)
-    div_pc_var = div_proj.var(axis=0)
-
-    # Random baseline - same count, drawn uniformly from all upper-triangle pairs
-    N           = z_pred.shape[0]
-    n_total     = N * (N - 1) // 2
-    rand_linear = rng.choice(n_total, size=n_div, replace=(n_div > n_total))
-    iu          = np.triu_indices(N, k=1)
-    rand_proj   = project_pair_divergence_vectors(
-        z_pred, (iu[0][rand_linear], iu[1][rand_linear]), pca_components
-    )
-    rand_pc_var = rand_proj.var(axis=0)
-
-    return div_pc_var, rand_pc_var
-
-# =============================================================================
-# ICC Analysis
-# =============================================================================
-
-def compute_icc(
-    pc_projections:  np.ndarray,
-    subject_ids:     np.ndarray,
-    top_k:           int,
-    min_samples:     int = 3,
-    trait_threshold: float = 0.8,
-    state_threshold: float = 0.2
-) -> dict:
-    """
-    Intraclass correlation coefficient per top-k PC axis across encounter
-    windows within each patient.
-
-    Interpretation
-    --------------
-    ICC > trait_threshold (0.8) -> axis tracks stable patient-level trait
-    ICC < state_threshold (0.2) -> axis reflects dynamic encounter state
-
-    Parameters
-    ----------
-    pc_projections : (N, >= top_k) PC score matrix from the geometry step
-    subject_ids    : (N,) patient identifier per sample
-    top_k          : number of PC axes to evaluate (clamped to shape[1])
-    min_samples    : patients with fewer encounter samples are excluded
-
-    Returns
-    -------
-    dict with keys:
-      icc_per_pc       : {"PC1": float, ...}
-      trait_pcs        : list of PC labels with ICC > trait_threshold
-      state_pcs        : list of PC labels with ICC < state_threshold
-      eligible_patients: num qualifying patients
-      trait_threshold  : TRAIT_THRESHOLD
-      state_threshold  : STATE_THRESHOLD
-    """
-    def _nan_to_none(v):
-        return None if (isinstance(v, float) and np.isnan(v)) else v
-    
-    # ---------------------------------------------------------------- #
-    k = min(top_k, pc_projections.shape[1])
-
-    # Group encounter-level PC scores by patient
-    unique_sids   = np.unique(subject_ids)
-    groups_per_pc = [[] for _ in range(k)]
-    eligible_pids = []
-
-    for sid in unique_sids:
-        m = subject_ids == sid
-        if int(m.sum()) < min_samples:
-            continue
-        eligible_pids.append(sid)
-        for pc_idx in range(k):
-            groups_per_pc[pc_idx].append(pc_projections[m, pc_idx])
-
-    n_eligible = len(eligible_pids)
-    icc_values = np.full(k, np.nan)
-
-    icc_list = []
-    for pc_idx in range(k):
-        rows = []
-        for pid in eligible_pids:
-            m = subject_ids == pid
-            for val in pc_projections[m, pc_idx]:
-                rows.append({"subject": pid, "score": float(val)})
-        if len(rows) < 4:
-            icc_list.append(np.nan)
-            continue
-        df = pd.DataFrame(rows)
-        df["rater"] = df.groupby("subject").cumcount()
-        try:
-            result = pg.intraclass_corr(
-                data=df, targets="subject", raters="rater", ratings="score",
-                # nan_policy="omit"
-            )
-            row_31 = result[result["Type"] == "ICC3,1"]
-            icc_list.append(
-                float(row_31["ICC"].values[0]) if len(row_31) else np.nan
-            )
-        except Exception:
-            icc_list.append(np.nan)
-
-    icc_values = np.array(icc_list)
-
-    trait_pcs = [f"PC{i+1}" for i, v in enumerate(icc_values)
-                 if not np.isnan(v) and v > trait_threshold]
-    state_pcs = [f"PC{i+1}" for i, v in enumerate(icc_values)
-                 if not np.isnan(v) and v < state_threshold]
-
-    return {
-        "icc_per_pc":        {f"PC{i+1}": _nan_to_none(float(v))
-                               for i, v in enumerate(icc_values)},
-        "trait_pcs":         trait_pcs,
-        "state_pcs":         state_pcs,
-        "eligible_patients": n_eligible,
-        "trait_threshold":   float(trait_threshold),
-        "state_threshold":   float(state_threshold),
-    }
-
 
 # =============================================================================
 # Subspace Alignment
@@ -559,6 +319,17 @@ def label_subspace(
         "explained_separation": explained,
     }
 
+def label_subspace_alignment(dirs_a: np.ndarray, dirs_b: np.ndarray) -> dict:
+    """Principal angles between two direction matrices (rank_a, D) and (rank_b, D)."""
+    k = min(dirs_a.shape[0], dirs_b.shape[0])
+    M = dirs_a @ dirs_b.T
+    _, s, _ = np.linalg.svd(M, full_matrices=False)
+    cos_angles = np.clip(s[:k], 0.0, 1.0)
+    return {
+        "cos_principal_angles": cos_angles.tolist(),
+        "mean_alignment": float(cos_angles.mean()),
+        "min_alignment": float(cos_angles.min()),
+    }
 
 def multi_label_subspace(
     z_enc: np.ndarray,
@@ -694,3 +465,5 @@ def effective_rank_of_label(
     mp_upper = marchenko_pastur_upper(N, D, trace)
     n_signal = int((eigenvalues > mp_upper).sum())
     return max(n_signal, 1) if trace > 1e-8 else 0
+
+

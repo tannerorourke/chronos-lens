@@ -2,8 +2,6 @@ from pathlib import Path
 import os
 import re
 import json
-from datetime import date
-from typing import Tuple
 
 import yaml
 import numpy as np
@@ -21,57 +19,13 @@ EXPERIMENTS_DIR = ROOT / "experiments"
 
 # ---------------------------------------------------------------------------
 # Run artifacts live OUTSIDE the repo working tree (default: ../artifacts,
-# beside the repo) so one directory IS a run: a single clean S3 sync source /
-# laptop pull target. Override with CHRONOS_ARTIFACTS_ROOT. This is the single
-# source of truth for output paths - training and analysis consume these and
-# must never redefine them.
+# beside the repo). ../artifacts/<run-id> IS one run - a clean sync/pull/output 
+# target. Override with CHRONOS_ARTIFACTS_ROOT. Training and analysis consume 
+# these and must never redefine them.
 # ---------------------------------------------------------------------------
-ARTIFACTS_ROOT = Path(os.environ.get("CHRONOS_ARTIFACTS_ROOT", ROOT.parent / "artifacts"))
-RUNS_DIR = ARTIFACTS_ROOT / "training-runs"
+ARTIFACTS_ROOT = Path(os.environ.get("ARTIFACTS_ROOT", ROOT.parent / "artifacts"))
+EXPS_DIR = ARTIFACTS_ROOT / "training-runs"
 ANALYSIS_DIR = ARTIFACTS_ROOT / "analysis"
-
-
-# =============================================================================
-# Run identity & directory scaffolding
-# =============================================================================
-
-def _slugify(s: str) -> str:
-    """Filesystem-safe slug: keep [A-Za-z0-9._-], collapse the rest to '-'."""
-    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(s)).strip("-")
-
-
-def make_run_id(params: dict, fallback: str = "run") -> str:
-    """Stable, human-legible run slug derived from config:
-    ``<tag>_<arch>_seed<seed>_<ISO-date>`` - so "what is this run?" is answerable
-    from the directory name plus one read of config.yaml.
-    """
-    meta = params.get("meta", {})
-    model = params.get("model", {})
-    tag = meta.get("tag") or fallback
-    arch = model.get("architecture", "model")
-    seed = meta.get("seed", "NA")
-    return _slugify(f"{tag}_{arch}_seed{seed}_{date.today().isoformat()}")
-
-
-def freeze_config(params: dict, run_dir: Path) -> None:
-    """Write a frozen snapshot of the resolved config into the run dir."""
-    run_dir.mkdir(parents=True, exist_ok=True)
-    with open(run_dir / "config.yaml", "w") as f:
-        yaml.safe_dump(params, f, sort_keys=False)
-
-
-def init_run_dir(run_dir: Path, params: dict | None = None) -> Path:
-    """Create the run-dir skeleton: mkdir, freeze config.yaml, create empty
-    notes.md if missing. Idempotent (safe to call on resume)."""
-    run_dir = Path(run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    if params is not None:
-        freeze_config(params, run_dir)
-    notes = run_dir / "notes.md"
-    if not notes.exists():
-        notes.write_text("", encoding="utf-8")
-    return run_dir
-
 
 # ============================================================================
 # JSON / Serialization / npz helpers
@@ -118,7 +72,6 @@ def save_npz(path, **arrays):
     np.savez(path, **arrays)
     print(f"    Saved -> {path.name}")
 
-
 def load_npz_dict(path: Path) -> dict:
     npz = np.load(path, allow_pickle=True)
     npz = dict(npz)
@@ -139,7 +92,6 @@ def load_sequences_dict(path: Path = DATA_DIR / "sequences.jsonl") -> dict:
             patients[str(p["subject_id"])] = p
     return patients
     
-
 def load_sequences(n=None, path: Path = DATA_DIR / "sequences.jsonl") -> list[dict]:
     """Load sequences as iterable list of dicts (for training)"""
     src = Path(path) if path else DATA_DIR / "sequences.jsonl"
@@ -178,7 +130,6 @@ def load_metadata(dir: Path = None) -> tuple:
         patient_ids = np.array(json.load(f), dtype=str)
     return metadata, feature_names, patient_ids
 
-
 def save_metadata(
     metadata: np.ndarray,
     feature_names: list,
@@ -200,39 +151,73 @@ def save_metadata(
 # config IO
 # =============================================================================
 
-def get_model_config(
+def make_run_id(tag: str | None, fallback: str = "run") -> str:
+    def _slugify(s: str) -> str:
+        """"""
+        return re.sub(r"[^A-Za-z0-9._-]+", "-", str(s)).strip("-")
+    from datetime import date
+    tag = tag if tag is not None else fallback
+    id = _slugify(f"{tag}")
+
+    if (EXPS_DIR / id).exists():
+        i=2
+        while (EXPS_DIR / id).exists():
+            id = _slugify(f"{tag}_v{i}")
+            i += 1
+            
+    # keep [A-Za-z0-9._-], collapse the rest to '-'.
+    return id
+
+def init_exp_dir(run_dir: Path, params: dict | None = None) -> Path:
+    """ mkdir, freeze config.yaml """
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if params is not None:
+        from datetime import date
+        params["meta"]["run_date"] = date.today().isoformat()
+        with open(run_dir / "config.yaml", "w") as f:
+            yaml.safe_dump(params, f, sort_keys=False)
+    return run_dir
+
+def init_exp_config(
     exp: str | Path,
     command: str = "model",
     target: str = None,
     exists_ok: bool = False,
-) -> tuple[Path, Path, dict]:
+) -> tuple[Path, dict]:
     """Resolve config + run directory.
 
-    Returns ``(config_path, run_dir, params)``:
+    Returns `(config_path, exp_dir, params)`:
 
-    * ``command='model'`` - ``exp`` names ``experiments/<exp>.yaml`` (the
-      in-repo, git-tracked *input spec*); ``config_path`` is that file. A fresh
-      out-of-repo ``run_dir`` under
-      :data:`RUNS_DIR` is computed for all outputs (or the resumed run's dir when
-      ``resume_from`` is set). ``params`` is the full config.
-    * ``command='sae'`` - ``exp`` names an existing *run-id* under
-      :data:`RUNS_DIR`; config is read from that run's frozen ``config.yaml`` and
-      ``params`` is the SAE leaf config for ``target``. ``config_path`` mirrors
-      ``run_dir`` (the frozen config lives there).
+    * `command='model'` - `exp` names `experiments/<exp>.yaml` (the
+      in-repo, git-tracked *input spec*); `config_path` is that file. A fresh
+      out-of-repo `exp_dir` under
+      :data:`EXPS_DIR` is computed for all outputs (or the resumed run's dir when
+      `resume_from` is set). `params` is the full config.
+    * `command='sae'` - `exp` names an existing *run-id* under
+      :data:`EXPS_DIR`; config is read from that run's frozen `config.yaml` and
+      `params` is the SAE leaf config for `target`. `config_path` mirrors
+      `exp_dir` (the frozen config lives there).
     """
+    from datetime import date
+    
     exp = Path(exp)
-    assert command in ["model", "sae"], f"Invalid command: {command}"
-
-    # ----- SAE: operate inside an existing self-contained run dir -----------
+    
+    # -- SAE inside existing self-contained run dir
     if command == "sae":
-        run_dir = RUNS_DIR / exp
-        if not run_dir.exists():
-            run_dir = RUNS_DIR / exp.parts[-1]
-        cfg_path = run_dir / "config.yaml"
+        exp_dir = EXPS_DIR / exp
+        if not exp_dir.exists():
+            raise FileNotFoundError(
+                f"Run dir not found for run '{exp}': {exp_dir}. SAE training "
+                f"requires an existing trained model under {EXPS_DIR}/<exp>."
+            )
+            
+        cfg_path = exp_dir / "config.yaml"
         if not cfg_path.exists():
             raise FileNotFoundError(
                 f"Frozen config not found for run '{exp}': {cfg_path}. SAE training "
-                f"operates on an existing run dir under {RUNS_DIR}.")
+                f"operates on an existing run dir under {EXPS_DIR}.")
+        
         with open(cfg_path) as f:
             params = yaml.safe_load(f)
 
@@ -240,100 +225,74 @@ def get_model_config(
         assert params and params.get("sae_config"), "config['sae_config'] not found."
         assert target in SAE_TARGETS, \
             f"sae target must be one of {SAE_TARGETS}"
-        sae_root = params["sae_config"]
-        assert target in sae_root, f"config['sae_config']['{target}'] not found."
-        return run_dir, run_dir, sae_root[target]
-
-    # ----- model: in-repo config -> out-of-repo run dir ---------------------
-    cfg_path = EXPERIMENTS_DIR / f"{exp}.yaml"
-    if not cfg_path.exists():
-        fallback = EXPERIMENTS_DIR / f"{exp.parts[-1]}.yaml"
-        if not fallback.exists():
-            raise FileNotFoundError(f"Model config not found: experiments/{str(exp)}.yaml")
-        cfg_path = fallback
-
-    with open(cfg_path, 'r') as y_file:
-        params = yaml.safe_load(y_file)
-    if not params:
-        raise FileNotFoundError(f"'experiments/{exp}.yaml' is empty / not found.")
-
-    assert params.get("model", {}).get("architecture", "") in ["ema", "stopgrad", "supervised"], \
-        f"config['model']['architecture'] must be one of 'ema', 'stopgrad', or 'supervised'"
-    assert params.get("meta", {}).get("seed"), \
-        f"parameter 'seed' missing in config.yaml['meta']"
-
-    # Resume continues in the original run dir (run-id = first path component of
-    # resume_from); otherwise start a fresh date-stamped run id.
-    if params.get("resume_from"):
-        run_id = Path(params["resume_from"]).parts[0]
+        sae_cfg = params["sae_config"]
+        assert target in sae_cfg, f"config['sae_config']['{target}'] not found."
+        
+        sae_params = sae_cfg[target]
+        
+        # init experiment subdirectory
+        sae_exp_dir = exp_dir / make_run_id(f"sae_{target}")
+        sae_exp_dir.mkdir(parents=True, exist_ok=True)
+        
+        # freeze SAE config
+        params["meta"]["exp_date"] = date.today().isoformat()
+        with open(sae_exp_dir / "config.yaml", "w") as f:
+            yaml.safe_dump(sae_params, f, sort_keys=False)
+        
+        return sae_exp_dir, sae_cfg[target]
+      
+    # -- model training
     else:
-        run_id = make_run_id(params, fallback=cfg_path.stem)
-    run_dir = RUNS_DIR / run_id
+      cfg_path = EXPERIMENTS_DIR / f"{exp}.yaml"
+      if not cfg_path.exists():
+          fallback = EXPERIMENTS_DIR / f"{exp.parts[-1]}.yaml"
+          if not fallback.exists():
+              raise FileNotFoundError(f"Model config not found: experiments/{str(exp)}.yaml")
+          cfg_path = fallback
 
-    if not params.get("resume_from"):
-        has_artifacts = any(
-            (run_dir / sub).exists() and any((run_dir / sub).iterdir())
-            for sub in ["checkpoints", "logs"])
-        if has_artifacts and not exists_ok:
-            raise FileExistsError(
-                f"Run '{run_id}' already has artifacts in {run_dir}. Set "
-                f"config['resume_from'] to resume, or change meta.tag for a new run.")
+      with open(cfg_path, 'r') as y_file:
+          params = yaml.safe_load(y_file)
+      if not params:
+          raise FileNotFoundError(f"'experiments/{exp}.yaml' is empty / not found.")
 
-    return cfg_path, run_dir, params
+      assert params.get("model", {}).get("architecture", "") in ["ema", "stopgrad", "supervised"], \
+          f"config['model']['architecture'] must be one of 'ema', 'stopgrad', or 'supervised'"
+      assert params.get("meta", {}).get("seed"), \
+          f"parameter 'seed' missing in config.yaml['meta']"
 
-# ============================================================================
-# Embedding IO
-# ============================================================================
+      # Resume continues in the original run dir (run-id = first path component of
+      # resume_from); otherwise start a fresh date-stamped run id.
+      if params.get("resume_from"):
+          run_id = Path(params["resume_from"]).parts[0]
+      else:
+          tag = params.get("meta", {}).get("tag", None)
+          run_id = make_run_id(tag, fallback=cfg_path.stem)
+      
+      exp_dir = EXPS_DIR / run_id
 
-def _embedding_epoch(name: str) -> int:
-    """Epoch number parsed from an ``embeddings_<N>.npz`` filename (else -1)."""
-    stem = Path(name).stem  # "embeddings_40"
-    parts = stem.rsplit("_", 1)
-    if len(parts) == 2 and parts[1].isdigit():
-        return int(parts[1])
-    return -1
+      if not params.get("resume_from"):
+          has_artifacts = any(
+              (exp_dir / sub).exists() and any((exp_dir / sub).iterdir())
+              for sub in ["checkpoints", "logs"])
+          if has_artifacts and not exists_ok:
+              raise FileExistsError(
+                  f"Run '{run_id}' already has artifacts in {exp_dir}. Set "
+                  f"config['resume_from'] to resume, or change meta.tag for a new run.")
 
+          # init experiment directory
+          exp_dir.mkdir(parents=True, exist_ok=True)
 
-def load_embeddings(model_dir, embeddings_arg=None) -> Tuple[dict, Path]:
-    """Load an embeddings ``.npz`` for a run, pulling exactly one object from S3
-    on demand if it isn't already local.
+          # freeze config
+          params["meta"]["exp_date"] = date.today().isoformat()
+          with open(exp_dir / "config.yaml", "w") as f:
+              yaml.safe_dump(params, f, sort_keys=False)
+      
+      return exp_dir, params
+    
 
-    ``model_dir`` is the run dir (``RUNS_DIR/<run-id>/``); ``run-id`` is its name.
-    Embeddings that are too big to keep locally are fetched one object at a time
-    via :func:`src.infra.s3.ensure_local` (``aws s3 cp``), never a bulk sync.
-    """
-    from src.infra.s3 import ensure_local, s3_list
-
-    model_dir = Path(model_dir)
-    run_id = model_dir.name
-
-    # --- specific file
-    if embeddings_arg:
-        name = embeddings_arg if embeddings_arg.endswith(".npz") else f"{embeddings_arg}.npz"
-        # local first (direct, then recursive), else pull the single object.
-        direct = model_dir / "embeddings" / name
-        matches = [direct] if direct.exists() else list(model_dir.glob(f"**/{name}"))
-        if matches:
-            return dict(np.load(matches[0], allow_pickle=True)), matches[0]
-        path = ensure_local(f"embeddings/{name}", run_id)  # fetch or clear error
-        return dict(np.load(path, allow_pickle=True)), path
-
-    # --- latest epoch
-    candidates = list(model_dir.glob("**/embeddings*.npz"))
-    if not candidates:
-        candidates = list(model_dir.glob("**/embedding*.npz"))
-    if candidates:
-        candidates.sort(key=lambda p: (_embedding_epoch(p.name), p.name))
-        return dict(np.load(candidates[-1], allow_pickle=True)), candidates[-1]
-
-    # Nothing local get latest object in S3 and pull it
-    remote = [n for n in s3_list(run_id, "embeddings") if n.endswith(".npz")]
-    if remote:
-        remote.sort(key=lambda n: (_embedding_epoch(n), n))
-        path = ensure_local(f"embeddings/{remote[-1]}", run_id)
-        return dict(np.load(path, allow_pickle=True)), path
-
-    raise FileNotFoundError(
-        f"No embeddings .npz found locally in {model_dir} or in S3 for run-id "
-        f"'{run_id}'. Run `python -m scripts.embeddings extract --exp {run_id} "
-        f"--ckpt <checkpoint.pt>` (or `... fetch --exp {run_id}`).")
+def find_subdir(dir: Path, name: str) -> Path:
+    subddir = dir / name
+    if subddir.is_dir():
+        return subddir
+    raise FileNotFoundError(f"subdirectory {name} not found ioon {dir}")
+    

@@ -1,8 +1,8 @@
 """
 Boolean composition tooling for SAE features.
 
-Answers: is a clinical concept captured by a single SAE feature, or does it
-require a boolean combination of features?  A large AUROC gap between the
+Answers if a clinical concept is captured not by a single SAE feature but
+with a boolean combination of features?  A large AUROC gap between the
 best single feature and a shallow decision tree is the compositional signal.
 
 Functions
@@ -22,6 +22,7 @@ def sae_boolean_composition(
     activations: np.ndarray,
     label: np.ndarray,
     max_depth: int = 4,
+    _verbose: bool = False
 ) -> dict:
     """Fit a shallow decision tree on sparse activations and extract boolean rules.
 
@@ -59,6 +60,8 @@ def sae_boolean_composition(
             continue
         if auc > best_single_auroc:
             best_single_auroc = auc
+    
+    if _verbose: print(f"  Best single feature AUROC: {best_single_auroc:.4f}")
 
     # Fit decision tree on binary activations
     tree = DecisionTreeClassifier(
@@ -67,14 +70,23 @@ def sae_boolean_composition(
         class_weight="balanced",
     )
     tree.fit(binary_active, label)
+    
+    if _verbose:
+        print(f"  Tree fitted:")
+        print(f"  - Tree depth: {tree.get_depth()}")
+        print(f"  - Tree nodes: {tree.tree_.node_count}")
 
-    tree_proba = tree.predict_proba(binary_active)
+    tree_proba = tree.predict_proba(binary_active) # (n_samples, n_classes)
     tree_auroc = 0.0
     if tree_proba.shape[1] == 2:
         try:
             tree_auroc = roc_auc_score(label, tree_proba[:, 1])
         except ValueError:
             pass
+        
+    if _verbose: 
+        print(f"  - Tree AUROC: {tree_auroc:.4f}")
+        print(f"  - Compositional Gap: {tree_auroc - best_single_auroc:.5f}")
 
     # Extract rules from root-to-leaf paths (positive class only)
     rules = _extract_tree_rules(tree, binary_active, label)
@@ -85,6 +97,9 @@ def sae_boolean_composition(
         int(tree_.feature[i]) for i in range(tree_.node_count)
         if tree_.children_left[i] != tree_.children_right[i]
     )
+    
+    if _verbose:
+        print(f"  Unique features used: {len(split_features)}")
 
     return {
         "rules": rules,
@@ -243,7 +258,6 @@ def sae_feature_subspace(
     -------
     (len(feature_indices), D) array - rows are unit-norm decoder directions
     """
-    import torch
     W = sae.decoder.weight.detach().cpu().numpy()  # (embed_dim, n_features)
     cols = W[:, feature_indices].T  # (len(indices), embed_dim)
     norms = np.linalg.norm(cols, axis=1, keepdims=True)
@@ -251,7 +265,7 @@ def sae_feature_subspace(
     return cols / norms
 
 
-def compositional_decomposition(
+def sae_decomposition(
     label_sub: dict,
     sae,
     threshold: float = 0.8,
@@ -277,7 +291,6 @@ def compositional_decomposition(
         n_features_needed : int to reach threshold
         residual          : 1 - coverage at termination
     """
-    import torch
 
     label_dirs = label_sub["directions"]  # (rank, D)
     rank, D = label_dirs.shape

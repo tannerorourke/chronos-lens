@@ -1,8 +1,6 @@
-"""Base evaluation metrics (infra).
-
-Pure metric definitions used across the analysis stack - kept in one place so
-AUROC/AUPRC/F1/Brier/ECE and result-dict formatting stay consistent everywhere.
-No model or I/O dependencies.
+""" 
+Evaluation metrics used across the analysis stack
+- No model or I/O dependencies.
 """
 import numpy as np
 

@@ -19,60 +19,57 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.infra.vector_computation import compute_derived_vectors
+# from src.infra.vector_computation import compute_derived_vectors
 from src.infra.labels import (
-    load_escalation_labels, load_label_30d_at_k, extract_icd_block_targets)
+    load_escalation_labels, load_label_30d_at_k, 
+    extract_icd_block_targets, get_absolute_enc_times
+)
 from src.analysis.geometry import (
-    fit_pca, get_pca_stats, linear_cka, subspace_alignment, label_subspace)
+    fit_pca, 
+    get_pca_stats, 
+    linear_cka, 
+    subspace_alignment, 
+    label_subspace,
+    label_subspace_alignment
+)
+from src.analysis.sae import cross_sae_overlap
 from src.analysis.trajectories import (
     extract_trajectories,
     trajectory_velocity, trajectory_curvature,
-    concept_centroid, prospective_trajectory_probe)
-from src.analysis.sae import load_sae
-from src.utils.io import (
-    RUNS_DIR, DATA_DIR,
-    load_embeddings, load_sequences_dict)
-from src.utils.seed import load_exp_seed, set_global_seed
+    concept_centroid,
+    prospective_trajectory_probe
+)
+from src.infra.inference import load_embeddings_for_analysis, load_sae_info
+from src.utils.io import EXPS_DIR, DATA_DIR, load_sequences_dict
+from src.utils.system import load_exp_seed, set_global_seed
 
+
+parser = argparse.ArgumentParser(description="Cross-architecture comparison: JEPA vs supervised")
+parser.add_argument("--jepa-exp", type=str, required=True,
+                    help="JEPA experiment name")
+parser.add_argument("--jepa-emb", type=str, required=True,
+                    help="JEPA embeddings .npz filename")
+
+parser.add_argument("--sup-exp", type=str, required=True,
+                    help="Supervised experiment name")
+parser.add_argument("--sup-emb", type=str, required=True,
+                    help="Supervised embeddings .npz filename")
+
+parser.add_argument("--jepa-sae", type=str, default=None,
+                    help="JEPA SAE directory name (optional)")
+parser.add_argument("--sup-sae", type=str, default=None,
+                    help="Supervised SAE directory name (optional)")
+
+parser.add_argument("--top-k", type=int, default=10,
+                    help="Top-k PCs for subspace analysis (default: 10)")
+parser.add_argument("--rank", type=int, default=5,
+                    help="Rank for label subspace (default: 5)")
+parser.add_argument("--cosine-threshold", type=float, default=0.85,
+                    help="SAE feature overlap stability threshold (default: 0.85)")
 
 # =============================================================================
 # Helpers
 # =============================================================================
-
-def _find_sae_dir(exp_dir: Path, sae_name: str) -> Path:
-    """Locate SAE directory under experiment. Accepts name or path."""
-    sae_dir = exp_dir / sae_name
-    if sae_dir.is_dir():
-        return sae_dir
-    sae_dir = exp_dir / f"sae_{sae_name}"
-    if sae_dir.is_dir():
-        return sae_dir
-    candidates = list(exp_dir.glob(f"sae_{sae_name}*"))
-    if candidates:
-        candidates.sort()
-        return candidates[0]
-    raise FileNotFoundError(
-        f"SAE directory not found: tried {exp_dir / sae_name} and {exp_dir / f'sae_{sae_name}'}")
-
-
-def _encounter_times(
-    patients_dict: dict[str, dict],
-    subject_ids: np.ndarray,
-    mask_pos: np.ndarray,
-) -> np.ndarray:
-    """Extract days_since_first for each (subject_id, mask_pos) sample."""
-    N = len(subject_ids)
-    times = np.zeros(N, dtype=np.float64)
-    for i in range(N):
-        sid = str(subject_ids[i])
-        pos = int(mask_pos[i])
-        encs = patients_dict[sid]["encounters"]
-        if pos < len(encs):
-            times[i] = encs[pos].get("days_since_first", pos)
-        else:
-            times[i] = pos
-    return times
-
 
 def _build_labels_per_step(
     sample_labels: np.ndarray,
@@ -108,110 +105,51 @@ def _build_labels_per_step(
     return labels_mat
 
 
-def _label_subspace_alignment(dirs_a: np.ndarray, dirs_b: np.ndarray) -> dict:
-    """Principal angles between two direction matrices (rank, D)."""
-    k = min(dirs_a.shape[0], dirs_b.shape[0])
-    M = dirs_a @ dirs_b.T
-    _, s, _ = np.linalg.svd(M, full_matrices=False)
-    cos_angles = np.clip(s[:k], 0.0, 1.0)
-    return {
-        "cos_principal_angles": cos_angles.tolist(),
-        "mean_alignment": float(cos_angles.mean()),
-        "min_alignment": float(cos_angles.min()),
-    }
-
-
-def _cross_sae_overlap(
-    jepa_sae_path: Path,
-    sup_sae_path: Path,
-    cosine_threshold: float = 0.85,
-    device: str = "cpu",
-) -> dict:
-    """Hungarian matching of decoder directions between two SAEs.
-
-    Adapted from sae_seed_stability in src/analysis/sae.py.
-    """
-    from scipy.optimize import linear_sum_assignment
-
-    jepa_sae = load_sae(jepa_sae_path, torch.device(device))
-    sup_sae = load_sae(sup_sae_path, torch.device(device))
-
-    W_j = jepa_sae.decoder.weight.detach().cpu().float()   # (D, n_features_j)
-    W_s = sup_sae.decoder.weight.detach().cpu().float()     # (D, n_features_s)
-
-    # L2-normalize columns
-    W_j = W_j / W_j.norm(dim=0, keepdim=True).clamp(min=1e-8)
-    W_s = W_s / W_s.norm(dim=0, keepdim=True).clamp(min=1e-8)
-
-    cos_sim = (W_j.T @ W_s).numpy()  # (n_j, n_s)
-    row_idx, col_idx = linear_sum_assignment(1.0 - cos_sim)
-    matched_cosines = cos_sim[row_idx, col_idx]
-
-    stable_mask = matched_cosines > cosine_threshold
-    return {
-        "mean_cosine": float(matched_cosines.mean()),
-        "median_cosine": float(np.median(matched_cosines)),
-        "frac_stable": float(stable_mask.mean()),
-        "n_stable": int(stable_mask.sum()),
-        "n_matched": len(matched_cosines),
-        "matched_cosines": matched_cosines,  # raw array for NPZ
-    }
-
-
 # =============================================================================
 # Main
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Cross-architecture comparison: JEPA vs supervised")
-    parser.add_argument("--jepa-exp", type=str, required=True,
-                        help="JEPA experiment name")
-    parser.add_argument("--sup-exp", type=str, required=True,
-                        help="Supervised experiment name")
-    parser.add_argument("--jepa-emb", type=str, required=True,
-                        help="JEPA embeddings .npz filename")
-    parser.add_argument("--sup-emb", type=str, required=True,
-                        help="Supervised embeddings .npz filename")
-    parser.add_argument("--jepa-sae", type=str, default=None,
-                        help="JEPA SAE directory name (optional)")
-    parser.add_argument("--sup-sae", type=str, default=None,
-                        help="Supervised SAE directory name (optional)")
-    parser.add_argument("--top-k", type=int, default=10,
-                        help="Top-k PCs for subspace analysis (default: 10)")
-    parser.add_argument("--rank", type=int, default=5,
-                        help="Rank for label subspace (default: 5)")
-    parser.add_argument("--cosine-threshold", type=float, default=0.85,
-                        help="SAE feature overlap stability threshold (default: 0.85)")
     args = parser.parse_args()
+    
+    jepa_exp_id = args.jepa_exp
+    sup_exp_id = args.sup_exp
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    jepa_exp_dir = RUNS_DIR / args.jepa_exp   # run-ids under RUNS_DIR
-    sup_exp_dir = RUNS_DIR / args.sup_exp
-
-    # -- Load embeddings ----------------------------------------------------
+    jepa_exp_dir = EXPS_DIR / jepa_exp_id
+    sup_exp_dir = EXPS_DIR / sup_exp_id
+    
     set_global_seed(load_exp_seed(jepa_exp_dir))
 
-    jepa_emb, jepa_emb_path = load_embeddings(jepa_exp_dir, args.jepa_emb)
-    print(f"JEPA embeddings: {jepa_emb_path}")
-    sup_emb, sup_emb_path = load_embeddings(sup_exp_dir, args.sup_emb)
-    print(f"Supervised embeddings: {sup_emb_path}")
+    # -- Load embeddings ----------------------------------------------------
+    jepa_emb_stream, _ = load_embeddings_for_analysis(
+        jepa_exp_id, args.jepa_emb, device, 
+        False, False, False)
+    with jepa_emb_stream as jes:
+        jepa_sids = jes["subject_ids"]
+        jepa_mpos = jes["mask_pos"]
+        
+        last_idx = (np.asarray(jepa_mpos) - 1).astype(int) # last valid slot
+        rows = np.arange(jes["z_encs"].shape[0])
+        jepa_z = jes["z_encs"][rows, last_idx] # (N, D)
+        D = jepa_z.shape[1]
+        print(f"JEPA:       N={len(jepa_sids)}, D={D}")
+        # jes closes
     
-    jepa_emb = compute_derived_vectors(jepa_emb)
-    sup_emb = compute_derived_vectors(sup_emb)
-
-    jepa_z = jepa_emb["z_enc_recency"]          # (N_j, D)
-    jepa_sids = jepa_emb["subject_ids"]         # (N_j,)
-    jepa_mpos = jepa_emb["mask_pos"]            # (N_j,)
-
-    sup_z = sup_emb["z_enc_recency"]            # (N_s, D)
-    sup_sids = sup_emb["subject_ids"]           # (N_s,)
-    sup_mpos = sup_emb["mask_pos"]              # (N_s,)
-
-    D = jepa_z.shape[1]
-    print(f"JEPA:       N={len(jepa_sids)}, D={D}")
-    print(f"Supervised: N={len(sup_sids)}, D={sup_z.shape[1]}")
-
+    spv_emb_stream, _ = load_embeddings_for_analysis(
+        sup_exp_id, args.sup_emb, device, 
+        False, False, False)
+    with spv_emb_stream as ses:
+        sup_sids = ses["subject_ids"]
+        sup_mpos = ses["mask_pos"]
+        
+        last_idx = (np.asarray(sup_mpos) - 1).astype(int) # last valid slot
+        rows = np.arange(ses["z_encs"].shape[0])
+        sup_z = ses["z_encs"][rows, last_idx] # (N, D)
+        
+        print(f"Supervised: N={len(sup_sids)}, D={sup_z.shape[1]}")
+        # ses closes
+    
     # -- Match samples by (subject_id, mask_pos) ----------------------------
     sup_lookup: dict[tuple[str, int], int] = {}
     for i in range(len(sup_sids)):
@@ -265,11 +203,14 @@ def main():
     sae_matched_cosines = None
     if args.jepa_sae and args.sup_sae:
         print("\n--- SAE Feature Overlap ---")
-        jepa_sae_dir = _find_sae_dir(jepa_exp_dir, args.jepa_sae)
-        sup_sae_dir = _find_sae_dir(sup_exp_dir, args.sup_sae)
-        sae_overlap_result = _cross_sae_overlap(
-            jepa_sae_dir / "sae_checkpoint.pt",
-            sup_sae_dir / "sae_checkpoint.pt",
+        _, _, jepa_ckpt, jepa_dec_weights, _ = \
+            load_sae_info(jepa_exp_id, args.jepa_sae, device)
+        _, _, _, spv_dec_weights, _ = \
+            load_sae_info(sup_exp_id, args.sup_sae, device)
+        
+        sae_overlap_result = cross_sae_overlap(
+            jepa_dec_weights,
+            spv_dec_weights,
             cosine_threshold=args.cosine_threshold,
             device=str(device))
         sae_matched_cosines = sae_overlap_result.pop("matched_cosines")
@@ -301,7 +242,7 @@ def main():
 
     # -- Trajectory comparison ----------------------------------------------
     print("\n--- Trajectory Comparison ---")
-    times_matched = _encounter_times(patients_dict, matched_sids, matched_mpos)
+    times_matched = get_absolute_enc_times(patients_dict, matched_sids, matched_mpos)
 
     jepa_traj = extract_trajectories(z_j, matched_sids, matched_mpos, times_matched)
     sup_traj = extract_trajectories(z_s, matched_sids, matched_mpos, times_matched)
@@ -378,7 +319,7 @@ def main():
         jepa_label_dirs[lname] = jepa_sub["directions"]
         sup_label_dirs[lname] = sup_sub["directions"]
 
-        alignment = _label_subspace_alignment(
+        alignment = label_subspace_alignment(
             jepa_sub["directions"], sup_sub["directions"])
         label_sub_alignment[lname] = {
             "mean_alignment": alignment["mean_alignment"],
@@ -395,7 +336,7 @@ def main():
     alignment_matrix = np.zeros((n_labels, n_labels), dtype=np.float64)
     for i, ln_a in enumerate(aligned_labels):
         for j, ln_b in enumerate(aligned_labels):
-            aln = _label_subspace_alignment(
+            aln = label_subspace_alignment(
                 jepa_label_dirs[ln_a], sup_label_dirs[ln_b])
             alignment_matrix[i, j] = aln["mean_alignment"]
 
@@ -466,7 +407,7 @@ def main():
         npz_data["sae_matched_cosines"] = sae_matched_cosines
 
     npz_path = results_dir / "comparison.npz"
-    np.savez_compressed(npz_path, **npz_data)
+    np.savez_compressed(npz_path, *npz_data)
     print(f"Array results  -> {npz_path}")
 
 

@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler
 
-from src.utils.seed import SEED
+from src.utils.system import SEED
     
 # =============================================================================
 # Utilities
@@ -87,24 +87,24 @@ class MimicDataset(Dataset):
                           if self.is_supervised else None)
         self.samples: list[dict] = []
         self.pad_idx = pad_idx
-        max_enc = data_params.get("max_encounters", max_enc)
+        self.max_enc = data_params.get("max_encounters", max_enc)
         for p in patients:
             encs = p.get("encounters", [])
             if len(encs) < 3:
                 continue
-            if max_enc is not None:
-                encs = encs[:max_enc]
+            if self.max_enc is not None:
+                encs = encs[:self.max_enc]
             sid    = str(p["subject_id"])
             tokens = [encode_encounter(e, vocab, self.pad_idx, use_np_int32)
                       for e in encs]
             times  = [e.get("days_since_first", 0) for e in encs]
 
+            # -- causal per-encounter labels, indexed by mask_pos
+            label_per_enc = None
+            per_enc_key = f"{self.label_key}_per_enc"
             if self.is_supervised:
-                # -- causal per-encounter labels, indexed by mask_pos below
                 per_enc_key = f"{self.label_key}_per_enc"
                 label_per_enc = p.get(per_enc_key)
-                assert label_per_enc is not None, \
-                    f"[MimicDataset] per-encounter label '{per_enc_key}' missing for patient {sid}"
 
             for mask_pos in range(2, len(encs)):
                 s = {
@@ -115,9 +115,12 @@ class MimicDataset(Dataset):
                     "subject_id":    sid,
                 }
                 if self.is_supervised:
+                    assert label_per_enc is not None, \
+                        f"[MimicDataset] per-encounter label '{per_enc_key}' missing for patient {sid}"
                     assert mask_pos < len(label_per_enc), \
-                        f"[MimicDataset] mask_pos {mask_pos} out of range for '{per_enc_key}' (patient {sid})"
+                        f"[MimicDataset] mask_pos {mask_pos} out of range for '{p.get(per_enc_key)}' (patient {sid})"
                     s["label"] = int(label_per_enc[mask_pos])
+                
                 self.samples.append(s)
         self.sample_lengths = [len(s["context"]) for s in self.samples]
 

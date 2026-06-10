@@ -41,7 +41,8 @@ import google.auth
 from google.cloud import bigquery
 
 from src.utils.io import PARQUET_DIR
-from src.utils.constants import GCP_AUTH_URL
+from src.utils.system import GCP_AUTH_URL, MIMIC_BQ_DATASET, MIMIC_BQ_PID
+
 
 def _authenticate():
     print(f"Authenticating...")
@@ -56,17 +57,17 @@ def _authenticate():
         raise RuntimeError("BigQuery auth failed. Run 'gcloud auth application-default login'")
 
 
-def load_tables(dataset: str, project_id: str = None) -> tuple:
+def load_tables() -> tuple:
     """ Load MIMIC tables from parquet cache if available, otherwise from BigQuery.
         tables are saved to PARQUET_SUBDIR on BigQuery fetch so subsequent runs skip 
         the call entirely (save $$$).
     """
     dfs = {}
     _pq_bq_file_map = {
-        "admissions":    ("admissions.parquet", f"{dataset}.admissions"),
-        "patients":      ("patients.parquet", f"{dataset}.patients"),
-        "diagnoses":     ("diagnoses.parquet", f"{dataset}.diagnoses_icd"),
-        "prescriptions": ("prescriptions.parquet", f"{dataset}.prescriptions")
+        "admissions":    ("admissions.parquet", f"{MIMIC_BQ_DATASET}.admissions"),
+        "patients":      ("patients.parquet", f"{MIMIC_BQ_DATASET}.patients"),
+        "diagnoses":     ("diagnoses.parquet", f"{MIMIC_BQ_DATASET}.diagnoses_icd"),
+        "prescriptions": ("prescriptions.parquet", f"{MIMIC_BQ_DATASET}.prescriptions")
     }
     
     # -- If parquet's exist, load from cache --
@@ -89,11 +90,11 @@ def load_tables(dataset: str, project_id: str = None) -> tuple:
             print("    Failed to load all tables from cache, falling back to BigQuery..")
 
     # -- auth BigQuery --
-    credentials, detected_project = _authenticate()
-    if project_id is None:
-        project_id = detected_project
+    credentials, project_id = _authenticate()
+    if MIMIC_BQ_PID:
+        project_id = MIMIC_BQ_PID
     client = bigquery.Client(project=project_id, credentials=credentials)
-    print(f"\nLoading tables from BigQuery ({dataset}) from {project_id}...")
+    print(f"\nLoading tables from BigQuery ({MIMIC_BQ_DATASET}) from {project_id}...")
     
     dfs = {}
     for name, (_, table) in _pq_bq_file_map.items():

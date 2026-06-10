@@ -31,7 +31,7 @@ meta:
     tag: "supervised_1024"
     description: "Supervised transformer baseline, embed_dim 1024, seed 44 (label_escalation)"
     resume_from: null
-    save_cycle: 5
+    ckpt_cycle: 5
     sync_s3: true
 sae_config:
     z_enc:

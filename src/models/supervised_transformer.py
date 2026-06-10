@@ -49,8 +49,8 @@ class SupervisedTransformer(nn.Module):
         self.classifier = nn.Linear(embed_dim, 1)
 
     def encode(self, batch: dict) -> torch.Tensor:
-        """Per-encounter context representation ``(B, C, D)``, identical in
-        shape/semantics to the JEPA ``z_enc``; analysis/extraction uses this so
+        """Per-encounter context representation `(B, C, D)`, identical in
+        shape/semantics to the JEPA `z_enc`; analysis/extraction uses this so
         the supervised baseline flows through the same pipeline. (The encounter
         encoder returns the per-encounter sequence by default - no pooling.)
         """
@@ -61,16 +61,16 @@ class SupervisedTransformer(nn.Module):
     def forward(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode context, then classify the most recent encounter's vector.
 
-        Returns ``(z_enc, logits)`` - the per-encounter ``z_enc (B, C, D)``
+        Returns `(z_enc, logits)` - the per-encounter `z_enc (B, C, D)`
         (parallel to the JEPA forwards, exposed for embed-health/probing) and the
-        binary logits. ``mask_pos`` is the target index ``k``, so ``mask_pos - 1``
+        binary logits. `mask_pos` is the target index `k`, so `mask_pos - 1`
         is the last valid context slot (context is the chronological prefix,
         right-padded with no interior gaps).
 
-        Readout: the classifier reads the **recency vector** ``z_enc[k-1]`` - the
+        Readout: the classifier reads the **recency vector** `z_enc[k-1]` - the
         representation of the most recent context encounter - not a pooled summary.
         This keeps the supervised baseline recency-aware and matched to the static
-        last-encounter baseline. Only the *returned* vector is the full ``z_enc``;
+        last-encounter baseline. Only the *returned* vector is the full `z_enc`;
         the readout itself is unchanged.
         """
         z_enc = self.encode(batch)                                  # (B, C, D)

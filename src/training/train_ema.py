@@ -22,21 +22,20 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from src.models.jepa_ema import JEPA_EMA
+from src.models import JEPA_EMA, build_model
 from src.training.utils.vicreg import VicRegLoss
 
-from src.training.utils.datasets import (MimicDataset, 
-                                         NoisyBucketedSampler, 
-                                         build_vocab)
+from src.training.utils.datasets import (
+    MimicDataset, NoisyBucketedSampler, build_vocab
+)
 from src.training.utils.optimizers import init_optimizers
-from src.training.utils.logging import TrainingLogger, DriftMonitor
-from src.training.utils.checkpoint import (build_model,
-                                           save_periodic, 
-                                           sync_model_checkpoint)
-from src.utils.io import load_sequences, RUNS_DIR
+from src.training.utils.logging import TrainingLogger, DriftMonitor, extract_time_scale
+from src.training.utils.checkpoint import sync_model_checkpoint
+from src.infra.s3 import S3Client
+from src.utils.io import load_sequences, EXPS_DIR
 
 
-def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
+def main(params: Dict, run_dir: Path, device: torch.device):
     # --- optimization
     opt_params  = params["optimization"]
     epochs      = opt_params["epochs"]
@@ -55,10 +54,10 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
 
     # --- meta
     meta_p          = params["meta"]
-    save_cycle      = meta_p.get("save_cycle", epochs)
+    ckpt_cycle      = meta_p.get("ckpt_cycle", epochs)
     m_tag           = meta_p.get("tag", None)
     m_desc          = meta_p.get("description", None)
-    ckpt_dir = run_dir / "checkpoints"
+    sync_s3         = meta_p.get("sync_s3", True)
     
     print(f"Starting {m_tag if m_tag else 'up'}..")
     if m_desc:
@@ -85,8 +84,10 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
         pin_memory=pin_memory,
         num_workers=num_workers, 
         persistent_workers=num_workers > 0)
+    # for post training eval
+    emb_shape = ((len(ds), ds.max_enc, params["model"]["embed_dim"]))
     # keep the sampler for re-seeding per epoch
-    del patients, ds; gc.collect()  
+    del patients, ds; gc.collect()
 
     # --- model
     model_params = params["model"]
@@ -103,14 +104,14 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
     start_epoch, start_step, loss_history = 1, 1, []
     # --- load checkpoint
     if params.get("resume_from"):
-        ckpt_path = RUNS_DIR / params["resume_from"]
+        ckpt_path = EXPS_DIR / params["resume_from"]
         model, model_params, optimizer, scheduler, start_epoch, start_step, loss_history = \
             sync_model_checkpoint(
-                model, 
-                optimizer, scheduler, 
-                ckpt_path, device, restore_rng=True)
+                model, optimizer, scheduler,
+                ckpt_path, device, restore_rng=True
+            )
 
-    print("Params:",
+    print("-- Params:",
           f"Total: {(sum(p.numel() for p in model.parameters()) / 1e6):.2f}M",
           f"Trainable: {(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6):.2f}M")
 
@@ -121,15 +122,15 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
     
     # --- training monitors
     ckpt = None
-    logger = TrainingLogger(
+    tm = TrainingLogger(
         run_dir, arch=model_params["architecture"],
-        epoch=start_epoch - 1,
         global_step=start_step,
+        epoch=start_epoch,
         loss_history=loss_history,
+        ckpt_cycle=ckpt_cycle,
         total_epochs=epochs,
         log_tb=meta_p.get("log_tb", False),
-        log_csv=meta_p.get("log_csv", False),
-        sync_s3=meta_p.get("sync_s3", False))
+        log_csv=meta_p.get("log_csv", False))
     
     drift_mon = DriftMonitor()
     probe_batch = next(iter(loader))
@@ -143,8 +144,7 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
 
     for epoch in range(start_epoch, epochs + 1):
         model.train()
-        sampler.set_epoch(epoch) # re-seed noisy buckets per epoch
-        logger.lap()
+        sampler.set_epoch(epoch)
         
         n_batches = 0
         for i, batch in tqdm(enumerate(loader), leave=False, total=len(loader),
@@ -156,52 +156,58 @@ def main(params: Dict, run_dir: Path, device: torch.device) -> str | None:
 
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 z_enc, z_pred, z_target = model(batch_dev)
-                loss, _ = vic_reg_loss(z_enc, z_pred, z_target, batch_dev["ctx_pad_mask"], 
-                                       projector=model.projector)
+                loss, _ = vic_reg_loss(
+                    z_enc, z_pred, z_target, batch_dev["ctx_pad_mask"], 
+                    projector=model.projector)
             loss.backward()
 
             # --- grad accumulation
             if (i + 1) % accum_steps == 0:
-                pre_clip = nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-                logger.log_grad_norm(pre_clip.item())
+                gn = nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                tm.ep_grad_norms.append(float(gn.item()))
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 scheduler.step()
 
                 # --- EMA update of target encoder
                 with torch.no_grad():
-                    m = momentum_at(logger.global_step // accum_steps, ema[0], ema[1])
+                    m = momentum_at(tm.global_step // accum_steps, ema[0], ema[1])
                     for param_q, param_k in zip(model.encoder.parameters(), model.target_encoder.parameters()):
                         param_k.data.mul_(m).add_((1. - m) * param_q.detach().data)
 
             # --- batch logging
-            logger.log_batch(loss.item(), batch_dev["tgt_times"].shape[0])
-            logger.update_embed_health(z_enc, batch_dev["ctx_pad_mask"], z_pred, z_target)
+            tm.record_batch(loss.item(), batch_dev["tgt_times"].shape[0])
+            tm.record_embeds(z_enc, batch_dev["ctx_pad_mask"], z_pred, z_target)
             n_batches += 1
 
         # --- eval ----------------------------------------------------------
         model.eval()
-        ep_metrics = logger.log_epoch(
-          lr=optimizer.param_groups[0]["lr"], 
-          model=model, 
-          **drift_mon.compute(model, device), 
-          **vic_reg_loss.compute_epoch(n_batches))
-        
-        # informational collapse diagnostics
-        zes_min = ep_metrics["embed_z_enc_std_min"]
-        dop = ep_metrics["drift_over_pred"]
-        if zes_min < 0.25:
-            print(f"  WARNING: z_enc_std_min={zes_min:.4f} - possible dim collapse")
-        if dop < 0.1 and zes_min < 0.4:
-            print(f"  WARNING: drift_over_pred={dop:.4f} - possible partial collapse")
-
-        # rolling last.pt + final epoch
-        ckpt = save_periodic(
-            model, model_params, optimizer, scheduler,
-            epoch, epochs, save_cycle,
-            logger.global_step, logger.loss_history, ckpt_dir, logger) or ckpt
+        tm.record_epoch(
+            lr=optimizer.param_groups[0]["lr"], 
+            ts=extract_time_scale(model),
+            **drift_mon.compute(model, device), 
+            **vic_reg_loss.compute_epoch(n_batches)
+        )
+        ckpt = tm.save_checkpoint(
+            { k: v.detach().cpu().clone() for k, v in model.state_dict().items() },
+            model_params, optimizer, scheduler
+        )
+        tm.lap()
 
     # ------------------------------------------------------------------
     # --- DONE ---------------------------------------------------------
-    logger.finalize()
-    return ckpt
+    # --- extract embeddings from the final checkpoint and send to S3
+    if sync_s3:
+        try:
+            from src.infra.inference import save_embeds_for_analysis
+            stem = "last" if not ckpt else ckpt.stem
+            save_embeds_for_analysis(
+              model, loader, device,
+              run_dir, stem,
+              emb_shape=emb_shape,
+            )
+        except Exception as e:
+            print(f"  WARNING: end-of-run embedding extraction failed: {e}")
+
+    tm.finalize()
+    return

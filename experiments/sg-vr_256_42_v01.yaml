@@ -32,7 +32,7 @@ optimization:
 vicreg:
     sim_wt: 1.0
     var_wt: 4.0        # OVERSHOOT (was 1.0): does the 2-sided term pin std->1? scale back after
-    cov_wt: 0.04       # held fixed - var is the search axis
+    cov_wt: 0.04
     on_enc: True
     on_tgt: True
     on_pred: False
@@ -48,7 +48,7 @@ meta:
     tag: "sg-vr_256_v01"
     description: "Stop-grad JEPA + VICReg, embed_dim 256, seed 42 - v01 variance re-aim (var_wt overshoot)"
     resume_from: null
-    save_cycle: 5
+    ckpt_cycle: 5
     log_tb: True
     log_csv: True
     sync_s3: true

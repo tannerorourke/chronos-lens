@@ -1,13 +1,5 @@
-from typing import Literal
-
-GCP_AUTH_URL = "https://www.googleapis.com/auth/cloud-platform"
-
-ARCHITECTURES = Literal["ema", "stopgrad", "supervised"]
-
-MODEL_VECS          = ["z_enc", "z_pred", "z_target"]
 MODEL_PRED_VECS     = ["z_pred", "z_target", "pred_error", "z_enc_recency"]
 SAE_TARGETS         = ["z_enc", "z_pred", "z_target", "pred_error"]
-
 
 ALL_TASKS = ["readmit_30d", "escalation", "icd_block", "escalation_type"]
 LABEL_ICD10_PREFIX = "F"

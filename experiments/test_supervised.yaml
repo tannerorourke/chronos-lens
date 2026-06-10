@@ -34,4 +34,4 @@ meta:
     tag: "test_supervised"
     description: "Tiny local CPU smoke-test supervised baseline. Pairs with test.yaml for analyze_comparison."
     resume_from: null
-    save_cycle: 1
+    ckpt_cycle: 1

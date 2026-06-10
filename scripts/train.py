@@ -2,8 +2,8 @@ import argparse
 
 import torch
 
-from src.utils.io import get_model_config, init_run_dir
-from src.utils.seed import set_global_seed, load_exp_seed, set_cuda_precision
+from src.utils.io import init_exp_config
+from src.utils.system import set_global_seed, load_exp_seed, set_cuda_precision
 from src.utils.constants import SAE_TARGETS
 
 
@@ -39,25 +39,29 @@ def main():
     args = parser.parse_args()
     command = args.command or "model"
     target = getattr(args, "target", None)
-    # config_path: in-repo input spec (git-tracked). run_dir: out-of-repo outputs.
-    config_path, run_dir, params = get_model_config(args.exp, command, target)
+    
+    run_dir, params = init_exp_config(args.exp, command, target)
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     print(f"  Device: {torch.cuda.get_device_name() if device.type == 'cuda' else device}")
-    print(f"  Experiment: '{args.exp}'")
-    print(f"  Run dir: {run_dir}")
 
     if command == "sae":
-        # SAE seeds from matching model run dir
+        # uses existing model's directory/seed
         set_global_seed(load_exp_seed(run_dir))
+        
+        print(f"  Experiment: '{run_dir.parent.name}' -> '{run_dir.name}'")
+        print(f"  Artifact dir: {run_dir}")
+        
         from src.training.train_sae import main as train_main
         train_main(params, run_dir, args.target, args.embeddings, device)
     else:
         set_global_seed(params["meta"]["seed"])
+        
         if device.type == "cuda":
             set_cuda_precision(use_bf16=True)
-
-        init_run_dir(run_dir, params)
+        
+        print(f"  Experiment: '{run_dir.name}'")
+        print(f"  Artifact dir: {run_dir}")
 
         arch = params["model"].get("architecture", "")
         if arch == "ema":

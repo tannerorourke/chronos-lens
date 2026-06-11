@@ -1,0 +1,68 @@
+# embed_dim 256, stopgrad, seed 42 - v02: var_wt scale-back to the bracket midpoint.
+# The v01 overshoot (var_wt 4.0) confirmed the two-sided term pins variance:
+# z_enc_std_mean held ~0.76 (vs 0.64-0.67 at var_wt 1.0) and std_min recovered above
+# the 0.25 floor by ~ep28 - but alignment paid for it (ep-35 cos_dist 0.136 vs ~0.069
+# at var_wt 1.0). v02 interpolates the bracket at var_wt 2.0; everything else matches
+# v01 so the var_wt response curve stays single-knob, including predictor warmup OFF.
+# Watch: z_enc_std_min through ep10-25 (v01 dipped to 0.14 before recovering) and
+# whether cos_dist lands nearer the 1.0-side of the bracket.
+model:
+    embed_dim: 256
+    encoder_heads: 8
+    encoder_depth: 4
+    encoder_ffn_dim: 1024 # ~4x embed_dim
+    token_enc_heads: 2
+    token_enc_depth: 2
+    token_enc_ffn_dim: 512 # ~2x embed_dim
+    predictor_embed_dim: 128 # standard (same as sg-vr_256_42)
+    predictor_heads: 4
+    predictor_depth: 3
+    predictor_ffn_dim: 512
+    projector_dim: 1024 # ~4x embed_dim (matters to VICReg)
+    architecture: stopgrad
+optimization:
+    epochs: 35                 # variance probe length (std response visible by ~ep15)
+    warmup_epochs: 7 # LR-scheduler warmup (~10% of optimizer steps)
+    predictor_warmup_epochs: 0 # OFF - isolate var_wt; set >0 to enable predictor warmup
+    patience: 15
+    base_lr: 3e-4
+    min_lr: 1e-5
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    grad_clip: 2.0
+vicreg:
+    sim_wt: 1.0
+    var_wt: 2.0        # bracket midpoint: 1.0 under-holds variance, 4.0 costs alignment
+    cov_wt: 0.04
+    on_enc: True
+    on_tgt: True
+    on_pred: False
+data:
+    batch_size: 64
+    accumulation_steps: 3
+    n_patients: 0
+    max_encounters: 20
+    pin_mem: true
+    num_workers: 0
+meta:
+    seed: 42
+    tag: "sg-vr_256_v02"
+    description: "Stop-grad JEPA + VICReg, embed_dim 256, seed 42 - v02 var_wt bracket midpoint (2.0)"
+    resume_from: null
+    ckpt_cycle: 5
+    log_tb: True
+    log_csv: True
+    sync_s3: true
+sae_config:
+    z_enc:
+        n_features: 1024 # ~4x embed_dim
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512
+    pred_error:
+        n_features: 1024
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512

@@ -286,11 +286,14 @@ class TrainingLogger:
         self.epoch = epoch
         self.loss_history: list[float] = loss_history
         self.ckpt_cycle = ckpt_cycle
-        
+
         # -- p/epoch metrics
         self.ep_samples: int = 0
-        self.ep_losses: list[float] = []
+        self.ep_loss_wsum: float = 0.0
         self.ep_grad_norms: list[float] = []
+        # -- most recent clipped grad norm; set by the train loop at each
+        #    optimizer step, attached to the next step record, then cleared
+        self.batch_gn: float | None = None
 
         # -- p/batch metrics
         if self._is_jepa:
@@ -302,8 +305,8 @@ class TrainingLogger:
         else:
             self.trackers = { "z_enc": EmbeddingTracker() }
 
-        # --- default always: metrics.jsonl and s3
-        self._jsonl = JsonlWriter(self._logdir / "metrics.jsonl")
+        # --- default always: metrics.jsonl (run root, the canonical sink) and s3
+        self._jsonl = JsonlWriter(self._run_root / "metrics.jsonl")
         self._sync_s3 = sync_s3
 
         # --- optional sinks
@@ -315,8 +318,8 @@ class TrainingLogger:
                            if log_tb else None)
         
         # ----------
-        self._ep_start = 0.0
-        self._run_start = 0.0
+        self._ep_start = time.time()
+        self._run_start = time.time()
         print(f"[TM] streaming @ {self._run_root.name} :: metrics.jsonl +s3"
               + (" +tb" if log_tb else "") + (" +csv" if log_csv else ""))
 
@@ -358,36 +361,36 @@ class TrainingLogger:
         self.trackers["z_target"].update(z_target_np)
 
         pred_err_l2 = np.linalg.norm(z_pred_np - z_target_np, axis=-1)
-        self.log_tb_scalar("step/z_pred_err_l2_mean", pred_err_l2, self.global_step)
+        self.log_tb_scalar("step/z_pred_err_l2_mean", float(pred_err_l2.mean()), self.global_step)
         
     def record_batch(self, loss, n_smpls):
-        self._logdir.mkdir(parents=True, exist_ok=True)
-      
+        """`loss` is the batch-mean loss; `n_smpls` weights it into the epoch mean."""
         self.global_step += 1
         self.ep_samples += n_smpls
-        self.ep_losses.append(float(loss))
-        step_loss = float(loss) / n_smpls
-        
+        loss = float(loss)
+        self.ep_loss_wsum += loss * n_smpls
+
         if self._jsonl is not None:
             self._jsonl.write({
                 "type": "step",
                 "step": self.global_step,
                 "epoch": self.epoch,
-                "step_loss": step_loss,
+                "loss": loss,
                 "grad_norm": self.batch_gn
             })
         if self._log_tb:
-            self.log_tb_scalar("step/loss", step_loss, self.global_step)
+            self.log_tb_scalar("step/loss", loss, self.global_step)
             if self.batch_gn is not None:
-                self.log_tb_scalar("step/grad_norm", self.batch_gn, self.global_step) 
-            
+                self.log_tb_scalar("step/grad_norm", self.batch_gn, self.global_step)
+
         self.batch_gn = None
     
     # --- epoch logging
     def record_epoch(self, lr: float, ts: float | None, **metrics) -> dict:
         wall_time = time.time() - self._run_start
         ep_time = time.time() - self._ep_start
-        epoch_loss = float(sum(self.ep_losses) / self.ep_samples)
+        # -- sample-weighted mean of the batch-mean losses
+        epoch_loss = self.ep_loss_wsum / max(self.ep_samples, 1)
         self.loss_history.append(epoch_loss)
 
         raw_metrics = {
@@ -414,8 +417,9 @@ class TrainingLogger:
         
         # --- output to logs
         # CLI
+        gn_mean = raw_metrics.get("grad_norm_mean", float("nan"))
         cli_pp = f"[{self.epoch}] | "
-        cli_pp += f"lr={lr:.6f} loss={self._fmt(epoch_loss):.5f} gn_mean={self._fmt(raw_metrics['grad_norm_mean']):.5f} | "
+        cli_pp += f"lr={lr:.6f} loss={epoch_loss:.5f} gn_mean={gn_mean:.5f} | "
         cli_pp += f"[{self._pp_time(ep_time)} ({self._pp_time(wall_time)})]"
         print(cli_pp)
         
@@ -459,28 +463,28 @@ class TrainingLogger:
             fn)
         
         if self._sync_s3:
+            # -- both keys repeat across cycles (rolling last.pt, growing
+            #    metrics.jsonl); without _overwrite the re-uploads are rejected
             with S3Client(self._run_root, s3_subdir="runs", strict=False) as s3:
-                s3.upload(file=ckpt_path, _async=False, _validate=True)
-                s3.upload(file=self._logdir / "metrics.jsonl", _async=True)
+                s3.upload(file=ckpt_path, _async=False, _validate=True, _overwrite=True)
+                s3.upload(file=self._run_root / "metrics.jsonl", _async=True, _overwrite=True)
         
         return ckpt_path
     
     def lap(self):
         """ reset all metrics, incr. epoch and timer """
         self.ep_samples = 0
-        self.ep_losses.clear()
+        self.ep_loss_wsum = 0.0
         self.ep_grad_norms.clear()
         for tracker in self.trackers.values():
             tracker.reset()
-            
+
         if self._tb_writer is not None:
             self._tb_writer.flush()
-        
+
         # lap
         self.epoch += 1
         self._ep_start = time.time()
-        if self._run_start == 0.0:
-            self._run_start = time.time()
 
     # --- end logging
     def finalize(self):

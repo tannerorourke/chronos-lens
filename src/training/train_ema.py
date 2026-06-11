@@ -163,8 +163,9 @@ def main(params: Dict, run_dir: Path, device: torch.device):
 
             # --- grad accumulation
             if (i + 1) % accum_steps == 0:
-                gn = nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-                tm.ep_grad_norms.append(float(gn.item()))
+                gn = float(nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip))
+                tm.ep_grad_norms.append(gn)
+                tm.batch_gn = gn
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 scheduler.step()

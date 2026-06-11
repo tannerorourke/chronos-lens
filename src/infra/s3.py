@@ -149,9 +149,9 @@ class S3Client:
         _validate: bool = False
     ) -> bool | Future[bool]:
         """
-        Upload `<local_dir>/<filename>` to `S3://<bucket>/runs/<run-id>/<filename>`.
+        Upload `<local_dir>/<filename>` to `s3://<bucket>/<prefix>/<filename>`.
         If _validate=True, checksum validation runs after the upload completes.
-        If If _validate=True and _async=True, both steps run on the executor thread
+        If _validate=True and _async=True, both steps run on the executor thread
         and the Future resolves only after validation.
         """
         file = self._as_posix(file)
@@ -230,8 +230,8 @@ class S3Client:
                     s3_key = obj["Key"]
                     if s3_key.endswith("/"):
                         continue  # skip folder placeholder objects
-                    # key = "{self._prefix}/{relative}" — strip the prefix to get
-                    # the relative path, then reuse _local/_key as normal.
+                    # -- key = "{self._prefix}/{relative}"; strip the prefix to
+                    # get the relative path, then reuse _local/_key as normal
                     relative = s3_key[len(f"{self._prefix}/"):]
                     logger.debug("[S3Client.fetch_folder] fetching '%s'", relative)
                     if not _overwrite and self._local(relative).exists():
@@ -340,8 +340,8 @@ class S3Client:
         
         
     def stream(self, file: str | Path) -> io.BytesIO:
-        """ 
-        Stream `S3://<bucket>/runs/<run-id>/<filename>` into an in-memory BytesIO buffer.
+        """
+        Stream `s3://<bucket>/<prefix>/<filename>` into an in-memory BytesIO buffer.
         Always raises on failure regardless of `strict` setting.
         """
         file = self._as_posix(file)

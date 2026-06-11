@@ -41,8 +41,8 @@ def compute_all_metrics(
     y_prob: np.ndarray,
     y_pred: np.ndarray | None = None,
 ) -> dict:
-    """ Function to evaluate provide all post-training evaluations to ensure
-        consistent metric definitions.
+    """ Standard binary metrics (AUROC / AUPRC / F1 / Brier / ECE) from
+        probabilities; y_pred defaults to a 0.5 threshold on y_prob.
     """
     from sklearn.metrics import average_precision_score, f1_score, roc_auc_score
 

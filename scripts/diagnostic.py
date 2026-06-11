@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.infra.inference import load_scaffolding, get_embeds_from_checkpoint
+from src.infra.inference import load_scaffolding, in_mem_extract_embeds
 from src.infra.labels import (
     load_label, load_escalation_labels, compute_escalation_criterions,
     compute_subset_mask, compute_temporal_split, extract_icd_block_targets)
@@ -255,8 +255,9 @@ def build_diagnostic_ctx(args: argparse.Namespace, tasks: list[str]) -> dict:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # -- Rebuild model + loader from the run's frozen artifacts ---------------
-    model, loader, run_dir, (checkpoint, config), (ds, _is_supervised, _label_key, _vocab) = \
-        load_scaffolding(args.checkpoint_name, args.exp, device)
+    model, loader, (is_supervised, _label_key), (checkpoint, config), (ds, _vocab) = \
+        load_scaffolding(args.exp, args.checkpoint_name, device)
+    run_dir = EXPS_DIR / args.exp
 
     architecture = config["model"]["architecture"]
     epoch = checkpoint.get("epoch", "")
@@ -275,7 +276,7 @@ def build_diagnostic_ctx(args: argparse.Namespace, tasks: list[str]) -> dict:
     print("\n  Extracting embeddings...")
     # Single extraction path for every arch: z_encs (N, C, D); JEPA also yields
     # z_pred/z_target. compute_derived_vectors adds z_enc_recency (+ pred_error).
-    vecs = get_embeds_from_checkpoint(model, loader, device)
+    vecs = in_mem_extract_embeds(model, loader, device, is_supv=is_supervised)
     vecs = compute_derived_vectors(vecs)
     print(f"  z_enc_recency shape: {vecs['z_enc_recency'].shape}")
 
@@ -342,9 +343,6 @@ def main():
                         default="all",
                         choices=["all", "fcode", "non_fcode"],
                         help="Evaluate on a patient subset: fcode (F30-F39), non_fcode, or all")
-    parser.add_argument("--batch-size", type=int,
-                        default=64,
-                        help="Batch size for embedding extraction")
     args = parser.parse_args()
 
     tasks = [t.strip() for t in args.tasks.split(",")]

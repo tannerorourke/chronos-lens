@@ -14,12 +14,10 @@ environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import argparse
 import json
-from pathlib import Path
 
 import numpy as np
 import torch
 
-# from src.infra.vector_computation import compute_derived_vectors
 from src.infra.labels import (
     load_escalation_labels, load_label_30d_at_k, 
     extract_icd_block_targets, get_absolute_enc_times
@@ -123,32 +121,29 @@ def main():
 
     # -- Load embeddings ----------------------------------------------------
     jepa_emb_stream, _ = load_embeddings_for_analysis(
-        jepa_exp_id, args.jepa_emb, device, 
-        False, False, False)
+        jepa_exp_id, args.jepa_emb, device, sync_ckpts=False)
     with jepa_emb_stream as jes:
         jepa_sids = jes["subject_ids"]
         jepa_mpos = jes["mask_pos"]
-        
-        last_idx = (np.asarray(jepa_mpos) - 1).astype(int) # last valid slot
+
+        # -- recency slice: the last valid context slot per sample
+        last_idx = (np.asarray(jepa_mpos) - 1).astype(int)
         rows = np.arange(jes["z_encs"].shape[0])
-        jepa_z = jes["z_encs"][rows, last_idx] # (N, D)
+        jepa_z = jes["z_encs"][rows, last_idx].astype(np.float32)  # (N, D)
         D = jepa_z.shape[1]
         print(f"JEPA:       N={len(jepa_sids)}, D={D}")
-        # jes closes
-    
+
     spv_emb_stream, _ = load_embeddings_for_analysis(
-        sup_exp_id, args.sup_emb, device, 
-        False, False, False)
+        sup_exp_id, args.sup_emb, device, sync_ckpts=False)
     with spv_emb_stream as ses:
         sup_sids = ses["subject_ids"]
         sup_mpos = ses["mask_pos"]
-        
-        last_idx = (np.asarray(sup_mpos) - 1).astype(int) # last valid slot
+
+        last_idx = (np.asarray(sup_mpos) - 1).astype(int)
         rows = np.arange(ses["z_encs"].shape[0])
-        sup_z = ses["z_encs"][rows, last_idx] # (N, D)
-        
+        sup_z = ses["z_encs"][rows, last_idx].astype(np.float32)  # (N, D)
+
         print(f"Supervised: N={len(sup_sids)}, D={sup_z.shape[1]}")
-        # ses closes
     
     # -- Match samples by (subject_id, mask_pos) ----------------------------
     sup_lookup: dict[tuple[str, int], int] = {}
@@ -211,8 +206,7 @@ def main():
         sae_overlap_result = cross_sae_overlap(
             jepa_dec_weights,
             spv_dec_weights,
-            cosine_threshold=args.cosine_threshold,
-            device=str(device))
+            cosine_threshold=args.cosine_threshold)
         sae_matched_cosines = sae_overlap_result.pop("matched_cosines")
         print(f"  Mean cosine: {sae_overlap_result['mean_cosine']:.4f}")
         print(f"  Frac stable: {sae_overlap_result['frac_stable']:.2%}")
@@ -280,17 +274,24 @@ def main():
         jepa_labels_step = _build_labels_per_step(lbl, matched_sids, matched_mpos, jepa_traj)
         sup_labels_step = _build_labels_per_step(lbl, matched_sids, matched_mpos, sup_traj)
 
-        # Concept centroid (from JEPA, use positive samples)
         pos_mask = lbl == 1
         if pos_mask.sum() < 5:
             continue
-        centroid = concept_centroid(z_j, lbl)
+
+        # -- per-model centroids and baselines: the two embedding spaces are
+        #    not interchangeable, and the probe baseline expects (P, T_max, D)
+        centroid_j = concept_centroid(z_j, lbl)
+        centroid_s = concept_centroid(z_s, lbl)
 
         try:
             jepa_probe = prospective_trajectory_probe(
-                jepa_traj, jepa_labels_step, z_j, centroid["mean"])
+                jepa_traj, jepa_labels_step,
+                baseline_z_enc=jepa_traj["trajectories"],
+                centroid_mean=centroid_j["mean"])
             sup_probe = prospective_trajectory_probe(
-                sup_traj, sup_labels_step, z_s, centroid["mean"])
+                sup_traj, sup_labels_step,
+                baseline_z_enc=sup_traj["trajectories"],
+                centroid_mean=centroid_s["mean"])
         except (ValueError, np.linalg.LinAlgError):
             continue
 
@@ -407,7 +408,7 @@ def main():
         npz_data["sae_matched_cosines"] = sae_matched_cosines
 
     npz_path = results_dir / "comparison.npz"
-    np.savez_compressed(npz_path, *npz_data)
+    np.savez_compressed(npz_path, **npz_data)
     print(f"Array results  -> {npz_path}")
 
 

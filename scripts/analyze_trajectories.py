@@ -17,12 +17,12 @@ environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import argparse
 import json
+from pathlib import Path
 
 import numpy as np
 import torch
 
 from src.infra.inference import load_embeddings_for_analysis
-# from src.infra.vector_computation import append_derived_vectors
 from src.infra.labels import (
     load_escalation_labels, load_label_30d_at_k, 
     extract_icd_block_targets, get_absolute_enc_times
@@ -104,31 +104,30 @@ def main():
     
     set_global_seed(load_exp_seed(exp_dir))
 
-    # -- Load or extract embeddings
-    emb_stream, (model, config) = load_embeddings_for_analysis(
-        exp_id, args.emb, device, 
-        args.save_emb_local, args.save_emb_s3, args.no_s3
+    # -- Load or extract embeddings (the .npz stem pairs with checkpoints/<stem>.pt)
+    emb_name = args.emb if args.emb else f"{Path(args.ckpt).stem}.npz"
+    emb_stream, _ = load_embeddings_for_analysis(
+        exp_id, emb_name, device,
+        sync_ckpts=False,
+        write_emb_local=args.save_emb_local,
+        write_emb_s3=args.save_emb_s3,
+        no_s3=args.no_s3,
     )
 
     with emb_stream as es:
-        z_encs = es["z_encs"]
         subject_ids = es["subject_ids"]    # (N,)
         mask_pos = es["mask_pos"]          # (N,)
-        
-        # compute derive vectors
-        if config["model"]["architecture"] in ["ema", "stopgrad"]:
-            z_pred = es["z_pred"]
-            z_target = es["z_target"]
-            z_perr = z_pred - z_target
-        last_idx = (np.asarray(mask_pos) - 1).astype(int)   # (N,) last valid slot
-        rows = np.arange(z_encs.shape[0])
-        z_enc_recency = z_encs[rows, last_idx]   # (N, D)
+
+        # -- recency slice: the last valid context slot per sample
+        last_idx = (np.asarray(mask_pos) - 1).astype(int)
+        rows = np.arange(es["z_encs"].shape[0])
+        z_enc_recency = es["z_encs"][rows, last_idx].astype(np.float32)  # (N, D)
 
     N, D = z_enc_recency.shape
     print(f"Samples: {N}, Dim: {D}, Patients: {len(np.unique(subject_ids))}")
 
     # -- Load patient data for labels and times
-    lpath_sequences = DATA_DIR / "sequences"
+    lpath_sequences = DATA_DIR / "sequences.jsonl"
     patients_dict = load_sequences_dict(lpath_sequences)
     times = get_absolute_enc_times(patients_dict, subject_ids, mask_pos)
 

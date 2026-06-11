@@ -62,31 +62,24 @@ def main():
 
     set_global_seed(load_exp_seed(exp_dir))
     
-    # -- Load or extract embeddings
+    # -- Load or extract embeddings (the .npz stem pairs with checkpoints/<stem>.pt)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    emb_stream, (_, _) = load_embeddings_for_analysis(
-        exp_id, args.emb, device, 
-        False, False, False
-    )
+    emb_name = args.emb if args.emb else f"{Path(args.ckpt).stem}.npz"
+    emb_stream, _ = load_embeddings_for_analysis(
+        exp_id, emb_name, device, sync_ckpts=False)
     with emb_stream as es:
-        z_enc = es["z_encs"]
         subject_ids = es["subject_ids"]    # (N,)
         mask_pos = es["mask_pos"]          # (N,)
-        
-        # compute derive vectors
-        # if config["model"]["architecture"] in ["ema", "stopgrad"]:
-            # z_pred = es["z_pred"]
-            # z_target = es["z_target"]
-            # z_perr = z_pred - z_target
-        # last_idx = (np.asarray(mask_pos) - 1).astype(int)   # (N,) last valid slot
-        # rows = np.arange(z_enc.shape[0])
-        # z_enc_recency = z_enc[rows, last_idx]   # (N, D)
 
-    N = len(subject_ids)
-    D = z_enc.shape[1]
+        # -- recency slice: the last valid context slot per sample
+        last_idx = (np.asarray(mask_pos) - 1).astype(int)
+        rows = np.arange(es["z_encs"].shape[0])
+        z_enc = es["z_encs"][rows, last_idx].astype(np.float32)  # (N, D)
+
+    N, D = z_enc.shape
 
     # -- Load SAE
-    sae_model, sae_dir, sae_params, dec_weights, activations = load_sae_info(exp_dir, args.sae, device)
+    sae_model, sae_dir, sae_params, dec_weights, activations = load_sae_info(exp_id, args.sae, device)
     print(f"Loaded SAE: n_features={sae_model.n_features}, top_k={sae_model.top_k}")
 
     # -- Load labels

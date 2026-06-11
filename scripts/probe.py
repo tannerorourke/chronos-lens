@@ -81,7 +81,7 @@ def main() -> None:
     mask_pos = reps["mask_pos"]
 
     # Causal per-encounter label at each sample's target encounter (mask_pos),
-    # aligned to the context-pooled rows. Patient-level fallbacks (no mask_pos)
+    # aligned to the recency rows. Patient-level fallbacks (no mask_pos)
     # are degenerate for these keys - the last encounter is structurally
     # negative for label_30d - so the mask position is required.
     patients_dict = load_sequences_dict()
@@ -102,7 +102,7 @@ def main() -> None:
 
     output = {
         "exp": args.exp,
-        "checkpoint": args.checkpoint_name,
+        "checkpoint": args.ckpt,
         "label": args.label,
         "cv": args.cv,
         "n_samples": int(len(labels)),
@@ -110,7 +110,7 @@ def main() -> None:
         **result,
     }
 
-    output_path = Path(args.output) if args.output else run_dir / "analysis" / "probing.json"
+    output_path = Path(args.output) if args.output else run_dir / "results" / "probing.json"
     save_json(output, output_path)
 
 

@@ -7,6 +7,8 @@ Functions
   extract_layer_representations : forward-hook extraction at every encoder layer
   probe_vectors                 : generic binary probe across named vectors
   probe_encounter_level         : per-encounter probing with patient-grouped CV
+  probe_icd_blocks              : one-vs-rest ICD-10 chapter probes (+ temporal variant)
+  evaluate_binary_probe         : stratified-CV logistic probe (+ temporal variant)
   run_probing_sweep             : layer-by-layer probe sweep for signal localization
 """
 import torch
@@ -19,7 +21,7 @@ from sklearn.metrics import (
     average_precision_score, f1_score, 
     roc_auc_score, brier_score_loss)
 
-from src.models import MODEL_TYPE, JEPA_EMA
+from src.models import MODEL_TYPE
 from src.infra.vector_computation import (
     flatten_valid_encounters,
     select_terminal_by_patient)
@@ -171,8 +173,8 @@ def probe_encounter_level(
     """Probe individual encounter representations with patient-grouped CV.
 
     Flattens valid encounters across all samples and runs a binary
-    LogisticRegression probe.  Uses GroupKFold so that encounters from
-    the same patient never appear in both train and test splits.
+    LogisticRegression probe.  GroupKFold keeps encounters from the same
+    patient out of both train and test in any one split.
 
     Parameters
     ----------
@@ -497,9 +499,8 @@ def evaluate_binary_probe_temporal(
 ) -> dict:
     """Single temporal train/test split binary probe.
 
-    Returns the same dict structure as evaluate_binary_probe so that
-    downstream formatting code works unchanged (fold lists have length 1,
-    std values are 0.0).
+    Returns the same dict structure as evaluate_binary_probe; fold lists
+    have length 1 and std values are 0.0.
     """
     scaler = StandardScaler()
     X_tr = scaler.fit_transform(embeddings[train_mask])
@@ -546,7 +547,7 @@ def run_probing_sweep(
     """Probe every transformer layer + the final z_enc to localize signal.
 
     Runs :func:`evaluate_binary_probe` (stratified k-fold, AUROC/AUPRC/F1/Brier/
-    ECE) on each layer's mean-pooled representation and reports where prediction
+    ECE) on each layer's recency representation and reports where prediction
     signal emerges through the encoder.
 
     Parameters

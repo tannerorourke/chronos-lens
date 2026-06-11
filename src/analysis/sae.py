@@ -3,12 +3,12 @@ SAE analysis utilities.
 
 Functions
 ---------
-  load_sae                    : reconstruct a SparseAutoencoder from checkpoint
-  extract_sae_activations     : run a trained SAE on a latent vector -> sparse activations
+  extract_activations         : run a trained SAE on a latent matrix -> sparse activations
   sae_label_enrichment        : per-feature Fisher exact test + BH FDR correction
   feature_label_specificity   : (n_features, n_labels) lift matrix
-  sae_coactivation_matrix     : (n_features, n_features) normalized co-activation lift
+  sae_coactivation_matrix     : pairwise co-activation lift over active features
   sae_temporal_enrichment     : per-feature temporal correlation and quartile activation
+  cross_sae_overlap           : Hungarian matching of decoder directions between two SAEs
   inspect_sae_feature_content : clinical content enrichment (secondary, post-identification)
   sae_cluster_crossref        : cross-reference SAE features with HDBSCAN clusters
   sae_seed_stability          : dictionary direction stability across seeds
@@ -38,7 +38,11 @@ def extract_activations(
     device: torch.device,
     save_dir: Path = None,
 ) -> np.ndarray:
-    """Run a trained SAE on a latent vector and return sparse activations."""
+    """Run a trained SAE on a latent matrix and return sparse activations.
+
+    Inputs are moved to the model's own device; `device` is accepted for
+    signature compatibility but the model placement wins.
+    """
     model.eval()
     device = next(model.parameters()).device
     with torch.no_grad():
@@ -70,14 +74,13 @@ def sae_label_enrichment(
     ----------
     activations : (N, n_features) sparse activation matrix
     labels      : (N,) binary labels (0/1)
-    label_name  : optional label name for context
 
     Returns
     -------
     list of dicts (one per feature with activation_frac >= 0.01):
         feature_idx, odds_ratio, p_value, fdr_q, n_active,
         n_pos_active, activation_frac
-    """ 
+    """
     from scipy.stats import fisher_exact
     
     N, n_features = activations.shape
@@ -303,32 +306,37 @@ def sae_temporal_enrichment(
         print(f"  {len(results)} features")
         n_time_corr = sum(1 for t in results if abs(t["time_corr"]) > 0.1)
         print(f"  {n_time_corr} with |time_corr| > 0.1")
-        # print(f"  {early_frac} have activation in first quartile")
-        # print(f"  {late_frac} have activation in last quartile")
 
     return results
 
 
 def cross_sae_overlap(
-    W_jepa: np.ndarray, # JEPA decoder weights
-    W_spv: np.ndarray, # supervised decoder weights
+    W_a: np.ndarray,
+    W_b: np.ndarray,
     cosine_threshold: float = 0.85,
-    device: str = "cpu",
 ) -> dict:
     """Hungarian matching of decoder directions between two SAEs.
 
-    Adapted from sae_seed_stability in src/analysis/sae.py.
+    Parameters
+    ----------
+    W_a, W_b         : (D, n_features) decoder weight matrices; columns are
+                       dictionary directions. Must share embed dim D.
+    cosine_threshold : matched cosine above which a pair counts as stable
+
+    Returns
+    -------
+    dict with mean/median cosine, frac_stable, n_stable, n_matched, and the
+    raw matched_cosines array.
     """
     from scipy.optimize import linear_sum_assignment
 
-    # W_jepa = jepa_sae.decoder.weight.detach().cpu().float()   # (D, n_features_j)
-    # W_spv = sup_sae.decoder.weight.detach().cpu().float()     # (D, n_features_s)
+    # -- L2-normalize columns
+    W_a = np.asarray(W_a, dtype=np.float64)
+    W_b = np.asarray(W_b, dtype=np.float64)
+    W_a = W_a / np.clip(np.linalg.norm(W_a, axis=0, keepdims=True), 1e-8, None)
+    W_b = W_b / np.clip(np.linalg.norm(W_b, axis=0, keepdims=True), 1e-8, None)
 
-    # L2-normalize columns
-    W_jepa = W_jepa / W_jepa.norm(dim=0, keepdim=True).clamp(min=1e-8)
-    W_spv = W_spv / W_spv.norm(dim=0, keepdim=True).clamp(min=1e-8)
-
-    cos_sim = (W_jepa.T @ W_spv).numpy()  # (n_j, n_s)
+    cos_sim = W_a.T @ W_b  # (n_a, n_b)
     row_idx, col_idx = linear_sum_assignment(1.0 - cos_sim)
     matched_cosines = cos_sim[row_idx, col_idx]
 

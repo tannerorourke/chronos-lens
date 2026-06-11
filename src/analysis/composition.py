@@ -28,6 +28,8 @@ def sae_boolean_composition(
 
     The tree splits on feature activation (nonzero vs zero), producing
     interpretable AND/OR-style rules over SAE features.
+    
+    Tree reference: https://scikit-learn.org/stable/auto_examples/tree/plot_unveil_tree_structure.html#sphx-glr-auto-examples-tree-plot-unveil-tree-structure-py
 
     Parameters
     ----------

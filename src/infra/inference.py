@@ -4,16 +4,18 @@ Everything that stands an analysis up from a run's *frozen artifacts* and moves
 embedding vectors across the disk boundary - inference only, no gradients, no
 training:
 
-- :func:`load_scaffolding`  - rebuild model + loader from a run dir.
-- :func:`get_embeds_from_checkpoint` - run the model once and collect vectors in memory
-  (the analysis scripts' workhorse).
-- :func:`stream_embeddings` - run the model and stream vectors to a single
-  `embeddings_<epoch>.npz` via :class:`EmbeddingWriter` (too big for RAM).
-- :class:`EmbeddingWriter` / :class:`EmbeddingWriterSupv` - the streaming writers.
+- :func:`load_scaffolding` - rebuild model + loader from a run dir.
+- :func:`load_embeddings_for_analysis` - the analysis scripts' entry point:
+  local .npz, else S3, else extraction from the stem-matched checkpoint.
+- :func:`in_mem_extract_embeds` - run the model once and collect vectors in memory.
+- :func:`stream_embeddings` - run the model and stream vectors to disk via
+  :class:`JEPAEmbeddingWriter` / :class:`SupervisedEmbeddingWriter` (too big for RAM).
+- :func:`save_embeds_for_analysis` - training-side end-of-run extract + S3 push.
+- :class:`EmbeddingStream` - mmap-backed dict-like view over a finished extraction.
 
-This is the shared bridge `scripts/embeddings.py` and the analysis scripts use;
-it may import model + training *definitions* (datasets, checkpoint) but never the
-training loops or `src.analysis`.
+Shared bridge for the training loops, `scripts/embeddings.py`, and the analysis
+scripts; may import model + training *definitions* (datasets, checkpoint) but
+never the training loops or `src.analysis`.
 """
 from contextlib import nullcontext
 from pathlib import Path
@@ -461,10 +463,10 @@ def stream_embeddings(
     out_file_stem: str,
     use_bf16: bool = True
 ) -> EmbeddingStream:
-    """Run one inference epoch and stream embeddings to `output_dir` in batches.
+    """Run one inference epoch and stream embeddings to `out_dir` in batches.
 
     The z_enc vector alone can be tens of GB, so this writes out incrementally via
-    :class:`EmbeddingWriter` / :class:`EmbeddingWriterSupv` (S3-syncable on demand).
+    :class:`JEPAEmbeddingWriter` / :class:`SupervisedEmbeddingWriter`.
     """
     n_total, max_ctx, emb_dim = emb_shape
     
@@ -522,24 +524,33 @@ def stream_embeddings(
 
 
 def in_mem_extract_embeds(
-    model: MODEL_TYPE, 
+    model: MODEL_TYPE,
     loader: DataLoader,
     device: torch.device,
     is_supv: bool | None = None,
 ):
-    if (is_supv is not None and is_supv) and not isinstance(model, SupervisedTransformer):
-        raise ValueError(f"CONFIG MISMATCH: is_supv={is_supv} but model is not a SupervisedTransformer")
-    if (is_supv is not None and not is_supv) and isinstance(model, SupervisedTransformer):
-        raise ValueError(f"CONFIG MISMATCH: is_supv={is_supv} but model is a SupervisedTransformer")
+    """Run one inference epoch and collect embedding vectors in memory.
+
+    Same field layout as the streaming writers (z_encs, ctx_pad_mask,
+    subject_ids, mask_pos; plus z_pred/z_target for JEPA archs), padded to the
+    longest context length seen. Holds everything in RAM; use
+    :func:`stream_embeddings` for full-cohort extraction. `is_supv` is inferred
+    from the model type when omitted.
+    """
+    if is_supv is None:
+        is_supv = isinstance(model, SupervisedTransformer)
+    elif is_supv != isinstance(model, SupervisedTransformer):
+        raise ValueError(
+            f"CONFIG MISMATCH: is_supv={is_supv} but model is {type(model).__name__}")
     model.eval()
-    
+
     all_z_encs: list[np.ndarray] = []
     all_z_pred: list[np.ndarray] = []
     all_z_target: list[np.ndarray] = []
     all_ctx_pad_mask: list[np.ndarray] = []
-    all_subject_ids: list[np.ndarray] = []
+    all_subject_ids: list[str] = []
     all_mask_pos: list[np.ndarray] = []
-    
+
     with torch.no_grad():
         for batch in loader:
             batch_dev = {
@@ -548,18 +559,17 @@ def in_mem_extract_embeds(
             }
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 if is_supv:
-                    assert type(model) is SupervisedTransformer, "expected Supervised Transformer model"
-                    z_enc = model.encode(batch_dev) # z_enc
+                    z_enc = model.encode(batch_dev)
                 else:
-                    assert type(model) is JEPA_EMA or type(model) is JEPAStopGrad, "expected Unsupervised JEPA model"
                     # SG returns a 4th detached-target tensor (training-only);
                     # take the first three outputs uniformly across JEPA archs.
                     z_enc, z_pred, z_target = model(batch_dev)[:3]
-                    all_z_pred.append(z_pred.cpu().numpy())
-                    all_z_target.append(z_target.cpu().numpy())
-                all_z_encs.append(z_enc.cpu().numpy())
+                    all_z_pred.append(z_pred.float().cpu().numpy())
+                    all_z_target.append(z_target.float().cpu().numpy())
+                # -- bf16 tensors are not numpy-convertible; cast to fp32 first
+                all_z_encs.append(z_enc.float().cpu().numpy())
                 all_ctx_pad_mask.append(batch_dev["ctx_pad_mask"].cpu().numpy())
-                all_subject_ids.append(batch["subject_ids"])
+                all_subject_ids.extend(batch["subject_ids"])
                 all_mask_pos.append(batch_dev["mask_pos"].cpu().numpy())
             
     max_C = max(arr.shape[1] for arr in all_z_encs)
@@ -575,10 +585,10 @@ def in_mem_extract_embeds(
         padded_masks.append(m)
 
     out = {
-        "z_encs": np.concatenate(padded_z_encs),        # (N, C_max, D)
-        "ctx_pad_mask": np.concatenate(padded_masks),   # (N, C_max)
-        "subject_ids": np.array(all_subject_ids),       # (N,)
-        "mask_pos": np.concatenate(all_mask_pos),       # (N,)
+        "z_encs": np.concatenate(padded_z_encs),              # (N, C_max, D)
+        "ctx_pad_mask": np.concatenate(padded_masks),         # (N, C_max)
+        "subject_ids": np.array(all_subject_ids, dtype=str),  # (N,)
+        "mask_pos": np.concatenate(all_mask_pos),             # (N,)
     }
     if not is_supv:
         out["z_pred"] = np.concatenate(all_z_pred)      # (N, D)
@@ -598,65 +608,91 @@ def load_embeddings_for_analysis(
     write_emb_local: bool = False,
     write_emb_s3: bool = False,
     no_s3: bool = False,
-) -> tuple[EmbeddingStream, tuple]:
+) -> tuple:
+    """Resolve a run's embeddings for analysis.
+
+    `name` is the embeddings file name; its stem also names the source
+    checkpoint (`embeddings/<stem>.npz` pairs with `checkpoints/<stem>.pt`).
+
+    Resolution order:
+      1. local `embeddings/<stem>.npz`  (mmap'd NpzFile)
+      2. S3 `runs/<run-id>/checkpoints/<stem>.pt`  (fetch, fall through to 4)
+      3. S3 `runs/<run-id>/embeddings/<stem>.npz`  (streamed into memory)
+      4. extraction from the local checkpoint via one inference epoch
+
+    Returns `(embeddings, (model, config))`. `embeddings` is dict-like and a
+    context manager (NpzFile on paths 1/3, :class:`EmbeddingStream` on 4);
+    `model` is None unless extraction ran. `write_emb_local` / `write_emb_s3`
+    persist a freshly obtained .npz; `no_s3` confines resolution to local disk.
+    """
     filename = name if name.endswith(".npz") else f"{name}.npz"
     prefix = Path(filename).stem
     ldir = EXPS_DIR / run_id
     lpath_emb = ldir / "embeddings" / filename
     lpath_pt = ldir / "checkpoints" / f"{prefix}.pt"
-    
-    with S3Client(ldir, strict=True) as s3:
-        # fast path -- (local) name.npz exists
-        if lpath_emb.exists():
-            if sync_ckpts:
-                s3.sync(lpath_pt, _async=True)
-            return np.load(lpath_emb, mmap_mode='r', allow_pickle=True)
-        
-        # Need to extract, sync checkpoints first
-        if not lpath_pt.exists() and not no_s3:
+
+    cfg_path = ldir / "config.yaml"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"No config.yaml for run '{run_id}'")
+    with open(cfg_path) as f:
+        config = yaml.safe_load(f)
+
+    # -- local .npz: no model rebuild, no S3 round-trip required
+    if lpath_emb.exists():
+        if sync_ckpts and not no_s3:
+            with S3Client(ldir, s3_subdir="runs", strict=False) as s3:
+                s3.sync(lpath_pt)
+        return np.load(lpath_emb, mmap_mode="r", allow_pickle=True), (None, config)
+
+    # -- resolve a checkpoint from S3, or stream the remote .npz
+    if not lpath_pt.exists():
+        if no_s3:
+            raise FileNotFoundError(
+                f"No local embeddings or checkpoint for {filename!r} in {ldir}")
+        with S3Client(ldir, s3_subdir="runs", strict=True) as s3:
             if s3.exists(lpath_pt):
                 s3.fetch(lpath_pt)
             elif s3.exists(lpath_emb):
-                # S3 has embeddings (but no ckpt) - stream embeds, optionally cache
                 buf = s3.stream(lpath_emb)
                 if write_emb_local:
                     lpath_emb.parent.mkdir(parents=True, exist_ok=True)
                     lpath_emb.write_bytes(buf.getvalue())
-                return np.load(buf, allow_pickle=True)
+                return np.load(buf, allow_pickle=True), (None, config)
             else:
-                raise FileNotFoundError(f"No embeddings or checkpoint for {name!r}")
-            
-        # Run inference on checkpoint to get embeddings
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model, loader, (is_supervised, _), (ckpt_data, config), (ds, _) = \
-            load_scaffolding(run_id, f"{prefix}.pt", device)
-            
-        n_total = len(ds)
-        if config["data"].get("max_encounters"):
-            max_ctx = config["data"]["max_encounters"] - 1
-        else:
-            max_ctx = max(len(s["context"]) for s in ds.samples)
-        emb_dim = ckpt_data["model_params"]["embed_dim"]
-        
-        stream = stream_embeddings(
-            model, loader, device,
-            (n_total, max_ctx, emb_dim), 
-            out_dir=ldir / "embeddings", out_file_stem=prefix
-        )
-        
-        if write_emb_local:
-            stream.to_npz(lpath_emb)
-            
-        if write_emb_s3:
-            tmp = lpath_emb if write_emb_local else (ldir / "embeddings" / f".scratch_{prefix}.npz")
-            if not write_emb_local:
-                stream.to_npz(tmp)
+                raise FileNotFoundError(
+                    f"No embeddings or checkpoint for {filename!r} locally or on S3")
+
+    # -- extract from the stem-matched checkpoint
+    model, loader, _, (ckpt_data, config), (ds, _) = \
+        load_scaffolding(run_id, f"{prefix}.pt", device)
+
+    n_total = len(ds)
+    if config["data"].get("max_encounters"):
+        max_ctx = config["data"]["max_encounters"] - 1
+    else:
+        max_ctx = max(len(s["context"]) for s in ds.samples)
+    emb_dim = ckpt_data["model_params"]["embed_dim"]
+
+    stream = stream_embeddings(
+        model, loader, device,
+        (n_total, max_ctx, emb_dim),
+        out_dir=ldir / "embeddings", out_file_stem=prefix
+    )
+
+    if write_emb_local:
+        stream.to_npz(lpath_emb)
+
+    if write_emb_s3 and not no_s3:
+        tmp = lpath_emb if write_emb_local else (ldir / "embeddings" / f".scratch_{prefix}.npz")
+        if not write_emb_local:
+            stream.to_npz(tmp)
+        with S3Client(ldir, s3_subdir="runs", strict=False) as s3:
             s3.upload(tmp)
-            if not write_emb_local:
-                tmp.unlink()
-        
-        # caller uses `with result: ...` to manage cleanup
-        return stream, (model, config)
+        if not write_emb_local:
+            tmp.unlink()
+
+    # -- caller uses `with result: ...` to manage cleanup
+    return stream, (model, config)
     
 # =============================================================================
 # EXTRACT-ONLY ENTRY POINT

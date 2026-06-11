@@ -31,7 +31,7 @@ parser.add_argument("--seq-path",           default=None, type=str,
 parser.add_argument("--min-encounters",     default=3, type=int,
                     help="Minimum encounters per patient (default: 3)")
 parser.add_argument("--max-encounters",     default=250, type=int,
-                    help="Maximum encounters per patient (default: 20)")
+                    help="Maximum encounters per patient (default: 250)")
 parser.add_argument("--dry-run",            default=False, action="store_true",
                     help="Skip saving to disk")
 parser.add_argument("--baseline",           default=False, action="store_true",

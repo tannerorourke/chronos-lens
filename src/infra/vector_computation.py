@@ -6,28 +6,29 @@ Vector computation & manipulation for analysis
 import numpy as np
 
 
-def get_derived_vectors(raw_vecs: dict) -> tuple[np.ndarray, np.ndarray]:
-    """Compute
+def compute_derived_vectors(raw_vecs: dict) -> dict:
+    """Return a copy of an extracted-vector dict augmented with derived vectors.
+
+    Adds, when the source fields are present:
         pred_error    = z_pred - z_target
-        z_enc_recency = z_encs[k-1] - the most-recent context encounter per sample
+        z_enc_recency = z_encs[i, mask_pos[i]-1], the most-recent context
+                        encounter per sample  (N, D)
 
-    The per-sample analysis vector is the recency encounter, not a context mean:
-    mean-pooling collapses a patient's trajectory into a running centroid, and the
-    encounter encoder is bidirectional over the prefix (so an encounter's vector is
-    prefix-length dependent) - the last context slot z_enc[k-1] is the one
-    consistent "one point per encounter" and matches the model readout.
+    The recency slice is the canonical per-sample analysis vector: the
+    encounter encoder is bidirectional over the context prefix, so an
+    encounter's vector is prefix-length dependent and the last valid slot is
+    the one consistent per-encounter point.
     """
-    pred_error: np.ndarray = np.asarray([])
-    z_enc_recency: np.ndarray = np.asarray([])
-    if "z_pred" in raw_vecs and "z_target" in raw_vecs:
-        pred_error = raw_vecs["z_pred"] - raw_vecs["z_target"]
+    vecs = dict(raw_vecs)
+    if "z_pred" in vecs and "z_target" in vecs:
+        vecs["pred_error"] = np.asarray(vecs["z_pred"]) - np.asarray(vecs["z_target"])
 
-    if "z_encs" in raw_vecs and "mask_pos" in raw_vecs:
-        last_idx = (np.asarray(raw_vecs["mask_pos"]) - 1).astype(int)
-        rows = np.arange(raw_vecs["z_encs"].shape[0])
-        z_enc_recency = raw_vecs["z_encs"][rows, last_idx] # (N, D)
+    if "z_encs" in vecs and "mask_pos" in vecs:
+        last_idx = (np.asarray(vecs["mask_pos"]) - 1).astype(int)
+        rows = np.arange(vecs["z_encs"].shape[0])
+        vecs["z_enc_recency"] = np.asarray(vecs["z_encs"])[rows, last_idx]
 
-    return pred_error, z_enc_recency
+    return vecs
 
 
 def broadcast_to_samples(patient_data, patient_ids, subject_ids) -> np.ndarray:
@@ -39,9 +40,9 @@ def broadcast_to_samples(patient_data, patient_ids, subject_ids) -> np.ndarray:
 
 def flatten_valid_encounters(z_encs, ctx_pad_mask, subject_ids) -> tuple:
     """
-    Flatten z_enc from (N, C, D) to (N_valid, D) using pad masks. Usually called
-    in order to pool encounters over patients for patient-level analysius.
-    enc_positions[i] is the context position index for the i-th valid encounter.
+    Flatten z_encs from (N, C, D) to (N_valid, D) using the pad mask.
+    Returns (z_enc_flat, enc_subject_ids, ctx_pos); ctx_pos[i] is the context
+    position index of the i-th valid encounter.
     """
     valid_mask = ~ctx_pad_mask.astype(bool)
     z_enc_flat = z_encs[valid_mask]

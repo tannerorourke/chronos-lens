@@ -56,8 +56,8 @@ def extract_trajectories(
     z_sample : (N, D) per-sample encounter vector (recency z_enc[k-1])
     subject_ids  : (N,) patient identifier per sample
     mask_pos     : (N,) encounter index per sample (int-castable)
-    times        : (N,) optional float, days-since-first-admit per sample.
-                   If provided, aligned into (P, T_max) in the output dict.
+    times        : (N,) float, days-since-first-admit per sample; aligned
+                   into (P, T_max) in the output dict.
 
     Returns
     -------
@@ -66,7 +66,7 @@ def extract_trajectories(
         validity_mask  : (P, T_max) bool, True = real step
         patient_ids    : (P,) str, unique patient IDs in sorted order
         times          : (P, T_max) float, days-since-first-admit per step
-                         (zeros where invalid). None if times not provided.
+                         (zeros where invalid)
     """
     subject_ids = np.asarray(subject_ids, dtype=str)
     mask_pos = np.asarray(mask_pos, dtype=int)

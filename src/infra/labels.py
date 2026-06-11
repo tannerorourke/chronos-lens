@@ -1,4 +1,10 @@
-""" Label / target / split / subset preparation """
+"""
+Label / target / split / subset preparation for analysis.
+
+All lookups key the patients dict (from sequences.jsonl) by
+(subject_id, mask_pos), keeping labels causal per-encounter: the label at
+sample i describes encounter mask_pos[i] given only encounters [0, mask_pos-1].
+"""
 import json
 from pathlib import Path
 
@@ -6,7 +12,7 @@ import numpy as np
 
 
 # =============================================================================
-# Patient Sequences (dict ) -> labels
+# Patient sequences (dict) -> labels
 # =============================================================================
 
 def load_label_30d_at_k(

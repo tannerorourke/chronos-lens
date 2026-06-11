@@ -1,3 +1,9 @@
+"""
+All visualization for the analysis stack: dataset/cohort summaries, embedding
+projections (UMAP / PHATE / PCA), trajectory and drift views, SAE feature
+heatmaps, and probe/metric comparisons. Figures render headless (Agg) and are
+saved or shown via show_or_savefig.
+"""
 from pathlib import Path
 
 import numpy as np
@@ -51,7 +57,7 @@ def show_or_savefig(
     dpi: int = 300,
     **savefig_kwargs,
 ):
-    """ I'll save your figure, %$&#, I'll even show it for you! """
+    """Save the figure to save_path (suffix forced to .png), show it, or both."""
     if save_path is not None:
         save_path = Path(save_path).with_suffix(".png")
         save_path.parent.mkdir(parents=True, exist_ok=True)

@@ -16,6 +16,7 @@ environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import argparse
 import json
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -100,29 +101,19 @@ def main():
     
     set_global_seed(load_exp_seed(exp_dir))
 
-    # -- Load or extract embeddings
-    emb_stream, (model, config) = load_embeddings_for_analysis(
-        exp_id, args.emb, device, 
-        False, False, False
-    )
+    # -- Load or extract embeddings (the .npz stem pairs with checkpoints/<stem>.pt).
+    #    Only the alignment fields are read; activations come from the SAE dir.
+    emb_name = args.emb if args.emb else f"{Path(args.ckpt).stem}.npz"
+    emb_stream, _ = load_embeddings_for_analysis(
+        exp_id, emb_name, device, sync_ckpts=False)
     with emb_stream as es:
-        # z_encs = es["z_encs"]
         subject_ids = es["subject_ids"]    # (N,)
         mask_pos = es["mask_pos"]          # (N,)
-        
-        # compute derive vectors
-        if config["model"]["architecture"] in ["ema", "stopgrad"]:
-            z_pred = es["z_pred"]
-            z_target = es["z_target"]
-            # z_perr = z_pred - z_target
-        # last_idx = (np.asarray(mask_pos) - 1).astype(int)   # (N,) last valid slot
-        # rows = np.arange(z_encs.shape[0])
-        # z_enc_recency = z_encs[rows, last_idx]   # (N, D)
-    
+
     N = len(subject_ids)
 
     # -- Load SAE and get activations
-    sae_model, _, sae_params, dec_weights, activations = load_sae_info(exp_dir, args.sae, device)
+    sae_model, _, sae_params, dec_weights, activations = load_sae_info(exp_id, args.sae, device)
     print(f"Loaded SAE: n_features={sae_model.n_features}, top_k={sae_model.top_k}")
 
     n_features = sae_model.n_features

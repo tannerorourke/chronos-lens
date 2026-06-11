@@ -1,21 +1,19 @@
 """
-Geometric analysis of JEPA latent-space vectors.
+Geometric analysis of latent-space vectors.
 
-Operates on raw embedding vectors (no external metadata).
-PCA, divergence, ICC, subspace alignment, CKA, and
-label-supervised subspace analysis.
+Operates on raw embedding matrices (no external metadata): PCA with
+Marchenko-Pastur signal counting, UMAP / PHATE 2-d reductions, principal-angle
+subspace alignment, linear CKA, and label-supervised subspace analysis
+(LDA label subspaces, multi-label CCA, label effective rank).
 
-- Plotting from these functions done in 'notebooks/*.ipynb'
+- Plotting from these functions done in 'notebooks/*'
 """
 
 import numpy as np
-import pandas as pd
-from scipy import stats
 
 from sklearn.decomposition import PCA
 import umap as umap_module
 import phate as phate_module
-import pingouin as pg
 
 from src.utils.system import SEED
 

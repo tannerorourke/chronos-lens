@@ -25,7 +25,7 @@ sae = subparsers.add_parser(
     help="Train SAE on pre-trained model from --exp folder"
 )
 sae.add_argument(
-    "--target", type=str, required=True, default="z_enc", choices=SAE_TARGETS,
+    "--target", type=str, required=True, choices=SAE_TARGETS,
     help="Which vector to train on: z_enc (flattened encoder), z_pred, z_target, "
          "pred_error (z_pred - z_target). Must be present in the run's config['sae_config'].")
 sae.add_argument(

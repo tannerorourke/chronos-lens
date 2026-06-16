@@ -278,7 +278,7 @@ class TrainingLogger:
             self.trackers = { "z_enc": EmbeddingTracker() }
 
         # --- default: logs/metrics.jsonl (run root, the canonical sink)
-        self._jsonl = JsonlWriter(self._logdir / "metrics.jsonl")
+        self._jsonl = JsonlWriter(self._run_root / "metrics.jsonl")
         if sync_s3:
             self._s3 = S3Client(self._run_root, s3_subdir="runs", strict=False)
         if log_csv:

@@ -25,8 +25,8 @@ optimization:
     ema: [0.996, 0.9995]
 vicreg:
     sim_wt: 1.0
-    var_wt: 1.0
-    cov_wt: 0.04       # .mean()-normalized -> D-invariant; nudge up only if cov creeps at 1024
+    var_wt: 2.0 # lined up with stop-grad (SG as source) to isolate the EMA mechanism
+    cov_wt: 0.04 # D-invariant; nudge up only if cov creeps at 1024
     on_enc: True
     on_tgt: False
     on_pred: False
@@ -39,7 +39,7 @@ data:
     num_workers: 0
 meta:
     seed: 43
-    tag: "ema-vr_256"
+    tag: "ema-vr_256_43"
     description: "EMA JEPA + VICReg, embed_dim 256, seed 43 (collapse ablation)"
     resume_from: null
     ckpt_cycle: 5

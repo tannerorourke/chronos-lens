@@ -8,13 +8,15 @@ params dict.
 
 from pathlib import Path
 import random
+import logging
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import torch
 
 from src.models import MODEL_TYPE, SparseAutoencoder, build_model
 from src.utils.system import SEED, _restore_rng
-from src.utils.io import EXPS_DIR
+from src.utils.io import EXPS_DIR, save_json
 
 
 def save_checkpoint(
@@ -25,11 +27,9 @@ def save_checkpoint(
     epoch: int,
     global_step: int,
     loss_history: list,
-    save_dir: Path,
-    filename: str | None = None,
+    file: Path,
 ) -> Path:
-    save_dir.mkdir(parents=True, exist_ok=True)
-    file = save_dir / (filename or f"checkpoint_{epoch}.pt")
+    file.parent.mkdir(parents=True, exist_ok=True)
 
     torch.save({
         "model":        state_dict,
@@ -47,7 +47,7 @@ def save_checkpoint(
             "python":   random.getstate()
         },
     }, file)
-    print(f"   Checkpoint saved: {save_dir.name}/{file.name} (epoch {epoch})")
+    print(f"   Checkpoint saved: {file.parent.name}/{file.name} (epoch {epoch})")
     return file
 
 
@@ -109,21 +109,62 @@ def load_model_eval(
     model = build_model(model_params, device)
     model.load_state_dict(ckpt["model"])
 
-    if restore_rng:
-        _restore_rng(ckpt)
+    if restore_rng and "rng_states" in ckpt:
+        _restore_rng(ckpt["rng_states"])
 
     model.eval()
     return model, ckpt
     
-    
-def load_sae_eval(checkpoint_path: Path, device: torch.device) -> SparseAutoencoder:
-    """Load a trained SAE from checkpoint."""
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    model = SparseAutoencoder(
-        embed_dim=ckpt["embed_dim"],
-        n_features=ckpt["n_features"],
-        top_k=ckpt["top_k"],
-    ).to(device)
-    model.load_state_dict(ckpt["model"])
-    model.eval()
-    return model
+
+def save_sae_results(
+    model: SparseAutoencoder,
+    data_vec: np.ndarray,
+    loss_history: list,
+    sae_exp_dir: Path,
+    device: torch.device
+):
+    """Save SAE checkpoint, dictionary, activations, and loss curve"""
+    # -- Checkpoint
+    ckpt_path = sae_exp_dir / "sae.pt"
+    torch.save({
+        "model": model.state_dict(),
+        "model_params": {
+            "embed_dim": model.embed_dim,
+            "n_features": model.n_features,
+            "top_k": model.top_k,
+        },
+        "loss_history": loss_history,
+    }, ckpt_path)
+
+    # -- Dictionary (decoder weights)
+    # decoder.weight is (embed_dim, n_features); save as (n_features, embed_dim)
+    dictionary = model.D.weight.data.cpu().numpy().T
+    dict_path = sae_exp_dir / "decoder_weights.npy"
+    np.save(dict_path, dictionary)
+
+    # -- Activations on full dataset
+    with torch.no_grad():
+        x = torch.tensor(data_vec, dtype=torch.float32, device=device)
+        _, act = model(x)
+    act_np = act.cpu().numpy()
+    np.save(sae_exp_dir / "activations.npy", act_np)
+
+    # -- Loss curve
+    from src.training.utils.logging import plot_loss_curve
+    plot_loss_curve(loss_history, save_path=sae_exp_dir / "sae_loss_curve",
+                    title="SAE Training Loss")
+
+    # -- Summary JSON
+    summary_path = sae_exp_dir / "sae_summary.json"
+    save_json({
+        "embed_dim": model.embed_dim,
+        "n_features": model.n_features,
+        "top_k": model.top_k,
+        "n_samples": data_vec.shape[0],
+        "final_loss": loss_history[-1] if loss_history else None,
+        "n_epochs": len(loss_history),
+        "n_dead_features": int(((act_np != 0).sum(axis=0) == 0).sum()),
+        "mean_active_per_sample": float((act_np != 0).sum(axis=1).mean()),
+    }, summary_path)
+
+    logger.info(f"SAE results saved in {sae_exp_dir}")

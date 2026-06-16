@@ -20,7 +20,7 @@ model:
     projector_dim: 1024 # ~4x embed_dim (matters to VICReg)
     architecture: stopgrad
 optimization:
-    epochs: 35                 # variance probe length (std response visible by ~ep15)
+    epochs: 35 # variance probe length (std response visible by ~ep15)
     warmup_epochs: 7 # LR-scheduler warmup (~10% of optimizer steps)
     predictor_warmup_epochs: 0 # OFF - isolate var_wt; set >0 to enable predictor warmup
     patience: 15
@@ -31,7 +31,7 @@ optimization:
     grad_clip: 2.0
 vicreg:
     sim_wt: 1.0
-    var_wt: 4.0        # OVERSHOOT (was 1.0): does the 2-sided term pin std->1? scale back after
+    var_wt: 4.0 # OVERSHOOT (was 1.0): does the 2-sided term pin std->1? scale back after
     cov_wt: 0.04
     on_enc: True
     on_tgt: True
@@ -45,7 +45,7 @@ data:
     num_workers: 0
 meta:
     seed: 42
-    tag: "sg-vr_256_v01"
+    tag: "sg-vr_256_42_v01"
     description: "Stop-grad JEPA + VICReg, embed_dim 256, seed 42 - v01 variance re-aim (var_wt overshoot)"
     resume_from: null
     ckpt_cycle: 5

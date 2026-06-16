@@ -24,7 +24,7 @@ optimization:
     grad_clip: 2.0
 vicreg:
     sim_wt: 1.0
-    var_wt: 1.0
+    var_wt: 2.0 # constant for this sweep
     cov_wt: 0.04
     on_enc: True
     on_tgt: True
@@ -38,7 +38,7 @@ data:
     num_workers: 8
 meta:
     seed: 44
-    tag: "sg-vr_768"
+    tag: "sg-vr_768_44"
     description: "Stop-grad JEPA + VICReg, embed_dim 768, seed 44 (scaling ladder)"
     resume_from: null
     ckpt_cycle: 5

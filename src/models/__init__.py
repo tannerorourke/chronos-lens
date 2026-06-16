@@ -10,7 +10,7 @@ from src.models.sae import SparseAutoencoder
 
 MODEL_TYPE_STR = Literal["ema", "stopgrad", "supervised"]
 
-MODEL_TYPE = JEPA_EMA | JEPAStopGrad | SupervisedTransformer
+MODEL_TYPE = JEPA_EMA | JEPAStopGrad | SupervisedTransformer | SparseAutoencoder
 
 def build_model(
   model_params: dict,
@@ -24,6 +24,8 @@ def build_model(
         return JEPAStopGrad(**model_params).to(device)
     elif arch == "supervised":
         return SupervisedTransformer(**model_params).to(device)
+    elif arch == "sae":
+        return SparseAutoencoder(**model_params).to(device)
     raise ValueError(f"Unknown architecture: '{arch}'")
   
   

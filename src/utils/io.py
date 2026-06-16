@@ -20,7 +20,7 @@ EXPERIMENTS_DIR = ROOT / "experiments"
 # ---------------------------------------------------------------------------
 # Run artifacts live OUTSIDE the repo working tree (default: ../artifacts,
 # beside the repo). ../artifacts/<run-id> IS one run - a clean sync/pull/output 
-# target. Override with CHRONOS_ARTIFACTS_ROOT. Training and analysis consume 
+# target. Override with ARTIFACTS_ROOT. Training and analysis consume
 # these and must never redefine them.
 # ---------------------------------------------------------------------------
 ARTIFACTS_ROOT = Path(os.environ.get("ARTIFACTS_ROOT", ROOT.parent / "artifacts"))
@@ -153,7 +153,7 @@ def save_metadata(
 
 def make_run_id(tag: str | None, fallback: str = "run") -> str:
     def _slugify(s: str) -> str:
-        """"""
+        """ keep [A-Za-z0-9._-], collapse the rest to '-' """
         return re.sub(r"[^A-Za-z0-9._-]+", "-", str(s)).strip("-")
     from datetime import date
     tag = tag if tag is not None else fallback
@@ -164,8 +164,6 @@ def make_run_id(tag: str | None, fallback: str = "run") -> str:
         while (EXPS_DIR / id).exists():
             id = _slugify(f"{tag}_v{i}")
             i += 1
-            
-    # keep [A-Za-z0-9._-], collapse the rest to '-'.
     return id
 
 def init_exp_dir(run_dir: Path, params: dict | None = None) -> Path:
@@ -181,24 +179,11 @@ def init_exp_dir(run_dir: Path, params: dict | None = None) -> Path:
 
 def init_exp_config(
     exp: str | Path,
-    command: str = "model",
+    command: str,
     target: str = None,
     exists_ok: bool = False,
 ) -> tuple[Path, dict]:
-    """Resolve config + run directory.
-
-    Returns `(config_path, exp_dir, params)`:
-
-    * `command='model'` - `exp` names `experiments/<exp>.yaml` (the
-      in-repo, git-tracked *input spec*); `config_path` is that file. A fresh
-      out-of-repo `exp_dir` under
-      :data:`EXPS_DIR` is computed for all outputs (or the resumed run's dir when
-      `resume_from` is set). `params` is the full config.
-    * `command='sae'` - `exp` names an existing *run-id* under
-      :data:`EXPS_DIR`; config is read from that run's frozen `config.yaml` and
-      `params` is the SAE leaf config for `target`. `config_path` mirrors
-      `exp_dir` (the frozen config lives there).
-    """
+    """Resolve config + run directory. Returns (config_path, exp_dir, params): """
     from datetime import date
     
     exp = Path(exp)
@@ -243,51 +228,52 @@ def init_exp_config(
       
     # -- model training
     else:
-      cfg_path = EXPERIMENTS_DIR / f"{exp}.yaml"
-      if not cfg_path.exists():
-          fallback = EXPERIMENTS_DIR / f"{exp.parts[-1]}.yaml"
-          if not fallback.exists():
-              raise FileNotFoundError(f"Model config not found: experiments/{str(exp)}.yaml")
-          cfg_path = fallback
+        cfg_path = EXPERIMENTS_DIR / f"{exp}.yaml"
+        if not cfg_path.exists():
+            fallback = EXPERIMENTS_DIR / f"{exp.parts[-1]}.yaml"
+            if not fallback.exists():
+                raise FileNotFoundError(f"Model config not found: experiments/{str(exp)}.yaml")
+            cfg_path = fallback
 
-      with open(cfg_path, 'r') as y_file:
-          params = yaml.safe_load(y_file)
-      if not params:
-          raise FileNotFoundError(f"'experiments/{exp}.yaml' is empty / not found.")
+        with open(cfg_path, 'r') as y_file:
+            params = yaml.safe_load(y_file)
+        if not params:
+            raise FileNotFoundError(f"'experiments/{exp}.yaml' is empty / not found.")
 
-      assert params.get("model", {}).get("architecture", "") in ["ema", "stopgrad", "supervised"], \
-          f"config['model']['architecture'] must be one of 'ema', 'stopgrad', or 'supervised'"
-      assert params.get("meta", {}).get("seed"), \
-          f"parameter 'seed' missing in config.yaml['meta']"
+        assert params.get("model", {}).get("architecture", "") in ["ema", "stopgrad", "supervised"], \
+            f"config['model']['architecture'] must be one of 'ema', 'stopgrad', or 'supervised'"
+        assert params.get("meta", {}).get("seed"), \
+            f"parameter 'seed' missing in config.yaml['meta']"
 
-      # Resume continues in the original run dir (run-id = first path component of
-      # resume_from); otherwise start a fresh date-stamped run id.
-      if params.get("resume_from"):
-          run_id = Path(params["resume_from"]).parts[0]
-      else:
-          tag = params.get("meta", {}).get("tag", None)
-          run_id = make_run_id(tag, fallback=cfg_path.stem)
+        # Resume continues in the original run dir (run-id = first path component of
+        # resume_from); otherwise start a fresh date-stamped run id.
+        if params.get("resume_from"):
+            run_id = Path(params["resume_from"]).parts[0]
+        else:
+            tag = params.get("meta", {}).get("tag", None)
+            run_id = make_run_id(tag, fallback=cfg_path.stem)
+        
+        exp_dir = EXPS_DIR / run_id
+
+        if not params.get("resume_from"):
+            has_artifacts = any(
+                (exp_dir / sub).exists() and any((exp_dir / sub).iterdir())
+                for sub in ["checkpoints", "logs"]
+            )
+            if has_artifacts and not exists_ok:
+                raise FileExistsError(
+                    f"Run '{run_id}' already has artifacts in {exp_dir}. Set "
+                    f"config['resume_from'] to resume, or change meta.tag for a new run.")
+
+            # init experiment directory
+            exp_dir.mkdir(parents=True, exist_ok=True)
+
+            # freeze config
+            params["meta"]["exp_date"] = date.today().isoformat()
+            with open(exp_dir / "config.yaml", "w") as f:
+                yaml.safe_dump(params, f, sort_keys=False)
       
-      exp_dir = EXPS_DIR / run_id
-
-      if not params.get("resume_from"):
-          has_artifacts = any(
-              (exp_dir / sub).exists() and any((exp_dir / sub).iterdir())
-              for sub in ["checkpoints", "logs"])
-          if has_artifacts and not exists_ok:
-              raise FileExistsError(
-                  f"Run '{run_id}' already has artifacts in {exp_dir}. Set "
-                  f"config['resume_from'] to resume, or change meta.tag for a new run.")
-
-          # init experiment directory
-          exp_dir.mkdir(parents=True, exist_ok=True)
-
-          # freeze config
-          params["meta"]["exp_date"] = date.today().isoformat()
-          with open(exp_dir / "config.yaml", "w") as f:
-              yaml.safe_dump(params, f, sort_keys=False)
-      
-      return exp_dir, params
+        return exp_dir, params
     
 
 def find_subdir(dir: Path, name: str) -> Path:

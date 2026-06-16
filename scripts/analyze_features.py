@@ -104,9 +104,10 @@ def main():
     # -- Load or extract embeddings (the .npz stem pairs with checkpoints/<stem>.pt).
     #    Only the alignment fields are read; activations come from the SAE dir.
     emb_name = args.emb if args.emb else f"{Path(args.ckpt).stem}.npz"
-    emb_stream, _ = load_embeddings_for_analysis(
-        exp_id, emb_name, device, sync_ckpts=False)
-    with emb_stream as es:
+    with load_embeddings_for_analysis(
+        exp_id, emb_name, 
+        device, sync_ckpts=False
+    )[0] as es:
         subject_ids = es["subject_ids"]    # (N,)
         mask_pos = es["mask_pos"]          # (N,)
 

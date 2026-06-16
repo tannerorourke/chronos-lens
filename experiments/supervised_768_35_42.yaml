@@ -1,0 +1,46 @@
+# embed_dim 768, supervised, seed 42 - Lambda shakedown (35 ep, effective batch 256).
+# Throwaway single-seed control probe at matched scale. Same encoder as the stop-grad
+# rung; no predictor/projector/VICReg. LR drops to 2e-4 at >=768.
+model:
+    embed_dim: 768
+    encoder_heads: 12
+    encoder_depth: 6
+    encoder_ffn_dim: 3072 # ~4x embed_dim
+    token_enc_heads: 6
+    token_enc_depth: 2
+    token_enc_ffn_dim: 1536 # ~2x embed_dim
+    architecture: supervised
+optimization:
+    epochs: 35
+    warmup_epochs: 8 # ~10% of 75-ep steps; longer fraction here (35-ep run)
+    patience: 15
+    base_lr: 2e-4
+    min_lr: 1e-5
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    grad_clip: 2.0
+data:
+    label_key: "label_escalation"
+    batch_size: 256
+    accumulation_steps: 1 # effective batch 256
+    n_patients: 0
+    max_encounters: 20
+    pin_mem: true
+    num_workers: 8
+meta:
+    seed: 42
+    label_key: "label_escalation"
+    tag: "supervised_768_35_42"
+    description: "Supervised transformer baseline, embed_dim 768, seed 42 - Lambda shakedown (35 ep, label_escalation)"
+    resume_from: null
+    ckpt_cycle: 5
+    log_tb: True
+    log_csv: True
+    sync_s3: true
+sae_config:
+    z_enc:
+        n_features: 3072 # ~4x embed_dim
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512

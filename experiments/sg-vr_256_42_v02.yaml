@@ -32,7 +32,7 @@ optimization:
     grad_clip: 2.0
 vicreg:
     sim_wt: 1.0
-    var_wt: 2.0        # bracket midpoint: 1.0 under-holds variance, 4.0 costs alignment
+    var_wt: 2.0 # 1.0 under-holds variance, 4.0 costs alignment
     cov_wt: 0.04
     on_enc: True
     on_tgt: True
@@ -46,7 +46,7 @@ data:
     num_workers: 0
 meta:
     seed: 42
-    tag: "sg-vr_256_v02"
+    tag: "sg-vr_256_42_v02"
     description: "Stop-grad JEPA + VICReg, embed_dim 256, seed 42 - v02 var_wt bracket midpoint (2.0)"
     resume_from: null
     ckpt_cycle: 5

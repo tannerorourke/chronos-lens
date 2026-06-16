@@ -120,9 +120,10 @@ def main():
     set_global_seed(load_exp_seed(jepa_exp_dir))
 
     # -- Load embeddings ----------------------------------------------------
-    jepa_emb_stream, _ = load_embeddings_for_analysis(
-        jepa_exp_id, args.jepa_emb, device, sync_ckpts=False)
-    with jepa_emb_stream as jes:
+    with load_embeddings_for_analysis(
+        jepa_exp_id, args.jepa_emb, 
+        device, sync_ckpts=False
+    )[0] as jes:
         jepa_sids = jes["subject_ids"]
         jepa_mpos = jes["mask_pos"]
 
@@ -132,10 +133,11 @@ def main():
         jepa_z = jes["z_encs"][rows, last_idx].astype(np.float32)  # (N, D)
         D = jepa_z.shape[1]
         print(f"JEPA:       N={len(jepa_sids)}, D={D}")
-
-    spv_emb_stream, _ = load_embeddings_for_analysis(
-        sup_exp_id, args.sup_emb, device, sync_ckpts=False)
-    with spv_emb_stream as ses:
+    
+    with load_embeddings_for_analysis(
+        sup_exp_id, args.sup_emb, 
+        device, sync_ckpts=False
+    )[0] as ses:
         sup_sids = ses["subject_ids"]
         sup_mpos = ses["mask_pos"]
 

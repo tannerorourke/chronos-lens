@@ -24,8 +24,8 @@ optimization:
     grad_clip: 2.0
 vicreg:
     sim_wt: 1.0
-    var_wt: 1.0
-    cov_wt: 0.04       # .mean()-normalized -> D-invariant; nudge up only if cov creeps at 1024
+    var_wt: 2.0 # constant for this sweep
+    cov_wt: 0.04
     on_enc: True
     on_tgt: True
     on_pred: False
@@ -38,7 +38,7 @@ data:
     num_workers: 0
 meta:
     seed: 43
-    tag: "sg-vr_256"
+    tag: "sg-vr_256_43"
     description: "Stop-grad JEPA + VICReg, embed_dim 256, seed 43 (scaling ladder)"
     resume_from: null
     ckpt_cycle: 5

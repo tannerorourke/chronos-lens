@@ -6,105 +6,33 @@ Interpretability analysis of Joint Embedding Predictive Architectures (JEPA) app
 
 ## Motivation
 
-Standard mechanistic interpretability techniques, operating on autoregressive transformers, assume feature representations in token space. Furthermore, clinical ML models operating on temporal patient data demand interpretability, yet the representations they learn remain opaque. These techniques assume a lossy translation layer - that is: features depend on reconstructions of residual streams, losing valuable signal towards features in the process.
+Standard mechanistic interpretability techniques, operating on autoregressive transformers, assume feature representations in softmax'ed token space. Furthermore, the representations clinical models learn remain opaque, demanding interpretabile results in order to remain remain credible and legible by end users. These techniques assume a lossy translation layer - that is: features depend on reconstructions of residual streams, losing valuable signal towards features in the process. This work aims to utilize known autoregressive interpretability techniques and novel manifold-driven analyses to explore the latent representations of JEPA-class models. By treating JEPA's encoder, target, and predictor vectors as first-class objects, this allows the unique oppurtunity to analyze raw encoded embeddings directly.
 
-This project treats the JEPA's latent representations as first-class analytical objects, performing geometric analysis of the raw encoder, target, and predictor vectors, and cross-referencing with labels and clinical metadata. Specifically, the JEPA encodes patient encounter sequences (ICD codes, active medications) and predicts the embedding of a masked encounter given the remaining context. Three architectures are trained:
+## Method
+
+This codebase trains (3) models on temporal sequences of MIMIC-IV patient encounters (ICD codes, active medications). All models predict the *embedding* of a masked k$^{th}$ encounter from the $k-1$ subsequent encounters.
+
 - **EMA** variant: exponential moving average target encoder, smooth L1 loss (Assran, 2023)
-- **Stop-Gradient** variant: Shared encoder, blocked gradients on the target path, VICReg regularization
-- **Supervised transformer** baseline
+- **Stop-Gradient** variant: Shared encoder, blocked gradients on the target path, VICReg regularization (Bardes et al, 2022)
+- **Supervised transformer** baseline. Uses the same encoder as above JEPA variants, using the masked k$^{th}$ encounter as a label target.
 
-The forward pass returns three objects:
+JEPA variant forward passes return three vectors for the encoder, predictor, and target encoded embeddings ($z_{enc}$, $z_{pred}$, $z_{target}$). The (supervised) transformer returns only $z_{enc}$:
 
-- **`z_enc`** `(B, C, D)`: per-encounter encoder representations - what the encoder learns about each clinical encounter
-- **`z_pred`** `(B, D)`: the predictor's output for the masked encounter - what the model expects to see
-- **`z_target`** `(B, D)`: the target encoder's representation of the masked encounter - what's actually there
+- **`z_enc`** `(B, C, D)`: per-encounter encoder representations. "what the encoder learns about each clinical encounter"
+- **`z_pred`** `(B, D)`: the predictor's output for the masked encounter - "what the model expects to see"
+- **`z_target`** `(B, D)`: the target encoder's representation of the masked encounter - "what actually occured"
 
-**pred_error (pred $-$ target)** - what the model gets wrong - is also computed for analysis.
+## Interpretability
 
-Interpretability is probe-based and SAE-focused: linear probes on `z_enc` and `z_pred` test what clinical information is preserved and predicted, while sparse autoencoders on encoder representations and prediction errors decompose the geometry into sparse features.
+A patient encounter sequence indirectly describes their *trajectory* through the latent embedding space. This provides a wide range of oppurtunities for feature extraction.
 
-Core questions:
+- *Can the shape (velocity, curvature, position, etc) of a patient's encounters be described?*
+- *Do the activation patterns of encoder representations correspond to clinically meaningful phenotypes? (SAE on `z_enc`)*
+- *What does the encoder's manifold encode?* Clinical states and trajectories, comorbidities, temporal information, or all the above?*. 
+- *How do encoded representations differ between JEPA-class and an auto-regressive model?*
+- *Do these models encode linearly seperable information, and if so where?*
 
-- What clinical information does the encoder preserve per encounter? (probe `z_enc`)
-- What does the predictor expect the masked encounter to contain? (probe `z_pred`)
-- Where do predictions diverge from reality, and do those errors have clinical structure? (SAE on `P−T`)
-- Do sparse autoencoder features on encoder representations correspond to clinically meaningful phenotypes? (SAE on `z_enc`)
-- Can we map latent space embedding predictions to untampered features?
+And so many more!
 
-## Usage
+This work runs a combination of classical interpretability techniques, as well as novel approaches for interpreting the "3D" (vectors x time) nature of a sequence of encoded vectors. As this work is still in progress, if you'd like more information, feel free to contact me.
 
-### Setup
-
-Requires  Python $\geq$ 3.12:
-```bash
-# uv
-uv venv && source .venv/bin/activate          # Windows: .venv\Scripts\activate
-uv pip install -r requirements.txt            # pinned env (PyTorch CUDA 12.4) + editable install
-
-# pip
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-# flexible
-python -m venv .venv && source .venv/bin/activate # or: uv venv && source .venv/bin/activate
-pip install torch --index-url https://download.pytorch.org/whl/cu124
-pip install -e . # or: uv pip install -e .
-```
-
-### Data extraction
-
-Requires MIMIC-IV access via BigQuery:
-1. [Acquire PhysioNet credentials](https://physionet.org/content/mimiciv/)
-2. [Link PhysioNet account to a GCP project](https://physionet.org/settings/cloud/)
-3. Authenticate locally:
-
-```bash
-gcloud auth application-default login
-gcloud config set project <your-project-id>
-```
-
-4. Run extraction:
-
-```bash
-python -m scripts.extract_mimic
-```
-
-### Training
-
-Runs are configured via `experiments/<run-id>.yaml` (one flat config file per run). It defines the core model architecture (stop-gradient JEPA, EMA JEPA, or supervised baseline), its training hyperparameters, and the downstream SAE settings. A run first trains the encoder/predictor (or supervised baseline), then optionally fits a sparse autoencoder post-hoc on a chosen target vector.
-- All checkpoints, logs, and extracted embeddings are written out-of-repo to `artifacts/training-runs/<run-id>/`.
-- If a run directory already has checkpoints/logs, a new versioned directory is created automatically (e.g., `stopg_42_v01` -> `stopg_42_v01_v01-1`).
-
-```bash
-# Stop-gradient JEPA
-python -m scripts.train --exp stopg_42_v01
-
-# EMA (Classic) JEPA
-python -m scripts.train --exp ema_42_v01
-
-# Supervised baseline
-python -m scripts.train --exp supervised_v01
-
-# SAE on a trained run (pick a target vector + embeddings file)
-python -m scripts.train --exp stopg_42_v01 sae --target z_enc --embeddings embeddings_40.npz
-```
-
-### Analysis
-
-Analysis is consolidated into a handful of `scripts/analyze_*.py` entry points. Every script reads from `artifacts/training-runs/<run-id>/` and writes .json (scalars) and .npz files back under `results/`.
-
-```bash
-# Per-run lenses — each reads/writes artifacts/training-runs/<run-id>/results/
-python -m scripts.analyze_trajectories --exp stopg_42_v01 --emb embeddings_40.npz
-python -m scripts.analyze_features     --exp stopg_42_v01 --sae z_enc --emb embeddings_40.npz
-python -m scripts.analyze_composition  --exp stopg_42_v01 --sae z_enc --emb embeddings_40.npz
-
-# JEPA vs supervised baseline (trailing --jepa-sae/--sup-sae are optional)
-python -m scripts.analyze_comparison \
-    --jepa-exp stopg_42_v01     --jepa-emb embeddings_40.npz \
-    --sup-exp  supervised_64_42 --sup-emb  embeddings_20.npz \
-    [--jepa-sae sae_pred_error  --sup-sae sae_z_enc]
-
-# Re-extract embeddings from a checkpoint (resolves local -> S3 -> compute)
-python -m scripts.embeddings extract --exp stopg_42_v01 --ckpt checkpoint_100.pt
-```

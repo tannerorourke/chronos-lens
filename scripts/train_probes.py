@@ -14,9 +14,9 @@ diagnostic.py / analyze_*.py: a single, reusable "probe every layer" sweep.
 
 Usage
 -----
-  python -m scripts.probe --exp ema_42_v01 --checkpoint-name checkpoint_100.pt
-  python -m scripts.probe --exp ema_42_v01 --checkpoint-name checkpoint_100.pt --label label_30d
-  python -m scripts.probe --exp ema_42_v01 --checkpoint-name checkpoint_100.pt --output /tmp/probing.json
+  python -m scripts.train_probes --exp ema_42_v01 --checkpoint-name checkpoint_100.pt
+  python -m scripts.train_probes --exp ema_42_v01 --checkpoint-name checkpoint_100.pt --label label_30d
+  python -m scripts.train_probes --exp ema_42_v01 --checkpoint-name checkpoint_100.pt --output /tmp/probing.json
 
 Notes
 -----
@@ -26,6 +26,9 @@ Notes
 * Labels are aligned causally to each sample's target encounter via the
   ``mask_pos`` carried through extraction, matching the recency representations
   the sweep produces.
+* Runs local-first on the run's frozen artifacts (config, vocab, checkpoint); it does not pull
+  embeddings from S3. Only a genuinely-missing checkpoint or vocab is fetched, and S3 egress is
+  billed, so keep the run dir on local disk.
 """
 from os import environ
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"

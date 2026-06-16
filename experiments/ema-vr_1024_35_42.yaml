@@ -1,0 +1,64 @@
+# embed_dim 1024, ema, seed 42 - Lambda shakedown (35 ep, effective batch 256).
+# Throwaway single-seed collapse/drift ablation at matched scale. VICReg weights lined
+# up with stop-grad (var_wt 2.0); on_tgt stays False (no-op on a no-grad EMA target).
+# Micro-batch 128 x accum 2 for A100-40GB headroom.
+model:
+    embed_dim: 1024
+    encoder_heads: 16
+    encoder_depth: 8
+    encoder_ffn_dim: 4096 # ~4x embed_dim
+    token_enc_heads: 8
+    token_enc_depth: 2
+    token_enc_ffn_dim: 2048 # ~2x embed_dim
+    predictor_embed_dim: 512 # ~0.5x embed_dim (bottleneck)
+    predictor_heads: 8
+    predictor_depth: 4
+    predictor_ffn_dim: 2048 # ~2x embed_dim
+    projector_dim: 4096 # ~4x embed_dim (matters to VICReg)
+    architecture: ema
+optimization:
+    epochs: 35
+    warmup_epochs: 8 # ~10% of 75-ep steps; longer fraction here (35-ep run)
+    patience: 15
+    base_lr: 2e-4
+    min_lr: 1e-5
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    grad_clip: 2.0
+    ema: [0.996, 0.9995]
+vicreg:
+    sim_wt: 1.0
+    var_wt: 2.0 # lined up with stop-grad (SG as source) to isolate the EMA mechanism
+    cov_wt: 0.04
+    on_enc: True
+    on_tgt: False
+    on_pred: False
+data:
+    batch_size: 128
+    accumulation_steps: 2 # effective batch 256 (micro 128 for A100 headroom)
+    n_patients: 0
+    max_encounters: 20
+    pin_mem: true
+    num_workers: 8
+meta:
+    seed: 42
+    tag: "ema-vr_1024_35_42"
+    description: "EMA JEPA + VICReg, embed_dim 1024, seed 42 - Lambda shakedown (35 ep, collapse ablation)"
+    resume_from: null
+    ckpt_cycle: 5
+    log_tb: True
+    log_csv: True
+    sync_s3: true
+sae_config:
+    z_enc:
+        n_features: 4096 # ~4x embed_dim
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512
+    pred_error:
+        n_features: 4096
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512

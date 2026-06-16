@@ -106,15 +106,14 @@ def main():
 
     # -- Load or extract embeddings (the .npz stem pairs with checkpoints/<stem>.pt)
     emb_name = args.emb if args.emb else f"{Path(args.ckpt).stem}.npz"
-    emb_stream, _ = load_embeddings_for_analysis(
+
+    with load_embeddings_for_analysis(
         exp_id, emb_name, device,
         sync_ckpts=False,
         write_emb_local=args.save_emb_local,
         write_emb_s3=args.save_emb_s3,
         no_s3=args.no_s3,
-    )
-
-    with emb_stream as es:
+    )[0] as es:
         subject_ids = es["subject_ids"]    # (N,)
         mask_pos = es["mask_pos"]          # (N,)
 

@@ -1,0 +1,65 @@
+# embed_dim 256, ema, seed 42 - Lambda shakedown (35 ep, effective batch 256).
+# Throwaway single-seed collapse/drift ablation at matched scale. VICReg weights are
+# lined up with stop-grad (var_wt 2.0) so the only difference from SG is the EMA
+# mechanism, not the regularization strength. on_tgt stays False: VICReg on a no-grad
+# EMA target is a no-op.
+model:
+    embed_dim: 256
+    encoder_heads: 8
+    encoder_depth: 4
+    encoder_ffn_dim: 1024 # ~4x embed_dim
+    token_enc_heads: 2
+    token_enc_depth: 2
+    token_enc_ffn_dim: 512 # ~2x embed_dim
+    predictor_embed_dim: 128 # ~0.5x embed_dim (bottleneck)
+    predictor_heads: 4
+    predictor_depth: 3
+    predictor_ffn_dim: 512 # ~2x embed_dim
+    projector_dim: 1024 # ~4x embed_dim (matters to VICReg)
+    architecture: ema
+optimization:
+    epochs: 35
+    warmup_epochs: 7 # ~10% of 75-ep steps; ~20% here (shorter run, more early stability)
+    patience: 15
+    base_lr: 3e-4
+    min_lr: 1e-5
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    grad_clip: 2.0
+    ema: [0.996, 0.9995]
+vicreg:
+    sim_wt: 1.0
+    var_wt: 2.0 # lined up with stop-grad (SG as source) to isolate the EMA mechanism
+    cov_wt: 0.04
+    on_enc: True
+    on_tgt: False
+    on_pred: False
+data:
+    batch_size: 256
+    accumulation_steps: 1 # effective batch 256
+    n_patients: 0
+    max_encounters: 20
+    pin_mem: true
+    num_workers: 8
+meta:
+    seed: 42
+    tag: "ema-vr_256_35_42"
+    description: "EMA JEPA + VICReg, embed_dim 256, seed 42 - Lambda shakedown (35 ep, collapse ablation)"
+    resume_from: null
+    ckpt_cycle: 5
+    log_tb: True
+    log_csv: True
+    sync_s3: true
+sae_config:
+    z_enc:
+        n_features: 1024 # ~4x embed_dim
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512
+    pred_error:
+        n_features: 1024
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512

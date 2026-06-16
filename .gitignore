@@ -1,10 +1,10 @@
 # Build artifacts
 data/**
 
-# Run OUTPUTS
+# Run outputs
 experiments/*/
 
-# Safety net ignore (if CHRONOS_ARTIFACTS_ROOT is ever pointed inside the repo)
+# if ARTIFACTS_ROOT is ever pointed inside the repo
 /artifacts/
 
 # compile files

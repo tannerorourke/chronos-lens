@@ -540,8 +540,7 @@ def in_mem_extract_embeds(
     if is_supv is None:
         is_supv = isinstance(model, SupervisedTransformer)
     elif is_supv != isinstance(model, SupervisedTransformer):
-        raise ValueError(
-            f"CONFIG MISMATCH: is_supv={is_supv} but model is {type(model).__name__}")
+        raise ValueError(f"CONFIG MISMATCH: is_supv={is_supv} but model is {type(model).__name__}")
     model.eval()
 
     all_z_encs: list[np.ndarray] = []
@@ -608,7 +607,7 @@ def load_embeddings_for_analysis(
     write_emb_local: bool = False,
     write_emb_s3: bool = False,
     no_s3: bool = False,
-) -> tuple:
+) -> tuple[EmbeddingStream, tuple[MODEL_TYPE | None, dict]]:
     """Resolve a run's embeddings for analysis.
 
     `name` is the embeddings file name; its stem also names the source
@@ -691,37 +690,32 @@ def load_embeddings_for_analysis(
         if not write_emb_local:
             tmp.unlink()
 
-    # -- caller uses `with result: ...` to manage cleanup
+    # -- caller uses `with stream: ...` to manage cleanup
     return stream, (model, config)
     
 # =============================================================================
 # EXTRACT-ONLY ENTRY POINT
 # =============================================================================
 
-def save_embeds_for_analysis(
+def save_embeds(
     model: MODEL_TYPE, 
     loader: DataLoader, 
     device: torch.device,
-    run_dir: Path,
-    stem: str,
     emb_shape: tuple[int, int, int],
-    write_emb_local: bool = False
+    dir: Path,
+    file: Path | str,
+    write_local: bool = True,
+    s3_client: S3Client | None = None,
 ) -> None:
-    ldir_emb = run_dir / "embeddings"
-    stream = stream_embeddings(
-        model, loader, device,
-        emb_shape,
-        out_dir=ldir_emb, out_file_stem=stem
-    )
-    
-    lpath_emb = ldir_emb / f"{stem}.npz"
-    if write_emb_local:
-        stream.to_npz(lpath_emb)
-        
-    tmp = lpath_emb if write_emb_local else (ldir_emb / f".scratch_{stem}.npz")
-    if not write_emb_local:
-        stream.to_npz(tmp)
-    with S3Client(run_dir, s3_subdir="runs", strict=False) as s3:
-        s3.upload(tmp)
-    if not write_emb_local:
-        tmp.unlink()
+    emb_file = dir / Path(file)
+    if not s3_client:
+        s3_client = S3Client(dir, s3_subdir="runs", strict=False)
+    with stream_embeddings(
+        model, loader, device, emb_shape,
+        out_dir=dir, out_file_stem=emb_file.stem
+    ) as stream:
+        stream.to_npz(emb_file)
+        s3_client.upload(emb_file, _overwrite=True)
+
+    if not write_local:
+        emb_file.unlink(missing_ok=True)

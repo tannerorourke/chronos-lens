@@ -28,9 +28,8 @@ from src.training.utils.datasets import (
     MimicDataset, NoisyBucketedSampler, build_vocab
 )
 from src.training.utils.optimizers import init_optimizers
-from src.training.utils.logging import TrainingLogger, DriftMonitor, extract_time_scale
+from src.training.utils.logging import TrainingLogger, DriftMonitor
 from src.training.utils.checkpoint import sync_model_checkpoint
-from src.infra.s3 import S3Client
 from src.utils.io import load_sequences, EXPS_DIR
 
 
@@ -207,30 +206,18 @@ def main(params: Dict, run_dir: Path, device: torch.device):
         model.eval()
         tm.record_epoch(
             lr=optimizer.param_groups[0]["lr"],
-            ts=extract_time_scale(model),
+            ts=model.encoder.time_scale,
             **drift_mon.compute(model, device),
             **vic_reg_loss.compute_epoch(n_batches)
         )
-        ckpt = tm.save_checkpoint(
+        tm.save_checkpoint(
             { k: v.detach().cpu().clone() for k, v in model.state_dict().items() },
-            model_params, optimizer, scheduler
+            model_params, optimizer, scheduler,
         )
         tm.lap()
 
     # ------------------------------------------------------------------
     # --- DONE ---------------------------------------------------------
-    # --- extract embeddings from the final checkpoint and send to S3
     if sync_s3:
-        try:
-            from src.infra.inference import save_embeds_for_analysis
-            stem = "last" if not ckpt else ckpt.stem
-            save_embeds_for_analysis(
-              model, loader, device,
-              run_dir, stem,
-              emb_shape=emb_shape,
-            )
-        except Exception as e:
-            print(f"  WARNING: end-of-run embedding extraction failed: {e}")
-
+        tm.save_embeds(model, loader, device, emb_shape, write_local=True)
     tm.finalize()
-    return

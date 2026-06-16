@@ -28,7 +28,7 @@ data:
 meta:
     seed: 43
     label_key: "label_escalation"
-    tag: "supervised_1024"
+    tag: "supervised_1024_43"
     description: "Supervised transformer baseline, embed_dim 1024, seed 43 (label_escalation)"
     resume_from: null
     ckpt_cycle: 5

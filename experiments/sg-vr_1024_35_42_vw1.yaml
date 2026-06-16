@@ -1,0 +1,64 @@
+# embed_dim 1024, stopgrad, seed 42 - ablation: var_wt 1.0 (vs 2.0 headline).
+# Question (RESEARCH_Qs Q22): at D=1024, does the weaker variance weight (which under-held
+# variance at D=256) collapse z_enc faster as width grows? Lower bracket of the var_wt
+# response at width; pairs with vw4 and the 2.0 headline for a 3-point curve at 1024.
+# Only var_wt differs.
+model:
+    embed_dim: 1024
+    encoder_heads: 16
+    encoder_depth: 8
+    encoder_ffn_dim: 4096 # ~4x embed_dim
+    token_enc_heads: 8
+    token_enc_depth: 2
+    token_enc_ffn_dim: 2048 # ~2x embed_dim
+    predictor_embed_dim: 512 # ~0.5x embed_dim (bottleneck)
+    predictor_heads: 8
+    predictor_depth: 4
+    predictor_ffn_dim: 2048 # ~2x embed_dim
+    projector_dim: 4096 # ~4x embed_dim (matters to VICReg)
+    architecture: stopgrad
+optimization:
+    epochs: 35
+    warmup_epochs: 8 # ~10% of 75-ep steps; longer fraction here (35-ep run)
+    patience: 15
+    base_lr: 2e-4
+    min_lr: 1e-5
+    weight_decay: 0.05
+    betas: [0.9, 0.95]
+    grad_clip: 2.0
+vicreg:
+    sim_wt: 1.0
+    var_wt: 1.0 # ABLATION knob: lower bracket (headline is 2.0)
+    cov_wt: 0.04
+    on_enc: True
+    on_tgt: True
+    on_pred: False
+data:
+    batch_size: 128
+    accumulation_steps: 2 # effective batch 256 (micro 128 for A100 headroom)
+    n_patients: 0
+    max_encounters: 20
+    pin_mem: true
+    num_workers: 8
+meta:
+    seed: 42
+    tag: "sg-vr_1024_35_42_vw1"
+    description: "Stop-grad JEPA + VICReg, embed_dim 1024, seed 42 - ablation var_wt 1.0 (35 ep)"
+    resume_from: null
+    ckpt_cycle: 5
+    log_tb: True
+    log_csv: True
+    sync_s3: true
+sae_config:
+    z_enc:
+        n_features: 4096 # ~4x embed_dim
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512
+    pred_error:
+        n_features: 4096
+        top_k: 32
+        epochs: 30
+        lr: 1e-3
+        batch_size: 512

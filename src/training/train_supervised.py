@@ -28,7 +28,6 @@ from src.training.utils.datasets import (
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import TrainingLogger
 from src.training.utils.checkpoint import sync_model_checkpoint
-from src.infra.s3 import S3Client
 from src.utils.io import load_sequences, EXPS_DIR
 
 
@@ -183,18 +182,6 @@ def main(params: Dict, run_dir: Path, device: torch.device):
 
     # ------------------------------------------------------------------
     # --- DONE ---------------------------------------------------------
-    # --- extract embeddings from the final checkpoint and send to S3
     if sync_s3:
-        try:
-            from src.infra.inference import save_embeds_for_analysis
-            stem = "last" if not ckpt else ckpt.stem
-            save_embeds_for_analysis(
-              model, loader, device,
-              run_dir, stem,
-              emb_shape=emb_shape,
-            )
-        except Exception as e:
-            print(f"  WARNING: end-of-run embedding extraction failed: {e}")
-
+        tm.save_embeds(model, loader, device, emb_shape, write_local=True)
     tm.finalize()
-    return

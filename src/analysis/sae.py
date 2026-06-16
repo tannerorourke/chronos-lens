@@ -3,7 +3,6 @@ SAE analysis utilities.
 
 Functions
 ---------
-  extract_activations         : run a trained SAE on a latent matrix -> sparse activations
   sae_label_enrichment        : per-feature Fisher exact test + BH FDR correction
   feature_label_specificity   : (n_features, n_labels) lift matrix
   sae_coactivation_matrix     : pairwise co-activation lift over active features
@@ -13,46 +12,14 @@ Functions
   sae_cluster_crossref        : cross-reference SAE features with HDBSCAN clusters
   sae_seed_stability          : dictionary direction stability across seeds
 """
-
 from pathlib import Path
 from collections import Counter
 
 import numpy as np
-import torch
 
-from src.models import SparseAutoencoder
 from src.infra.metrics import odds_ratio
 from src.utils.io import load_sequences_dict
 from src.mimic.helper import parse_dt
-
-from src.utils.system import SEED
-
-
-# =========================================================================
-# Loading & extraction
-# =========================================================================
-
-def extract_activations(
-    model: SparseAutoencoder,
-    vec: np.ndarray,
-    device: torch.device,
-    save_dir: Path = None,
-) -> np.ndarray:
-    """Run a trained SAE on a latent matrix and return sparse activations.
-
-    Inputs are moved to the model's own device; `device` is accepted for
-    signature compatibility but the model placement wins.
-    """
-    model.eval()
-    device = next(model.parameters()).device
-    with torch.no_grad():
-        x = torch.tensor(vec, dtype=torch.float32, device=device)
-        _, act = model(x)
-    act_np = act.cpu().numpy()
-    
-    if save_dir is not None:
-        np.save(save_dir / "activations.npy", act_np)
-    return act_np
 
 
 # =========================================================================

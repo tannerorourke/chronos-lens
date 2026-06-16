@@ -1,6 +1,4 @@
 import os
-
-
 os.environ["GRPC_VERBOSITY"] = "NONE" # suppress gRPC/abseil C++ log spam
 os.environ["GRPC_TRACE"] = ""
 
@@ -8,8 +6,10 @@ import json
 import argparse
 from pathlib import Path
 
-from src.mimic.mimic import build_patient_sequences, get_clean_encounters, load_tables
-from src.mimic.helper import validate_sequences
+from src.mimic.mimic import (
+    load_tables, build_patient_sequences,
+    clean_admissions, build_admission_icd_codes,
+    build_admission_active_meds, validate_sequences)
 from src.mimic.metadata import extract_metadata
 from src.mimic.baselines import run_baselines
 from src.mimic.labels import compute_labels
@@ -22,7 +22,7 @@ from src.analysis.plotting import plot_pat_enc_histogram
 parser = argparse.ArgumentParser(description="""MIMIC-IV Patient Sequence extraction pipeline
     - Requires a PhysioNet-linked BigQuery project, or cached parquet files in data/parquet/.
     - Use --seq-path to skip extraction and work from an existing sequences.jsonl.
-    - Example usage:
+    - Uusage:
     python scripts/extract_mimic.py --baseline --dry-run
     python scripts/extract_mimic.py --seq-path data/processed/sequences.jsonl --baseline
 """)
@@ -112,9 +112,8 @@ def save_dataset(
 
 
 def main():
-    # No seed is set here: this is a deterministic MIMIC ETL (table joins,
-    # cleaning, sequence building, label computation) with no sampling, shuffle,
-    # or random split. Downstream model/analysis entries seed themselves.
+    # No seed, MIMIC table joins, cleaning, sequence 
+    # building and label computation is 100% deterministic.
     args = parser.parse_args()
 
     print(f"Running data extraction!")
@@ -131,8 +130,22 @@ def main():
         print(f"  Loaded {len(sequences):,} sequences")
     else:
         admissions, patients, diagnoses, prescriptions = load_tables()
-        encounters = get_clean_encounters(admissions, diagnoses, prescriptions,
-                                          label_prefix=LABEL_ICD10_PREFIX)
+        
+        print("- Cleaning admissions..")
+        adm_clean = clean_admissions(admissions)
+        
+        print("- Building per-admission ICD codes..")
+        adm_dx = build_admission_icd_codes(diagnoses, label_prefix=LABEL_ICD10_PREFIX)
+
+        print("- Building per-admission active medications..")
+        adm_meds = build_admission_active_meds(prescriptions, adm_clean)
+        
+        print("- Merging into encounters table..")
+        encounters = (adm_clean
+            .merge(adm_dx, on="hadm_id", how="left")
+            .merge(adm_meds, on="hadm_id", how="left")
+        )
+        
         sequences = build_patient_sequences(encounters,
                                             min_encounters=args.min_encounters,
                                             max_encounters=args.max_encounters)

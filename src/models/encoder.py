@@ -264,3 +264,8 @@ class EncounterEncoder(nn.Module):
         if times.dim() == 1:
             times = times.unsqueeze(1)
         return self.encoder(enc, times, pad_mask, pool=pool)
+
+    @property
+    def time_scale(self) -> float:
+        """ Helper to get scalar of learned temporal encoding frequency scale"""
+        return float(self.encoder.temporal_encoding.time_scale.item())

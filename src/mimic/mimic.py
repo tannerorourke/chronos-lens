@@ -1,5 +1,5 @@
 """
-Build patient-level temporal sequences from MIMIC-IV v3.1 (BigQuery).
+Build patient-level temporal sequences from MIMIC-IV 3.1 (BigQuery).
 
 Cohort: 
     - self-supervised
@@ -8,7 +8,7 @@ Cohort:
 Labels (readmission, escalation, next-encounter ICD blocks) are 
 computed separately in labels.py.
 
-Schema per patient (pre-labeling):
+Schema per patient:
 {
   "subject_id": str,
   "encounters": [
@@ -109,31 +109,6 @@ def load_tables() -> tuple:
         print(f"    {name:20s} cached to {PARQUET_DIR}/{name}.parquet")
 
     return dfs["admissions"], dfs["patients"], dfs["diagnoses"], dfs["prescriptions"]
-    
-
-def get_clean_encounters(
-    admissions: pd.DataFrame,
-    diagnoses: pd.DataFrame,
-    prescriptions: pd.DataFrame,
-    label_prefix: str
-):
-    print("\nExtracting sequences..")
-    
-    print("- Cleaning admissions..")
-    adm_clean = clean_admissions(admissions)
-
-    print("- Building per-admission ICD codes..")
-    adm_dx = build_admission_icd_codes(diagnoses, label_prefix)
-
-    print("- Building per-admission active medications..")
-    adm_meds = build_admission_active_meds(prescriptions, adm_clean)
-
-    print("- Merging into encounters table..")
-    return (
-        adm_clean
-        .merge(adm_dx, on="hadm_id", how="left")
-        .merge(adm_meds, on="hadm_id", how="left")
-    )
     
     
 def clean_admissions(admissions: pd.DataFrame) -> pd.DataFrame:
@@ -337,3 +312,50 @@ def build_patient_sequences(
     print(f"{'=' * 60}")
 
     return sequences
+
+
+def validate_sequences(sequences: list[dict], min_encounters: int, max_encounters: int):
+    print("\nValidating sequences..")
+
+    min_enc = min(len(s["encounters"]) for s in sequences)
+    assert min_enc >= min_encounters, f"FAIL: found sequence with {min_enc} encounters"
+    
+    nmax_enc = max(len(s["encounters"]) for s in sequences)
+    assert nmax_enc <= max_encounters, f"FAIL: found sequence with {nmax_enc} encounters"
+
+    for seq in sequences:
+        times = [enc["admittime"] for enc in seq["encounters"]]
+        assert times == sorted(times), f"FAIL: patient {seq['subject_id']} not sorted"
+
+    label_cols = [k for k in sequences[0].keys() if k.startswith("label_")]
+    assert len(label_cols) > 0, "FAIL: no label columns found in sequences"
+    
+    # all labels should be 0 or 1
+    for label in label_cols:
+        for s in sequences:
+            val = s[label]
+            if isinstance(val, list):
+                assert all(v in (0, 1) for v in val), \
+                    f"FAIL: {label} has non-binary values in patient {s['subject_id']}"
+            else:
+                assert val in (0, 1), \
+                    f"FAIL: {label} has unexpected value {val} in patient {s['subject_id']}"
+
+    for seq in sequences:
+        assert isinstance(seq["subject_id"], (str, int)), \
+            f"FAIL: subject_id must be str or int, got {type(seq['subject_id'])}"
+        seq["subject_id"] = str(seq["subject_id"])
+        assert isinstance(seq["encounters"], list)
+        for enc in seq["encounters"]:
+            assert isinstance(enc["hadm_id"], int)
+            assert isinstance(enc["icd_codes"], list)
+            assert isinstance(enc["meds"], list)
+            assert hasattr(enc["admittime"], "strftime")
+
+    for seq in sequences[:50]:
+        for enc in seq["encounters"]:
+            for med in enc["meds"]:
+                assert med == med.lower().strip(), f"FAIL: med '{med}' not normalized"
+    
+    print(f"  {len(sequences)} sequences validated")
+    print(f"{'=' * 60}")

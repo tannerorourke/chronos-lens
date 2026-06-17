@@ -172,9 +172,10 @@ def main(params: Dict, run_dir: Path, device: torch.device):
         }
         tm.record_epoch(
           lr=optimizer.param_groups[0]["lr"],
+          ts=model.encoder.time_scale,
           **metrics
         )
-        ckpt = tm.save_checkpoint(
+        tm.save_checkpoint(
             { k: v.detach().cpu().clone() for k, v in model.state_dict().items() },
             model_params, optimizer, scheduler
         )

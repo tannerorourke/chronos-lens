@@ -223,23 +223,21 @@ class EmbeddingTracker:
 # == Core Logging Class
 # ================================================================
 class TrainingLogger:
-    """All-in-one metrics logger for loss, grad norms, JEPA embeddings, etc.
-        Logs to:
-        - `metrics.jsonl` (default)
-        - TensorBoard
-        - logs/
-    `metrics.jsonl` (run root) is the canonical streamed sink - always on,
-    tail-able live, S3-syncable, durable across teardown. TensorBoard, CSV, and
-    Weights & Biases are strictly OPTIONAL (default OFF) and degrade gracefully.
-    Minimal memory overhead to fit on a single GPU.
+    """
+    All-in-one metrics logger for loss, grad norms, embeddings, and 
+    custom metrics. Logs to {RUN_ROOT}/logs:
+      - `metrics.jsonl` (always ON)
+      - AWS S3 (default ON)
+      - TensorBoard (optional)
+      - CSV (optional)
     """
     def __init__(
         self,
         run_dir: Path,
         arch: MODEL_TYPE_STR,
-        global_step: int = 0,
-        epoch: int = 0,
-        total_epochs: int | None = None,
+        global_step: int,
+        epoch: int,
+        total_epochs: int,
         loss_history: list[float] = [],
         ckpt_cycle: int = -1,
         sync_s3: bool = True,
@@ -338,11 +336,10 @@ class TrainingLogger:
         pred_err_l2 = np.linalg.norm(z_pred_np - z_target_np, axis=-1)
         self.log_tb_scalar("step/z_pred_err_l2_mean", float(pred_err_l2.mean()), self.global_step)
         
-    def record_batch(self, loss, n_smpls):
-        """`loss` is the batch-mean loss; `n_smpls` weights it into the epoch mean."""
+    def record_batch(self, loss, n_smpls, **metrics):
+        loss = float(loss)
         self.global_step += 1
         self.ep_samples += n_smpls
-        loss = float(loss)
         self.ep_loss_wsum += loss * n_smpls
 
         if self._jsonl is not None:
@@ -351,7 +348,8 @@ class TrainingLogger:
                 "step": self.global_step,
                 "epoch": self.epoch,
                 "loss": loss,
-                "grad_norm": self.batch_gn
+                "grad_norm": self.batch_gn,
+                **metrics
             })
         if self._log_tb:
             self.log_tb_scalar("step/loss", loss, self.global_step)
@@ -377,6 +375,7 @@ class TrainingLogger:
             **{ k: v for k, v in self.get_norm_metrics().items() }
         }
         
+        # add embedding tracker metrics
         for tag, tracker in self.trackers.items():
             for k, v in tracker.get_metrics().items():
                 raw_metrics[f"embed_{tag}_{k}"] = v
@@ -422,23 +421,21 @@ class TrainingLogger:
         return raw_metrics
     
     def save_checkpoint(self, state_dict, model_params, optimizer, scheduler):
-        """ `checkpoint_<N>.pt` on ckpt_cycle, otherwise `model.pt` on rolling overwrite every epoch incl. final epoch """
-        is_cycle = bool(self.ckpt_cycle) and self.epoch % self.ckpt_cycle == 0
+        """ `model.pt` on ckpt_cycle or final epoch """
         is_final = self.epoch == self._total_epochs
+        is_cycle = bool(self.ckpt_cycle) and self.epoch % self.ckpt_cycle == 0
         
-        fn = f"checkpoint_{self.epoch}.pt"
-        if not is_cycle or is_final:
-            fn = "model.pt"
-        
-        self._last_ckpt_path = save_checkpoint(
-            state_dict, model_params, optimizer, scheduler,
-            self.epoch, self.global_step, self.loss_history, 
-            file=self._ckptdir / fn
-        )
+        fp = self._ckptdir / "model.pt"
+        if is_final or is_cycle:
+            self._last_ckpt_path = save_checkpoint(
+                state_dict, model_params, optimizer, scheduler,
+                self.epoch, self.global_step, self.loss_history, 
+                file=fp
+            )
         
         if self._s3:
             self._s3.upload(file=self._run_root / "metrics.jsonl", _async=True, _overwrite=True)
-            self._s3.upload(file=self._ckptdir / fn, _async=False, _validate=True, _overwrite=True)
+            self._s3.upload(file=fp, _async=False, _validate=True, _overwrite=True)
         
         return self._last_ckpt_path
     
@@ -465,7 +462,7 @@ class TrainingLogger:
             logger.warning(f"Failed to save embeddings: {e}")
     
     def lap(self):
-        """ reset all metrics, incr. epoch and timer """
+        """ Reset all metrics & increment epoch and timer. """
         self.ep_samples = 0
         self.ep_loss_wsum = 0.0
         self.ep_grad_norms.clear()
@@ -479,7 +476,7 @@ class TrainingLogger:
         self.epoch += 1
         self._ep_start = time.time()
 
-    # --- end logging
+    # --- @end of run
     def finalize(self):
         from datetime import datetime
 
@@ -501,9 +498,7 @@ class TrainingLogger:
 
         self._closed = True
         print(f"\n[TM] Run complete in {self._pp_time(total_time)}")
-        
     
-
     # -- Print utility
     @staticmethod
     def _fmt(v) -> str:

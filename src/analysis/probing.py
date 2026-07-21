@@ -44,6 +44,9 @@ def extract_layer_representations(
     the recency encounter `z_enc[k-1]` (the most-recent context slot), not a
     context mean - the recency point is the consistent per-encounter vector.
 
+    Encodes context only, so each hook fires once per batch. A full forward would run the shared
+    encoder twice on the stop-grad arch and interleave target activations into the layer captures.
+
     Returns
     -------
     dict with:
@@ -76,29 +79,34 @@ def extract_layer_representations(
 
     def _recency(seq: torch.Tensor, mpos: torch.Tensor) -> torch.Tensor:
         # (B, C, D) -> (B, D): the last valid context slot, index mask_pos-1
+        idx = (mpos - 1).long()
+        assert int(idx.max()) < seq.size(1), (
+            f"recency index {int(idx.max())} outside context length {seq.size(1)} - "
+            "captured activations are not the context pass")
         rows = torch.arange(seq.size(0))
-        return seq[rows, (mpos - 1).long()]
+        return seq[rows, idx]
 
     try:
         with torch.no_grad():
             for batch in loader:
                 batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
-                # out[0] is the per-encounter z_enc (B,C,D) for every arch
-                # (JEPA: (z_enc, z_pred, z_target); supervised: (z_enc, logits)).
-                out = model(batch)
-                z_enc = out[0]
+                # -- context pass only: (B, C, D), the same z_enc every arch's forward returns first
+                z_enc = model.encoder(batch["ctx_tokens"], batch["ctx_tok_mask"],
+                                      batch["ctx_times"], batch["ctx_pad_mask"], pool=False)
                 mpos = batch["mask_pos"].cpu()
-                if z_enc.dim() == 3:
-                    z_rec = _recency(z_enc.cpu(), mpos)   # slice recency -> (B, D)
-                else:
-                    z_rec = z_enc.cpu()                   # defensive: already (B, D)
-                all_final.append(z_rec)
+                all_final.append(_recency(z_enc.cpu(), mpos))   # slice recency -> (B, D)
                 all_sids.extend(batch["subject_ids"])
                 all_mask_pos.append(mpos)
     finally:
         for h in hooks:
             h.remove()
+
+    # -- one capture per layer per batch, or the hooks saw a pass we did not intend
+    for i in range(n_layers):
+        assert len(hook_outputs[i]) == len(all_mask_pos), (
+            f"layer {i} captured {len(hook_outputs[i])} batches for {len(all_mask_pos)} "
+            "encoded - hooks fired on an unintended forward pass")
 
     # Slice each layer's recency encounter per batch *before* concatenating:
     # context length C varies across batches, so raw (B, C, D) tensors can't be

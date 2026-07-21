@@ -32,8 +32,9 @@ from src.infra.labels import (
     extract_icd_block_targets, get_absolute_enc_times, get_relative_enc_times
 )
 from src.analysis.sae import (
-    sae_label_enrichment, feature_label_specificity, 
-    sae_coactivation_matrix, sae_temporal_enrichment
+    sae_label_enrichment, feature_label_specificity,
+    sae_coactivation_matrix, sae_temporal_enrichment,
+    inspect_sae_feature_content
 )
 from src.analysis.composition import (
     sae_boolean_composition, minimal_feature_set
@@ -58,6 +59,9 @@ parser.add_argument("--target-auroc", type=float, default=0.8,
                     help="Target AUROC for minimal feature set (default: 0.8)")
 
 parser.add_argument("--save-res", default=False, action="store_true")
+parser.add_argument("--cards", default=False, action="store_true",
+                    help="Emit per-feature clinical content cards into features.json (top-activator ICD/med enrichment)."
+                         "Costs an O(N,features) sweep over sequences.jsonl")
 
 # =============================================================================
 # Helpers
@@ -207,6 +211,21 @@ def main():
               f"{comp['best_single_feature_auroc']:>11.4f} "
               f"{mfs['n_features_needed']:>9d}")
 
+    # -- Per-feature clinical content (opt-in) ---------------------------------
+    # Auto-interp each live feature from its top activators' raw ICD/med vocabulary at the recency
+    # encounter (mask_pos). This is the label-agnostic "what does this feature encode" pass that the
+    # sae-labeler reads; a feature whose content contradicts its label-first identity is the
+    # mislabeling signal.
+    feature_cards = None
+    if args.cards:
+        print("\n--- Feature Content Cards (--cards) ---")
+        feature_cards = inspect_sae_feature_content(
+            activations, subject_ids, sequences_path,
+            encounter_indices=mask_pos, encounter_level=True,
+            top_n_samples=50, top_n_enriched=10, min_activation_frac=0.01,
+        )
+        print(f"  {len(feature_cards)} feature cards (activation_frac >= 0.01)")
+
     # -- Save results ----------------------------------------------------------
     if args.save_res:
         analysis_dir = exp_dir / "results"
@@ -250,6 +269,8 @@ def main():
             },
             "temporal": temporal,
         }
+        if feature_cards is not None:
+            json_output["feature_cards"] = feature_cards
 
         json_path = analysis_dir / "features.json"
         with open(json_path, "w") as f:

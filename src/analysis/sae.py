@@ -369,21 +369,34 @@ def inspect_sae_feature_content(
     patients = load_sequences_dict(sequences_path)
     subject_ids = np.asarray(subject_ids, dtype=str)
 
+    # -- rows must be per-sample to index subject_ids / encounter_indices at all
+    if len(subject_ids) != N:
+        raise ValueError(
+            f"sae_activations has {N} rows but subject_ids has {len(subject_ids)}. A z_enc-target "
+            f"SAE is per-encounter, not per-sample, and cannot be aligned to these ids.")
+
     # Pre-compute population-level ICD and med frequencies
     # For each sample, collect its ICD codes and meds (from the patient record)
-    sample_icd_sets: list[set] = []
-    sample_med_sets: list[set] = []
+    sample_icd_sets: list[set | None] = []      # -- None = sample did not resolve to an encounter
+    sample_med_sets: list[set | None] = []
 
+    n_unresolved = 0        # -- samples with no record to read; excluded from the frequency base
     for i, sid in enumerate(subject_ids):
         p = patients.get(str(sid))
         if p is None:
-            sample_icd_sets.append(set())
-            sample_med_sets.append(set())
+            sample_icd_sets.append(None)
+            sample_med_sets.append(None)
+            n_unresolved += 1
             continue
         if encounter_level and encounter_indices is not None:
             enc_idx = int(encounter_indices[i])
             encs = p.get("encounters", [])
-            enc = encs[enc_idx] if enc_idx < len(encs) else {}
+            if enc_idx >= len(encs):
+                sample_icd_sets.append(None)
+                sample_med_sets.append(None)
+                n_unresolved += 1
+                continue
+            enc = encs[enc_idx]
             icds = set(str(c) for c in enc.get("icd_codes", []))
             meds = set(str(m).lower() for m in enc.get("meds", []))
         else:
@@ -395,18 +408,33 @@ def inspect_sae_feature_content(
         sample_icd_sets.append(icds)
         sample_med_sets.append(meds)
 
-    # Population frequencies (fraction of samples with each code/med)
+    # Population frequencies (fraction of resolved samples with each code/med).
+    # Unresolved samples carry no vocabulary, so counting them in the base would deflate every
+    # frequency and inflate every lift computed against it.
     all_icds: Counter = Counter()
     all_meds: Counter = Counter()
     for icds in sample_icd_sets:
+        if icds is None:
+            continue
         for c in icds:
             all_icds[c] += 1
     for meds in sample_med_sets:
+        if meds is None:
+            continue
         for m in meds:
             all_meds[m] += 1
 
-    pop_icd_freq = {c: count / N for c, count in all_icds.items()}
-    pop_med_freq = {m: count / N for m, count in all_meds.items()}
+    n_resolved = N - n_unresolved
+    if n_resolved == 0:
+        raise ValueError(
+            f"none of the {N} samples resolved to an encounter in {sequences_path}; "
+            "the embeddings and the sequences file are not from the same extraction.")
+    if n_unresolved:
+        print(f"  WARNING: {n_unresolved}/{N} samples ({100*n_unresolved/N:.2f}%) did not resolve "
+              f"to an encounter; excluded from the frequency base.")
+
+    pop_icd_freq = {c: count / n_resolved for c, count in all_icds.items()}
+    pop_med_freq = {m: count / n_resolved for m, count in all_meds.items()}
 
     # Population temporal stats
     pop_intervals = []
@@ -451,14 +479,21 @@ def inspect_sae_feature_content(
         n_top = min(n_top, top_n_samples)
         top_indices = np.argsort(feat_vals)[::-1][:n_top]
 
-        # ICD enrichment
+        # ICD enrichment. Unresolved top activators are dropped from the group base for the same
+        # reason they are dropped from the population base.
         top_icd_counts: Counter = Counter()
+        n_top_resolved = 0
         for idx in top_indices:
+            if sample_icd_sets[idx] is None:
+                continue
+            n_top_resolved += 1
             for c in sample_icd_sets[idx]:
                 top_icd_counts[c] += 1
+        if n_top_resolved == 0:
+            continue                    # -- no resolvable activator, nothing to interpret
         icd_enrichment = []
         for code, count in top_icd_counts.items():
-            freq_group = count / len(top_indices)
+            freq_group = count / n_top_resolved
             freq_pop = pop_icd_freq.get(code, 1e-10)
             odds = odds_ratio(freq_group, freq_pop)
             icd_enrichment.append({"code": code, "odds_ratio": round(odds, 2),
@@ -470,11 +505,13 @@ def inspect_sae_feature_content(
         # Med enrichment
         top_med_counts: Counter = Counter()
         for idx in top_indices:
+            if sample_med_sets[idx] is None:
+                continue
             for m in sample_med_sets[idx]:
                 top_med_counts[m] += 1
         med_enrichment = []
         for med, count in top_med_counts.items():
-            freq_group = count / len(top_indices)
+            freq_group = count / n_top_resolved
             freq_pop = pop_med_freq.get(med, 1e-10)
             odds = odds_ratio(freq_group, freq_pop)
             med_enrichment.append({"med": med, "odds_ratio": round(odds, 2),

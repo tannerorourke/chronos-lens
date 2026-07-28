@@ -428,7 +428,7 @@ def load_sae_info(
     exp_id: str,
     sae_exp_id: str,
     device: torch.device
-) -> tuple[SparseAutoencoder, Path, dict, np.ndarray, np.ndarray]:
+) -> tuple[SparseAutoencoder, Path, dict, np.ndarray, np.ndarray, str | None]:
     sae_exp_dir = find_subdir(EXPS_DIR / exp_id, sae_exp_id)
     # checkpoint/model
     ckpt_path = sae_exp_dir / "sae.pt"
@@ -447,10 +447,18 @@ def load_sae_info(
     # decoder weights, activations
     dec_weights = np.load(sae_exp_dir / "decoder_weights.npy")
     activations = np.load(sae_exp_dir / "activations.npy")
-    
+
+    # -- target the SAE was trained on, None when the frozen config predates the field
+    cfg_path = sae_exp_dir / "config.yaml"
+    target = None
+    if cfg_path.exists():
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        target = cfg.get("target") if cfg else None
+
     print(f"Loaded SAE model, activations, and decoder weights from {sae_exp_dir}")
-    
-    return model, sae_exp_dir, ckpt, dec_weights, activations
+
+    return model, sae_exp_dir, ckpt, dec_weights, activations, target
     
     
 # =============================================================================

@@ -63,9 +63,15 @@ class JEPAStopGrad(nn.Module):
         )
         # No target encoder is created
 
+    def encode(self, batch: dict) -> torch.Tensor:
+        """Per-encounter context representation (B, C, D), the z_enc that
+        forward returns first. Used for analysis/extraction.
+        """
+        return self.encoder(
+            batch["ctx_tokens"], batch["ctx_tok_mask"],
+            batch["ctx_times"], batch["ctx_pad_mask"], pool=False)
+
     def forward(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        ctx_tokens   = batch["ctx_tokens"]   # (B, C, T_tok)
-        ctx_tok_mask = batch["ctx_tok_mask"] # (B, C, T_tok)
         ctx_pad_mask = batch["ctx_pad_mask"] # (B, C)
         ctx_times    = batch["ctx_times"]    # (B, C)
         tgt_tokens   = batch["tgt_tokens"]   # (B, T_tok)
@@ -73,7 +79,7 @@ class JEPAStopGrad(nn.Module):
         tgt_times    = batch["tgt_times"]    # (B,)
 
         # --- Encode context -> (B, C, D)
-        z_enc = self.encoder(ctx_tokens, ctx_tok_mask, ctx_times, ctx_pad_mask, pool=False)
+        z_enc = self.encode(batch)
         
         # -- Predict masked encounters -> (B, D)
         z_pred = self.predictor(z_enc, ctx_times, tgt_times, ctx_pad_mask)

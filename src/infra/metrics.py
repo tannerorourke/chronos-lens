@@ -1,8 +1,22 @@
-""" 
+"""
 Evaluation metrics used across the analysis stack
 - No model or I/O dependencies.
 """
 import numpy as np
+from sklearn.model_selection import StratifiedKFold, StratifiedGroupKFold
+
+from src.utils.system import SEED
+
+
+def make_cv_splitter(n_splits: int = 5, groups: np.ndarray | None = None):
+    """Pick the fold scheme for a held-out score. Returns (splitter, cv_scheme).
+
+    -- groups is held out whole; a patient's rows are not independent
+    """
+    if groups is None:
+        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED), "stratified"
+    return (StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=SEED),
+            "stratified_grouped")
 
 
 def brier_score(y_true: np.ndarray, y_prob: np.ndarray) -> float:

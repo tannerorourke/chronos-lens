@@ -15,7 +15,7 @@ import torch
 import numpy as np
 from torch.utils.data import DataLoader
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import GroupKFold, StratifiedKFold
+from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     average_precision_score, f1_score, 
@@ -25,7 +25,7 @@ from src.models import MODEL_TYPE
 from src.infra.vector_computation import (
     flatten_valid_encounters,
     select_terminal_by_patient)
-from src.infra.metrics import compute_all_metrics
+from src.infra.metrics import compute_all_metrics, make_cv_splitter
 from src.utils.system import SEED
 
 # =============================================================================
@@ -44,8 +44,7 @@ def extract_layer_representations(
     the recency encounter `z_enc[k-1]` (the most-recent context slot), not a
     context mean - the recency point is the consistent per-encounter vector.
 
-    Encodes context only, so each hook fires once per batch. A full forward would run the shared
-    encoder twice on the stop-grad arch and interleave target activations into the layer captures.
+    Encodes context only, so each hook fires once per batch.
 
     Returns
     -------
@@ -92,8 +91,7 @@ def extract_layer_representations(
                 batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
                          for k, v in batch.items()}
                 # -- context pass only: (B, C, D), the same z_enc every arch's forward returns first
-                z_enc = model.encoder(batch["ctx_tokens"], batch["ctx_tok_mask"],
-                                      batch["ctx_times"], batch["ctx_pad_mask"], pool=False)
+                z_enc = model.encode(batch)
                 mpos = batch["mask_pos"].cpu()
                 all_final.append(_recency(z_enc.cpu(), mpos))   # slice recency -> (B, D)
                 all_sids.extend(batch["subject_ids"])
@@ -162,12 +160,17 @@ def probe_vectors(
         if to_patient:
             assert mask_pos is not None, "probe_vectors(to_patient=True) requires mask_pos"
             emb_p, _ = select_terminal_by_patient(emb, subject_ids, mask_pos)
-            # patient labels are constant per patient -> first occurrence suffices
-            _, first_idx = np.unique(np.asarray(subject_ids, dtype=str), return_index=True)
-            labels_p = labels[first_idx]
-            results[name] = evaluate_binary_probe(emb_p, labels_p, n_splits=n_splits)
+            # -- reduce labels through the same selection, so each row's label is the one at the
+            #    encounter its embedding came from. Causal labels vary with mask_pos, so taking
+            #    the patient's first occurrence instead would pair encounter k's vector with
+            #    encounter 0's label.
+            labels_p, _ = select_terminal_by_patient(
+                np.asarray(labels).reshape(-1, 1), subject_ids, mask_pos)
+            results[name] = evaluate_binary_probe(emb_p, labels_p.ravel(), n_splits=n_splits)
         else:
-            results[name] = evaluate_binary_probe(emb, labels, n_splits=n_splits)
+            results[name] = evaluate_binary_probe(
+                emb, labels, n_splits=n_splits,
+                groups=np.asarray(subject_ids, dtype=str))
     return results
 
 
@@ -280,8 +283,12 @@ def probe_icd_blocks(
         macro_auroc          : float
         macro_auprc          : float
         macro_f1             : float
+        cv_scheme            : str
     """
     N, C = targets.shape
+
+    # -- no group key is passed in, so folds are not patient-held-out
+    skf, cv_scheme = make_cv_splitter(n_splits=n_splits)
 
     per_chapter: dict[str, dict] = {}
     all_aurocs: list[float] = []
@@ -299,7 +306,6 @@ def probe_icd_blocks(
             continue
 
         key = chapter_names[c] if chapter_names is not None else str(c)
-        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
 
         fold_auroc: list[float] = []
         fold_auprc: list[float] = []
@@ -360,6 +366,7 @@ def probe_icd_blocks(
         "macro_f1": float(np.mean(all_f1s)) if all_f1s else float("nan"),
         "macro_brier": float(np.mean(all_briers)) if all_briers else float("nan"),
         "macro_ece": float(np.mean(all_eces)) if all_eces else float("nan"),
+        "cv_scheme": cv_scheme,
     }
 
 
@@ -430,26 +437,30 @@ def probe_icd_blocks_temporal(
 def evaluate_binary_probe(
     embeddings: np.ndarray,
     labels: np.ndarray,
-    n_splits: int = 5
+    n_splits: int = 5,
+    groups: np.ndarray | None = None,
 ) -> dict:
     """Binary logistic-regression probe with stratified k-fold CV.
 
     Uses per-fold StandardScaler and balanced class weights.
+
+    groups is held out whole; a patient's rows are not independent.
 
     Parameters
     ----------
     embeddings : (N, D) embedding matrix
     labels     : (N,) binary labels {0, 1}
     n_splits   : number of stratified CV folds
+    groups     : (N,) group key per row, held out whole. None = rows are independent.
 
     Returns
     -------
     dict with:
         fold_auroc / fold_auprc / fold_f1 / fold_brier / fold_ece : list[float]
         mean_* / std_* for each metric
-        n_samples, n_positive, positive_rate
+        n_samples, n_positive, positive_rate, cv_scheme
     """
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=SEED)
+    splitter, cv_scheme = make_cv_splitter(n_splits=n_splits, groups=groups)
 
     fold_auroc: list[float] = []
     fold_auprc: list[float] = []
@@ -457,7 +468,7 @@ def evaluate_binary_probe(
     fold_brier: list[float] = []
     fold_ece: list[float] = []
 
-    for train_idx, test_idx in skf.split(embeddings, labels):
+    for train_idx, test_idx in splitter.split(embeddings, labels, groups=groups):
         scaler = StandardScaler()
         X_tr = scaler.fit_transform(embeddings[train_idx])
         X_te = scaler.transform(embeddings[test_idx])
@@ -496,6 +507,8 @@ def evaluate_binary_probe(
         "n_samples": len(labels),
         "n_positive": n_pos,
         "positive_rate": round(n_pos / len(labels), 4),
+        "cv_scheme": cv_scheme,
+        "n_groups": int(len(np.unique(groups))) if groups is not None else None,
     }
 
 
@@ -558,10 +571,12 @@ def run_probing_sweep(
     ECE) on each layer's recency representation and reports where prediction
     signal emerges through the encoder.
 
+    Folds are grouped on subject_id; a patient's rows are not independent.
+
     Parameters
     ----------
     layer_representations : output of :func:`extract_layer_representations` -
-        dict with `layer_0` .. `layer_{n-1}`, `final`, and `n_layers`.
+        dict with `layer_0` .. `layer_{n-1}`, `final`, `subject_ids`, and `n_layers`.
     labels : (N,) binary labels aligned to the representation rows.
     n_splits : number of stratified CV folds.
 
@@ -576,13 +591,14 @@ def run_probing_sweep(
     """
     n_layers = layer_representations["n_layers"]
     layer_keys = [f"layer_{i}" for i in range(n_layers)] + ["final"]
+    groups = np.asarray(layer_representations["subject_ids"], dtype=str)
 
     per_layer: dict[str, dict] = {}
     summary: list[tuple[str, float, float]] = []
 
     for key in layer_keys:
         X = layer_representations[key]
-        result = evaluate_binary_probe(X, labels, n_splits=n_splits)
+        result = evaluate_binary_probe(X, labels, n_splits=n_splits, groups=groups)
         per_layer[key] = result
         summary.append((key, result["mean_auroc"], result["std_auroc"]))
         print(f"  {key:12s}  AUROC={result['mean_auroc']:.4f} +/- {result['std_auroc']:.4f}  "

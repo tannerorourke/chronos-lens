@@ -200,9 +200,9 @@ def main():
     sae_matched_cosines = None
     if args.jepa_sae and args.sup_sae:
         print("\n--- SAE Feature Overlap ---")
-        _, _, jepa_ckpt, jepa_dec_weights, _ = \
+        _, _, jepa_ckpt, jepa_dec_weights, _, _ = \
             load_sae_info(jepa_exp_id, args.jepa_sae, device)
-        _, _, _, spv_dec_weights, _ = \
+        _, _, _, spv_dec_weights, _, _ = \
             load_sae_info(sup_exp_id, args.sup_sae, device)
         
         sae_overlap_result = cross_sae_overlap(

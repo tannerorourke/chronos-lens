@@ -3,6 +3,7 @@
 Reference contract for variables used throughout application.
 
 - N = number of samples (one per patient x mask_pos combination)
+- B = number of samples in one batch
 - P = number of unique patients
 - C = max padded context encounters per sample (varies per batch, padded to max)
 - D = embedding dim
@@ -26,6 +27,12 @@ Reference contract for variables used throughout application.
 - patients_dict: dict[str, dict]    - patients loaded for analysis
 - subject_ids: (N,) str             - sample-level subject IDs (may repeat)
 - patient_subject_ids: (P,) str     - unique patient IDs (from np.unique or pooling)
+
+## Model interface - all architectures
+
+- encode(batch): (B, C, D)          - per-encounter context representation, the z_enc each
+                                      forward returns first. Defined on JEPA_EMA, JEPAStopGrad,
+                                      and SupervisedTransformer.
 
 ## Embeddings - all architectures
 

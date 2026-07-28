@@ -1726,56 +1726,6 @@ def plot_coactivation_matrix(
     show_or_savefig(fig, show, save_path=save_path)
 
 
-def plot_composition_rules(
-    composition_results: dict[str, dict],
-    show: bool = True,
-    save_path: Path | str | None = None,
-):
-    """Text visualization of boolean composition rules per label.
-
-    One panel per label showing decision rules, compositional gap, etc.
-    """
-    label_names = list(composition_results.keys())
-    n_labels = len(label_names)
-    fig, axes = plt.subplots(n_labels, 1,
-                             figsize=(8, max(3, n_labels * 2.5)),
-                             squeeze=False)
-
-    for idx, label_name in enumerate(label_names):
-        ax = axes[idx, 0]
-        ax.axis("off")
-        comp = composition_results[label_name]
-
-        header = (f"{label_name}    "
-                  f"tree={comp['tree_auroc']:.3f}  "
-                  f"single={comp['best_single_feature_auroc']:.3f}  "
-                  f"gap={comp['compositional_gap']:+.3f}  "
-                  f"features_used={comp['n_features_used']}")
-        ax.text(0.02, 0.92, header, transform=ax.transAxes,
-                fontsize=8, fontweight="bold", va="top", family="monospace")
-
-        rules = comp.get("rules", [])
-        y = 0.75
-        for ri, rule in enumerate(rules[:5]):
-            conds = rule["conditions"]
-            cond_strs = []
-            for c in conds:
-                dir_str = "active" if c["direction"] == ">" else "inactive"
-                cond_strs.append(f"F{c['feature']} {dir_str}")
-            rule_str = (f"  R{ri}: {' AND '.join(cond_strs)}  →  "
-                        f"prec={rule['precision']:.3f}  "
-                        f"recall={rule['recall']:.3f}  "
-                        f"n={rule['support']}")
-            ax.text(0.02, y, rule_str, transform=ax.transAxes,
-                    fontsize=_ANNOT_PT, va="top", family="monospace")
-            y -= 0.18
-
-    fig.suptitle("Boolean Composition Rules (positive-class paths)",
-                 fontsize=_TITLE_PT, y=1.01)
-    fig.tight_layout()
-    show_or_savefig(fig, show, save_path=save_path)
-
-
 def plot_minimal_feature_curves(
     minimal_results: dict[str, dict],
     show: bool = True,
@@ -1789,9 +1739,11 @@ def plot_minimal_feature_curves(
         curve = mfs["auroc_curve"]
         if not curve:
             continue
+        # -- a capped run is a lower bound on the set size, not the set size
+        n_str = ("n>=" if not mfs.get("reached_target", True) else "n=") + str(mfs["n_features_needed"])
         ax.plot(range(1, len(curve) + 1), curve,
                 marker="o", markersize=4, linewidth=1.5,
-                color=cmap(i % 10), label=f"{label_name} (n={mfs['n_features_needed']})")
+                color=cmap(i % 10), label=f"{label_name} ({n_str})")
 
     ax.set_xlabel("Number of features", fontsize=_LABEL_PT)
     ax.set_ylabel("AUROC", fontsize=_LABEL_PT)

@@ -3,8 +3,8 @@
 SAE feature analysis script.
 
 Loads embeddings + trained SAE checkpoint + labels, runs label enrichment,
-specificity, co-activation, boolean composition, minimal feature set,
-and temporal enrichment analyses.  Saves structured results to JSON + NPZ.
+specificity, co-activation, minimal feature set, and temporal enrichment
+analyses.  Saves structured results to JSON + NPZ.
 
 Usage
 -----
@@ -36,9 +36,7 @@ from src.analysis.sae import (
     sae_coactivation_matrix, sae_temporal_enrichment,
     inspect_sae_feature_content
 )
-from src.analysis.composition import (
-    sae_boolean_composition, minimal_feature_set
-)
+from src.analysis.composition import minimal_feature_set
 from src.utils.io import EXPS_DIR, DATA_DIR, load_sequences_dict
 from src.utils.system import load_exp_seed, set_global_seed
 
@@ -60,8 +58,8 @@ parser.add_argument("--target-auroc", type=float, default=0.8,
 
 parser.add_argument("--save-res", default=False, action="store_true")
 parser.add_argument("--cards", default=False, action="store_true",
-                    help="Emit per-feature clinical content cards into features.json (top-activator ICD/med enrichment)."
-                         "Costs an O(N,features) sweep over sequences.jsonl")
+                    help="Emit per-feature clinical content cards into features.json "
+                         "(top-activator ICD/med enrichment). Sweeps sequences.jsonl per feature.")
 
 # =============================================================================
 # Helpers
@@ -118,12 +116,25 @@ def main():
     N = len(subject_ids)
 
     # -- Load SAE and get activations
-    sae_model, _, sae_params, dec_weights, activations = load_sae_info(exp_id, args.sae, device)
+    sae_model, sae_dir, sae_params, dec_weights, activations, sae_target = load_sae_info(
+        exp_id, args.sae, device)
     print(f"Loaded SAE: n_features={sae_model.n_features}, top_k={sae_model.top_k}")
 
     n_features = sae_model.n_features
     n_active = int((activations != 0).any(axis=0).sum())
     print(f"Activations: {activations.shape}, active features: {n_active}/{n_features}")
+
+    # -- Every analysis below indexes activations by sample, against subject_ids / mask_pos and the
+    #    per-sample labels. Only a per-sample target lines up, so gate on the recorded target.
+    if sae_target is None:
+        raise SystemExit(
+            f"SAE dir {sae_dir} records no target. Add 'target: <one of "
+            f"z_enc|z_pred|z_target|pred_error>' to {sae_dir / 'config.yaml'}.")
+    if sae_target == "z_enc":
+        raise SystemExit(
+            f"SAE '{args.sae}' targets z_enc, which is per-encounter (one row per valid context "
+            f"slot), not per-sample, so it cannot be aligned to subject_ids / mask_pos. "
+            f"Use z_pred, z_target, or pred_error.")
 
     # -- Load patient data for labels and times
     sequences_path = DATA_DIR / "sequences.jsonl"
@@ -169,53 +180,39 @@ def main():
         _verbose=True
     )
 
-    # -- Boolean composition per label -----------------------------------------
-    print("\n--- Boolean Composition ---")
-    composition_results: dict[str, dict] = {}
-    for label_name, label_vec in labels_dict.items():
-        comp = sae_boolean_composition(activations, label_vec)
-        composition_results[label_name] = comp
-        print(
-            f"  {label_name}: tree={comp['tree_auroc']:.4f}, "
-            f"single={comp['best_single_feature_auroc']:.4f}, "
-            f"gap={comp['compositional_gap']:+.4f}, "
-            f"features_used={comp['n_features_used']}"
-        )
+    # -- binarize once for the selection sweep below
+    binary_active = (activations != 0).astype(np.float64)
 
     # -- Minimal feature set per label -----------------------------------------
     print("\n--- Minimal Feature Set ---")
     minimal_results: dict[str, dict] = {}
     for label_name, label_vec in labels_dict.items():
         mfs = minimal_feature_set(activations, label_vec,
-                                  target_auroc=args.target_auroc)
+                                  target_auroc=args.target_auroc,
+                                  binary_active=binary_active,
+                                  groups=subject_ids)
         minimal_results[label_name] = mfs
         final_auc = mfs["auroc_curve"][-1] if mfs["auroc_curve"] else 0.0
+        capped = "" if mfs["reached_target"] else "  (capped, target not reached)"
         print(f"  {label_name}: {mfs['n_features_needed']} features needed, "
-              f"final AUROC={final_auc:.4f}")
+              f"final AUROC={final_auc:.4f}{capped}")
 
     # -- Temporal enrichment ---------------------------------------------------
     print("\n--- Temporal Enrichment ---")
     temporal = sae_temporal_enrichment(activations, times, rel_times, _verbose=True)
 
     # -- Summary table ---------------------------------------------------------
-    print(f"\n{'label':<20s} {'comp_gap':>10s} {'n_feat':>8s} {'tree_auc':>10s} "
-          f"{'single_auc':>11s} {'min_feat':>9s}")
-    print("-" * 72)
+    print(f"\n{'label':<20s} {'min_feat':>9s}")
+    print("-" * 30)
     for label_name in labels_dict:
-        comp = composition_results[label_name]
         mfs = minimal_results[label_name]
-        print(f"{label_name:<20s} "
-              f"{comp['compositional_gap']:>+10.4f} "
-              f"{comp['n_features_used']:>8d} "
-              f"{comp['tree_auroc']:>10.4f} "
-              f"{comp['best_single_feature_auroc']:>11.4f} "
-              f"{mfs['n_features_needed']:>9d}")
+        print(f"{label_name:<20s} {mfs['n_features_needed']:>9d}")
 
     # -- Per-feature clinical content (opt-in) ---------------------------------
-    # Auto-interp each live feature from its top activators' raw ICD/med vocabulary at the recency
-    # encounter (mask_pos). This is the label-agnostic "what does this feature encode" pass that the
-    # sae-labeler reads; a feature whose content contradicts its label-first identity is the
-    # mislabeling signal.
+    # Auto-interp each live feature from its top activators' raw ICD/med vocabulary at the target
+    # encounter k (mask_pos), which is the encounter the per-sample SAE targets describe. This is
+    # the label-agnostic "what does this feature encode" pass that the sae-labeler reads; a feature
+    # whose content contradicts its label-first identity is the mislabeling signal.
     feature_cards = None
     if args.cards:
         print("\n--- Feature Content Cards (--cards) ---")
@@ -252,16 +249,6 @@ def main():
                     {"f1": f1, "f2": f2, "lift": round(lift, 4)}
                     for f1, f2, lift in top_cliques
                 ],
-            },
-            "composition": {
-                label_name: {
-                    "tree_auroc": comp["tree_auroc"],
-                    "best_single_feature_auroc": comp["best_single_feature_auroc"],
-                    "compositional_gap": comp["compositional_gap"],
-                    "n_features_used": comp["n_features_used"],
-                    "rules": comp["rules"],
-                }
-                for label_name, comp in composition_results.items()
             },
             "minimal_feature_set": {
                 label_name: mfs

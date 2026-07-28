@@ -219,10 +219,12 @@ def init_exp_config(
         sae_exp_dir = exp_dir / make_run_id(f"sae_{target}")
         sae_exp_dir.mkdir(parents=True, exist_ok=True)
         
-        # freeze SAE config
-        params["meta"]["exp_date"] = date.today().isoformat()
+        # -- freeze SAE config, recording the target it was trained on and the date
+        frozen = dict(sae_params)
+        frozen["target"] = target
+        frozen["exp_date"] = date.today().isoformat()
         with open(sae_exp_dir / "config.yaml", "w") as f:
-            yaml.safe_dump(sae_params, f, sort_keys=False)
+            yaml.safe_dump(frozen, f, sort_keys=False)
         
         return sae_exp_dir, sae_cfg[target]
       

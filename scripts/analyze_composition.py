@@ -80,7 +80,8 @@ def main():
     N, D = z_enc.shape
 
     # -- Load SAE
-    sae_model, sae_dir, sae_params, dec_weights, activations = load_sae_info(exp_id, args.sae, device)
+    sae_model, sae_dir, sae_params, dec_weights, _, _ = load_sae_info(
+        exp_id, args.sae, device)
     print(f"Loaded SAE: n_features={sae_model.n_features}, top_k={sae_model.top_k}")
 
     # -- Load labels

@@ -1,34 +1,15 @@
 #!/usr/bin/env python3
 """
-Layer-wise linear probing sweep for signal localization.
+Layer-wise linear probing sweep: where in the encoder does label signal emerge?
 
-Loads a trained JEPA checkpoint, extracts the recency encounter representation
-(z_enc[k-1]) at every transformer encoder layer (plus the final z_enc) via
-forward hooks, then runs a stratified-CV logistic-regression probe at each layer
-against a binary clinical label. Reports where prediction signal emerges through
-the encoder.
+Forward-hooks the recency encounter representation z_enc[k-1] out of every transformer
+layer (plus the final z_enc), then runs a stratified-CV logistic probe at each one
+against a binary label. Labels are aligned causally to each sample's target encounter
+via mask_pos, matching the representations the sweep produces. The supervised encoder
+exposes the same per-layer geometry as the JEPA context encoder.
 
-This is an *analysis* entry point (runs locally over a run's frozen artifacts).
-It is the generic counterpart to the per-analysis probes scattered across
-diagnostic.py / analyze_*.py: a single, reusable "probe every layer" sweep.
-
-Usage
------
-  python -m scripts.train_probes --exp ema_42_v01 --checkpoint-name checkpoint_100.pt
-  python -m scripts.train_probes --exp ema_42_v01 --checkpoint-name checkpoint_100.pt --label label_30d
-  python -m scripts.train_probes --exp ema_42_v01 --checkpoint-name checkpoint_100.pt --output /tmp/probing.json
-
-Notes
------
-* The sweep relies on model.transformer_layers and slices the recency encounter
-  from the per-layer encoder outputs; the supervised encoder exposes the same
-  per-layer geometry as the JEPA context encoder.
-* Labels are aligned causally to each sample's target encounter via the
-  ``mask_pos`` carried through extraction, matching the recency representations
-  the sweep produces.
-* Runs local-first on the run's frozen artifacts (config, vocab, checkpoint); it does not pull
-  embeddings from S3. Only a genuinely-missing checkpoint or vocab is fetched, and S3 egress is
-  billed, so keep the run dir on local disk.
+Runs local-first over a run's frozen artifacts; embeddings are never pulled from S3,
+and only a genuinely-missing checkpoint or vocab is fetched.
 """
 from os import environ
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -44,7 +25,7 @@ logger = logging.getLogger(__name__)
 from src.infra.inference import load_scaffolding
 from src.analysis.probing import extract_layer_representations, run_probing_sweep
 from src.infra.labels import load_label
-from src.utils.io import load_sequences_dict, save_json, EXPS_DIR
+from src.utils.io import load_sequences_dict, save_json, resolve_run_dir, data_dir
 from src.utils.system import set_global_seed, load_exp_seed
 
 
@@ -54,24 +35,24 @@ def main() -> None:
     parser.add_argument("--exp", type=str, required=True,
                         help="run-id from the runs/ directory")
     parser.add_argument("--ckpt", type=str, required=True,
-                        help="file name of .pt checkpoint in the run's checkpoints/ directory")
+                        help="file name of .pt checkpoint in the run's data/checkpoints/ directory")
     
     parser.add_argument("--label", type=str, default="label_30d",
                         help="binary label key to probe (default: label_30d)")
     parser.add_argument("--cv", type=int, default=5,
                         help="number of stratified CV folds (default: 5)")
     parser.add_argument("--output", type=str, default=None,
-                        help="Path for results JSON (default: <run_dir>/results/probing.json)")
+                        help="Path for results JSON (default: <run-dir>/probing.json)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     run_id = args.exp
-    run_dir = EXPS_DIR / args.exp
+    run_dir = resolve_run_dir(args.exp)
 
     # Seed at entry from the run's frozen config (load_scaffolding re-applies the
     # same seed; setting it here makes the run's determinism explicit).
-    set_global_seed(load_exp_seed(run_dir))
+    set_global_seed(load_exp_seed(data_dir(run_dir)))
 
     # --- Rebuild model + loader from the run's frozen artifacts (inference only).
     model, loader, (_, _), (_, _), (_, _) = \
@@ -113,7 +94,7 @@ def main() -> None:
         **result,
     }
 
-    output_path = Path(args.output) if args.output else run_dir / "results" / "probing.json"
+    output_path = Path(args.output) if args.output else run_dir / "probing.json"
     save_json(output, output_path)
 
 

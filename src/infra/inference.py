@@ -1,21 +1,12 @@
-"""Load / get / save of analysis components (infra).
+"""Stand an analysis up from a run's frozen artifacts and move embedding vectors
+across the disk boundary. Inference only - no gradients, no training.
 
-Everything that stands an analysis up from a run's *frozen artifacts* and moves
-embedding vectors across the disk boundary - inference only, no gradients, no
-training:
+load_embeddings_for_analysis is the entry point every analysis script uses: local
+.npz, else S3, else extraction from the stem-matched checkpoint. Extraction runs in
+memory when the cohort fits and streams to mmap temps when it does not.
 
-- :func:`load_scaffolding` - rebuild model + loader from a run dir.
-- :func:`load_embeddings_for_analysis` - the analysis scripts' entry point:
-  local .npz, else S3, else extraction from the stem-matched checkpoint.
-- :func:`in_mem_extract_embeds` - run the model once and collect vectors in memory.
-- :func:`stream_embeddings` - run the model and stream vectors to disk via
-  :class:`JEPAEmbeddingWriter` / :class:`SupervisedEmbeddingWriter` (too big for RAM).
-- :func:`save_embeds_for_analysis` - training-side end-of-run extract + S3 push.
-- :class:`EmbeddingStream` - mmap-backed dict-like view over a finished extraction.
-
-Shared bridge for the training loops, `scripts/embeddings.py`, and the analysis
-scripts; may import model + training *definitions* (datasets, checkpoint) but
-never the training loops or `src.analysis`.
+Shared bridge between the training loops and the analysis scripts, so it may import
+model and training *definitions* but never the training loops or src.analysis.
 """
 from contextlib import nullcontext
 from pathlib import Path
@@ -34,7 +25,7 @@ logger = logging.getLogger(__name__)
 from src.models import MODEL_TYPE, SupervisedTransformer, JEPA_EMA, JEPAStopGrad, SparseAutoencoder
 from src.training.utils.datasets import MimicDataset, NoisyBucketedSampler
 from src.training.utils.checkpoint import load_model_eval
-from src.utils.io import DATA_DIR, EXPS_DIR, find_subdir, load_json, load_sequences
+from src.utils.io import DATA_DIR, data_dir, resolve_run_dir, find_subdir, load_json, load_sequences
 from src.utils.system import set_global_seed, set_cuda_precision
 from src.infra.s3 import S3Client
 
@@ -48,9 +39,9 @@ class EmbeddingStream:
     Mmap-backed dict-like view over a completed embedding extraction.
  
     Owns the streaming temp .npy files on disk and exposes them as zero-copy
-    mmap views via dict-style access (`result["z_encs"]`). Use as a context
-    manager to delete temps when analysis is finished, or call `.cleanup()`
-    directly. Use `.to_npz(path)` to persist a consolidated archive before
+    mmap views via dict-style access ('result["z_encs"]'). Use as a context
+    manager to delete temps when analysis is finished, or call '.cleanup()'
+    directly. Use '.to_npz(path)' to persist a consolidated archive before
     cleanup.
  
     Lifecycle:
@@ -118,13 +109,13 @@ class EmbeddingStream:
     # --- persistence
     def to_npz(self, out_path: Path) -> Path:
         """
-        Consolidate temp mmaps into a single .npz at `out_path`.
+        Consolidate temp mmaps into a single .npz at 'out_path'.
  
         Uses ZIP_STORED (no compression): embeddings are dense float16 noise
         where LZMA buys <20% size at the cost of hours of CPU at 70GB scale.
  
-        Fast path: if `n_valid == n_total`, temps are zip-written directly.
-        Slow path: temps sliced to `n_valid` via chunked memmap copy.
+        Fast path: if 'n_valid == n_total', temps are zip-written directly.
+        Slow path: temps sliced to 'n_valid' via chunked memmap copy.
         """
         if self._closed:
             raise RuntimeError(f"EmbeddingStream({self._stem!r}) is closed")
@@ -206,7 +197,7 @@ class EmbeddingWriter:
     """ 
     Streams JEPA embeddings to per-field on-disk memmaps during one inference
     epoch. 
-    On exit, hands ownership of the temps to an `EmbeddingStream` for
+    On exit, hands ownership of the temps to an 'EmbeddingStream' for
     analysis/persistence.
     """
     _SCHEMA: ClassVar[Schema] = {}
@@ -359,13 +350,13 @@ def load_scaffolding(
     """
     Setup model, loader, and system for inference on frozen model from an existing run dir.
     - Assumes that checkpoint exists on disk and can be loaded
-    - `exp_name` is a *run-id* under :data:`EXPS_DIR`
+    - 'exp_name' is a *run-id*, resolved to its dated dir under ARTIFACTS_ROOT
     - config + vocab are read from that run's frozen artifacts, checkpoint is 
       found on-demand or pulled from S3
     """
-    # --- resolve the run dir + frozen config (flat input config as fallback)
-    run_dir = EXPS_DIR / run_id
-    cfg_path = run_dir / "config.yaml"
+    # --- resolve the run's core data dir + frozen config
+    ddir = data_dir(run_id)
+    cfg_path = ddir / "config.yaml"
     if not cfg_path.exists():
         raise FileNotFoundError(f"No config.yaml for run '{run_id}'")
     with open(cfg_path) as f:
@@ -394,13 +385,13 @@ def load_scaffolding(
     model, ckpt = load_model_eval(device, run_id=run_id, filename=ckpt_name)
     
     patients, vocab = None, None
-    if not (run_dir / "vocab.json").exists() and s3_ctx is not None:
-        s3_ctx.sync("vocab.json")
-    if not (run_dir / "sequences.jsonl").exists() and s3_ctx is not None:
+    if not (ddir / "vocab.json").exists() and s3_ctx is not None:
+        s3_ctx.sync(ddir / "vocab.json")
+    if not (ddir / "sequences.jsonl").exists() and s3_ctx is not None:
         s3_ctx.sync(DATA_DIR / "sequences.jsonl")
     
     patients = load_sequences(n=n_patients)
-    vocab = load_json(run_dir / "vocab.json")
+    vocab = load_json(ddir / "vocab.json")
     assert patients is not None and vocab is not None
 
     ds = MimicDataset(
@@ -429,7 +420,7 @@ def load_sae_info(
     sae_exp_id: str,
     device: torch.device
 ) -> tuple[SparseAutoencoder, Path, dict, np.ndarray, np.ndarray, str | None]:
-    sae_exp_dir = find_subdir(EXPS_DIR / exp_id, sae_exp_id)
+    sae_exp_dir = find_subdir(resolve_run_dir(exp_id), sae_exp_id)
     # checkpoint/model
     ckpt_path = sae_exp_dir / "sae.pt"
     if not ckpt_path.exists():
@@ -471,10 +462,10 @@ def stream_embeddings(
     out_file_stem: str,
     use_bf16: bool = True
 ) -> EmbeddingStream:
-    """Run one inference epoch and stream embeddings to `out_dir` in batches.
+    """Run one inference epoch and stream embeddings to 'out_dir' in batches.
 
     The z_enc vector alone can be tens of GB, so this writes out incrementally via
-    :class:`JEPAEmbeddingWriter` / :class:`SupervisedEmbeddingWriter`.
+    'JEPAEmbeddingWriter' / 'SupervisedEmbeddingWriter'.
     """
     n_total, max_ctx, emb_dim = emb_shape
     
@@ -542,7 +533,7 @@ def in_mem_extract_embeds(
     Same field layout as the streaming writers (z_encs, ctx_pad_mask,
     subject_ids, mask_pos; plus z_pred/z_target for JEPA archs), padded to the
     longest context length seen. Holds everything in RAM; use
-    :func:`stream_embeddings` for full-cohort extraction. `is_supv` is inferred
+    'stream_embeddings' for full-cohort extraction. 'is_supv' is inferred
     from the model type when omitted.
     """
     if is_supv is None:
@@ -618,23 +609,26 @@ def load_embeddings_for_analysis(
 ) -> tuple[EmbeddingStream, tuple[MODEL_TYPE | None, dict]]:
     """Resolve a run's embeddings for analysis.
 
-    `name` is the embeddings file name; its stem also names the source
-    checkpoint (`embeddings/<stem>.npz` pairs with `checkpoints/<stem>.pt`).
+    'name' is the embeddings file name; its stem also names the source
+    checkpoint ('data/embeddings/<stem>.npz' pairs with 'data/checkpoints/<stem>.pt').
 
     Resolution order:
-      1. local `embeddings/<stem>.npz`  (mmap'd NpzFile)
-      2. S3 `runs/<run-id>/checkpoints/<stem>.pt`  (fetch, fall through to 4)
-      3. S3 `runs/<run-id>/embeddings/<stem>.npz`  (streamed into memory)
+      1. local 'data/embeddings/<stem>.npz'  (mmap'd NpzFile)
+      2. S3 'runs/<dir>/data/checkpoints/<stem>.pt'  (fetch, fall through to 4)
+      3. S3 'runs/<dir>/data/embeddings/<stem>.npz'  (streamed into memory)
       4. extraction from the local checkpoint via one inference epoch
 
-    Returns `(embeddings, (model, config))`. `embeddings` is dict-like and a
-    context manager (NpzFile on paths 1/3, :class:`EmbeddingStream` on 4);
-    `model` is None unless extraction ran. `write_emb_local` / `write_emb_s3`
-    persist a freshly obtained .npz; `no_s3` confines resolution to local disk.
+    Returns '(embeddings, (model, config))'. 'embeddings' is dict-like and a
+    context manager (NpzFile on paths 1/3, 'EmbeddingStream' on 4);
+    'model' is None unless extraction ran. 'write_emb_local' / 'write_emb_s3'
+    persist a freshly obtained .npz; 'no_s3' confines resolution to local disk.
     """
     filename = name if name.endswith(".npz") else f"{name}.npz"
     prefix = Path(filename).stem
-    ldir = EXPS_DIR / run_id
+    # -- S3 keys mirror the run dir, so the client roots there and every
+    #    transferred path stays run-relative (data/checkpoints/..., data/embeddings/...)
+    root = resolve_run_dir(run_id)
+    ldir = data_dir(root)
     lpath_emb = ldir / "embeddings" / filename
     lpath_pt = ldir / "checkpoints" / f"{prefix}.pt"
 
@@ -647,7 +641,7 @@ def load_embeddings_for_analysis(
     # -- local .npz: no model rebuild, no S3 round-trip required
     if lpath_emb.exists():
         if sync_ckpts and not no_s3:
-            with S3Client(ldir, s3_subdir="runs", strict=False) as s3:
+            with S3Client(root, s3_subdir="runs", strict=False) as s3:
                 s3.sync(lpath_pt)
         return np.load(lpath_emb, mmap_mode="r", allow_pickle=True), (None, config)
 
@@ -656,7 +650,7 @@ def load_embeddings_for_analysis(
         if no_s3:
             raise FileNotFoundError(
                 f"No local embeddings or checkpoint for {filename!r} in {ldir}")
-        with S3Client(ldir, s3_subdir="runs", strict=True) as s3:
+        with S3Client(root, s3_subdir="runs", strict=True) as s3:
             if s3.exists(lpath_pt):
                 s3.fetch(lpath_pt)
             elif s3.exists(lpath_emb):
@@ -693,12 +687,12 @@ def load_embeddings_for_analysis(
         tmp = lpath_emb if write_emb_local else (ldir / "embeddings" / f".scratch_{prefix}.npz")
         if not write_emb_local:
             stream.to_npz(tmp)
-        with S3Client(ldir, s3_subdir="runs", strict=False) as s3:
+        with S3Client(root, s3_subdir="runs", strict=False) as s3:
             s3.upload(tmp)
         if not write_emb_local:
             tmp.unlink()
 
-    # -- caller uses `with stream: ...` to manage cleanup
+    # -- caller uses 'with stream: ...' to manage cleanup
     return stream, (model, config)
     
 # =============================================================================
@@ -712,12 +706,12 @@ def save_embeds(
     emb_shape: tuple[int, int, int],
     dir: Path,
     file: Path | str,
+    s3_client: S3Client,
     write_local: bool = True,
-    s3_client: S3Client | None = None,
 ) -> None:
+    # -- 'dir' is the run's data/embeddings; 's3_client' must root at the run dir
+    #    so the uploaded key mirrors it
     emb_file = dir / Path(file)
-    if not s3_client:
-        s3_client = S3Client(dir, s3_subdir="runs", strict=False)
     with stream_embeddings(
         model, loader, device, emb_shape,
         out_dir=dir, out_file_stem=emb_file.stem

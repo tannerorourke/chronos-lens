@@ -62,8 +62,8 @@ def set_global_seed(seed: int | None = None) -> int:
 def _restore_rng(rng: dict) -> None:
     """Restore RNG states from a checkpoint dict.
 
-    Checkpoints loaded with `torch.load(map_location='cuda')` have their saved
-    RNG tensors mapped onto the GPU, but `set_rng_state` requires a CPU uint8
+    Checkpoints loaded with map_location='cuda' have their saved RNG tensors
+    mapped onto the GPU, but set_rng_state requires a CPU uint8
     ByteTensor - so the states are forced back to CPU/uint8 before restoring.
     """
     assert all(k in rng for k in ["torch","python","numpy","cuda"])

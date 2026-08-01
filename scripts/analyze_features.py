@@ -37,13 +37,13 @@ from src.analysis.sae import (
     inspect_sae_feature_content
 )
 from src.analysis.composition import minimal_feature_set
-from src.utils.io import EXPS_DIR, DATA_DIR, load_sequences_dict
+from src.utils.io import resolve_run_dir, data_dir, DATA_DIR, load_sequences_dict
 from src.utils.system import load_exp_seed, set_global_seed
 
 
 parser = argparse.ArgumentParser(description="SAE feature analysis")
 parser.add_argument("--exp", type=str, required=True,
-                    help="Run-id of a completed run (under artifacts/training-runs/)")
+                    help="Run-id of a completed run (under artifacts/)")
 parser.add_argument("--sae", type=str, required=True,
                     help="SAE directory name (e.g. sae_pred_error)")
 
@@ -99,9 +99,9 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     exp_id = args.exp
-    exp_dir = EXPS_DIR / exp_id
+    exp_dir = resolve_run_dir(exp_id)
     
-    set_global_seed(load_exp_seed(exp_dir))
+    set_global_seed(load_exp_seed(data_dir(exp_dir)))
 
     # -- Load or extract embeddings (the .npz stem pairs with checkpoints/<stem>.pt).
     #    Only the alignment fields are read; activations come from the SAE dir.
@@ -225,8 +225,6 @@ def main():
 
     # -- Save results ----------------------------------------------------------
     if args.save_res:
-        analysis_dir = exp_dir / "results"
-        analysis_dir.mkdir(parents=True, exist_ok=True)
 
         # JSON: scalars and per-label results
         json_output = {
@@ -259,7 +257,7 @@ def main():
         if feature_cards is not None:
             json_output["feature_cards"] = feature_cards
 
-        json_path = analysis_dir / "features.json"
+        json_path = exp_dir / "features.json"
         with open(json_path, "w") as f:
             json.dump(json_output, f, indent=2, default=float)
         print(f"\nScalar results -> {json_path}")
@@ -279,7 +277,7 @@ def main():
             "label_escalation": label_esc,                      # (N,)
             "label_30d_readmit": label_30d,                     # (N,)
         }
-        npz_path = analysis_dir / "features.npz"
+        npz_path = exp_dir / "features.npz"
         np.savez_compressed(npz_path, **npz_data)
         print(f"Array results  -> {npz_path}")
 

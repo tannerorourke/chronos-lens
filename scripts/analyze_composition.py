@@ -35,13 +35,13 @@ from src.analysis.geometry import (
 )
 from src.analysis.composition import sae_decomposition
 from src.infra.inference import load_embeddings_for_analysis, load_sae_info
-from src.utils.io import EXPS_DIR, DATA_DIR, load_sequences_dict
+from src.utils.io import resolve_run_dir, data_dir, DATA_DIR, load_sequences_dict
 from src.utils.system import load_exp_seed, set_global_seed
 
 
 parser = argparse.ArgumentParser(description="Compositional decomposition analysis")
 parser.add_argument("--exp", type=str, required=True,
-                    help="Run-id of a completed run (under artifacts/training-runs/)")
+                    help="Run-id of a completed run (under artifacts/)")
 parser.add_argument("--sae", type=str, required=True,
                     help="SAE directory name (e.g. sae_pred_error)")
 group = parser.add_mutually_exclusive_group(required=True)
@@ -58,9 +58,9 @@ def main():
     args = parser.parse_args()
 
     exp_id = args.exp
-    exp_dir = EXPS_DIR / exp_id
+    exp_dir = resolve_run_dir(exp_id)
 
-    set_global_seed(load_exp_seed(exp_dir))
+    set_global_seed(load_exp_seed(data_dir(exp_dir)))
     
     # -- Load or extract embeddings (the .npz stem pairs with checkpoints/<stem>.pt)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -179,8 +179,6 @@ def main():
               f"{decomp['residual']:>10.4f}")
 
     # -- Save results ---------------------------------------------------------
-    results_dir = exp_dir / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
 
     # JSON: scalars and per-label results
     json_output = {
@@ -201,7 +199,7 @@ def main():
         "alignment": alignment_results,
     }
 
-    json_path = results_dir / "composition.json"
+    json_path = exp_dir / "composition.json"
     with open(json_path, "w") as f:
         json.dump(json_output, f, indent=2, default=float)
     print(f"\nScalar results -> {json_path}")
@@ -231,7 +229,7 @@ def main():
     npz_data["alignment_matrix"] = alignment_matrix
     npz_data["label_names"] = np.array(label_names)
 
-    npz_path = results_dir / "composition.npz"
+    npz_path = exp_dir / "composition.npz"
     np.savez_compressed(npz_path, **npz_data)
     print(f"Array results  -> {npz_path}")
 

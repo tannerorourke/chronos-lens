@@ -1,22 +1,15 @@
 """
 Representation-health checks for a finished run's latent geometry.
 
-A fast, label-free GO/NO-GO gate, run before the analysis lenses, that detects
-the documented failure modes on extracted embedding vectors:
+A fast, label-free GO/NO-GO gate for the three failure modes that make every
+downstream lens meaningless: dimensional collapse (a z_enc axis whose across-sample
+std sits at the floor), scale inflation (the terminal LayerNorm affine growing without
+bound), and a predictor residual P - T that is a radius gap rather than a directional
+error. Each check returns raw metrics plus a status in {pass, warn, fail}; assess()
+folds them into one verdict.
 
-- dimensional collapse        : a z_enc dimension whose across-sample std falls
-                                to the floor (a dead axis).
-- scale inflation             : per-dim std running far above 1 (the terminal
-                                LayerNorm affine inflating without bound).
-- predictor magnitude artifact: the prediction residual P - T being a radius gap
-                                rather than a directional error.
-
-Operates on z_enc_recency (N, D) for every architecture and additionally on the
-predictor pair (z_pred, z_target) for JEPA. Pure numpy plus the PCA helpers in
-geometry.py; no model forward, no disk I/O.
-
-Each check returns a dict with its raw metrics and a status in
-{pass, warn, fail}; `assess` assembles them into an overall verdict.
+Operates on z_enc_recency (N, D) for every architecture, plus the (z_pred, z_target)
+pair for JEPA. Numpy and the geometry.py PCA helpers only - no forward, no disk I/O.
 """
 import numpy as np
 
@@ -103,7 +96,7 @@ def effective_rank_health(z_enc: np.ndarray, k: int = 10) -> dict:
     above the noise floor, so a rich isotropic representation has few signal
     components by design.
 
-    `z_enc` is assumed already subsampled; n_samples for the MP bound is taken
+    'z_enc' is assumed already subsampled; n_samples for the MP bound is taken
     from its row count.
     """
     N, D = z_enc.shape
@@ -135,7 +128,7 @@ def effective_rank_health(z_enc: np.ndarray, k: int = 10) -> dict:
 def covariance_health(z_enc: np.ndarray) -> dict:
     """Off-diagonal correlation mass across z_enc dimensions (redundancy).
 
-    `z_enc` is assumed already subsampled.
+    'z_enc' is assumed already subsampled.
     """
     z = z_enc.astype(np.float64, copy=False)
     # dead (zero-std) dims yield nan correlations; dropped below
@@ -221,7 +214,7 @@ def overall_verdict(checks: dict) -> tuple[str, list[str]]:
 def assess(vecs: dict, time_scale: float | None = None) -> dict:
     """Run the full panel on a derived-vector dict and assemble the verdict.
 
-    `vecs` must contain z_enc_recency; z_pred / z_target enable the JEPA-only
+    'vecs' must contain z_enc_recency; z_pred / z_target enable the JEPA-only
     predictor-alignment check.
     """
     z_enc = np.asarray(vecs["z_enc_recency"]).astype(np.float32)

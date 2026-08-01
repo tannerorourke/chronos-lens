@@ -12,7 +12,7 @@ class TemporalEncoding(nn.Module):
     capacity per octave of temporal scale, rather than packing dimensions into the 
     shortest periods.
 
-    Single learnable `time_scale` parameter lets the model stretch or compress
+    Single learnable 'time_scale' parameter lets the model stretch or compress
     the entire frequency bank during training, adapting to the actual temporal
     distribution of the cohort without overfitting individual frequencies.
     """

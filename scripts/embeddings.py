@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
-"""Artifact transfer tooling for a run: fetch / sync against S3.
+"""Artifact transfer for a run: fetch / sync against S3.
 
-A run's artifacts live at ``EXPS_DIR/<run-id>/`` locally and under
-``s3://<bucket>/runs/<run-id>/`` remotely; paths inside the run dir mirror 1:1.
-Embeddings (``embeddings/<stem>.npz``) move as single-object copies, never bulk
-syncs. Extraction from a checkpoint is not done here: the analysis loader
-(``src.infra.inference.load_embeddings_for_analysis``) resolves
-local .npz -> S3 -> extract on demand, with the stem naming both files
-(``embeddings/<stem>.npz`` pairs with ``checkpoints/<stem>.pt``).
-
-Subcommands
------------
-  fetch  python -m scripts.embeddings --exp <run-id> fetch --file embeddings/<stem>.npz
-         python -m scripts.embeddings --exp <run-id> fetch --folder sae_<target>
-  sync   python -m scripts.embeddings --exp <run-id> sync --source local --file results/composition.json
-         (one-way copy: --source local pushes to S3, --source s3 pulls to disk)
+A run directory mirrors 's3://<bucket>/runs/<dir-name>/' key-for-key, so every
+--file / --folder argument is run-relative. Embeddings move as single-object copies,
+never bulk syncs. Extraction is not done here - the analysis loader resolves local
+.npz -> S3 -> extract on demand.
 
 Env: AWS_S3_BUCKET (default chronos-ml), AWS_REGION.
 """
@@ -25,16 +15,14 @@ import logging
 logger = logging.getLogger(__name__)
 
 from src.infra.s3 import S3Client
-from src.utils.io import EXPS_DIR
+from src.utils.io import ARTIFACTS_ROOT, resolve_run_dir
 
 # =============================================================================
 # Subcommands
 # =============================================================================
 
 def cmd_fetch(args) -> None:
-    run_dir = EXPS_DIR / args.exp
-    if not run_dir.is_dir():
-        raise FileNotFoundError(f"Run {args.exp} not found in ../{run_dir.parts[-2]}")
+    run_dir = resolve_run_dir(args.exp)
 
     ow = args.overwrite
     with S3Client(run_dir, s3_subdir="runs", strict=True) as s3:
@@ -49,9 +37,13 @@ def cmd_fetch(args) -> None:
 
 
 def cmd_sync(args) -> None:
-    run_dir = EXPS_DIR / args.exp
-    if not run_dir.is_dir():
+    # -- pulling a run absent locally is legal; --exp is then taken as the run-dir
+    #    name verbatim, since that name is the S3 prefix
+    if args.source == "s3" and not (ARTIFACTS_ROOT / args.exp).is_dir():
+        run_dir = ARTIFACTS_ROOT / args.exp
         run_dir.mkdir(parents=True)
+    else:
+        run_dir = resolve_run_dir(args.exp)
 
     ow = args.overwrite
     with S3Client(run_dir, s3_subdir="runs", strict=True) as s3:
@@ -78,7 +70,7 @@ def cmd_sync(args) -> None:
 parser = argparse.ArgumentParser(
     description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument('--exp', required=True,
-                    help="Run-id under artifacts/training-runs/ (and s3://<bucket>/runs/)")
+                    help="Run-id, or full run-dir name, under artifacts/ (and s3://<bucket>/runs/)")
 
 sub = parser.add_subparsers(dest="command", required=True)
 
@@ -87,7 +79,7 @@ p_fetch = sub.add_parser("fetch",
 p_fetch.add_argument("--overwrite", default=False, action="store_true",
     help="overwrite an existing local copy")
 p_fetch.add_argument("--file", type=str, default=None,
-    help="run-relative file path to fetch (e.g. embeddings/checkpoint_40.npz)")
+    help="run-relative file path to fetch (e.g. data/embeddings/checkpoint_40.npz)")
 p_fetch.add_argument("--folder", type=str, default=None,
     help="run-relative folder to fetch recursively (e.g. sae_pred_error)")
 p_fetch.set_defaults(func=cmd_fetch)

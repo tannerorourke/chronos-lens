@@ -1,15 +1,10 @@
 """
-Linear probing utilities for layer-wise signal localization and
-representation quality assessment.
+Linear probes: how much label signal is linearly readable out of a representation,
+and at which encoder layer it appears.
 
-Functions
----------
-  extract_layer_representations : forward-hook extraction at every encoder layer
-  probe_vectors                 : generic binary probe across named vectors
-  probe_encounter_level         : per-encounter probing with patient-grouped CV
-  probe_icd_blocks              : one-vs-rest ICD-10 chapter probes (+ temporal variant)
-  evaluate_binary_probe         : stratified-CV logistic probe (+ temporal variant)
-  run_probing_sweep             : layer-by-layer probe sweep for signal localization
+Covers forward-hook extraction per layer, generic probes over named vectors, the
+per-encounter (patient-grouped CV) and one-vs-rest ICD-chapter variants, and the
+layer sweep that stacks them. Every probe reports held-out AUROC/AUPRC/F1/Brier.
 """
 import torch
 import numpy as np
@@ -41,7 +36,7 @@ def extract_layer_representations(
 
     Registers a forward hook on each transformer encoder layer to capture
     intermediate outputs. Both layer outputs and the final z_enc are reduced to
-    the recency encounter `z_enc[k-1]` (the most-recent context slot), not a
+    the recency encounter 'z_enc[k-1]' (the most-recent context slot), not a
     context mean - the recency point is the consistent per-encounter vector.
 
     Encodes context only, so each hook fires once per batch.
@@ -146,9 +141,9 @@ def probe_vectors(
     to_patient  : if True, reduce to one row per patient (their terminal sample,
                   largest mask_pos) before probing - prevents data leakage for
                   patient-level labels with multiple mask positions per patient.
-                  Requires `mask_pos`.
+                  Requires 'mask_pos'.
     mask_pos    : (N,) target encounter index per sample; required when
-                  `to_patient` is True.
+                  'to_patient' is True.
     n_splits    : number of stratified CV folds
 
     Returns
@@ -567,7 +562,7 @@ def run_probing_sweep(
 ) -> dict:
     """Probe every transformer layer + the final z_enc to localize signal.
 
-    Runs :func:`evaluate_binary_probe` (stratified k-fold, AUROC/AUPRC/F1/Brier/
+    Runs 'evaluate_binary_probe' (stratified k-fold, AUROC/AUPRC/F1/Brier/
     ECE) on each layer's recency representation and reports where prediction
     signal emerges through the encoder.
 
@@ -575,8 +570,8 @@ def run_probing_sweep(
 
     Parameters
     ----------
-    layer_representations : output of :func:`extract_layer_representations` -
-        dict with `layer_0` .. `layer_{n-1}`, `final`, `subject_ids`, and `n_layers`.
+    layer_representations : output of 'extract_layer_representations' -
+        dict with 'layer_0' .. 'layer_{n-1}', 'final', 'subject_ids', and 'n_layers'.
     labels : (N,) binary labels aligned to the representation rows.
     n_splits : number of stratified CV folds.
 

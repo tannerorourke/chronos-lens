@@ -1,26 +1,13 @@
 """
 Patient trajectory extraction and geometric analysis through z_enc space.
 
-Tracks how patient representations evolve across successive encounter
-windows.  Provides geometric primitives (velocity, curvature, arc length),
-concept drift measurement, prospective probing, and SAE-based feature
-trajectory analysis.
+Tracks how a patient's representation moves across successive encounter windows:
+geometric primitives (velocity, curvature, arc length), drift toward a labelled
+concept centroid, prospective probes that test whether the path predicts a future
+state, matched-prefix neighbourhoods, and SAE feature traces along the path.
 
-Functions
----------
-  extract_trajectories          : group samples into (P, T_max, D) trajectories
-  trajectory_velocity           : finite-difference velocity vectors
-  trajectory_temporal_velocity  : velocity in per-day units (Δz / Δt)
-  trajectory_curvature          : cosine angle between successive velocities
-  trajectory_arc_length         : cumulative path length
-  concept_centroid              : mean + covariance of positive-label samples
-  drift_toward_concept          : velocity projection toward a concept cluster
-  temporal_drift_rate           : per-day drift rate toward concept
-  prospective_trajectory_probe  : causal probe test of trajectory hypothesis
-  matched_trajectory_neighbors  : early-prefix nearest neighbors
-  neighborhood_outcome_variance : label variance in neighbor sets
-  sae_trajectory                : SAE activation traces along trajectories
-  feature_flip_before_event     : on/off transitions before positive events
+Rates come in two units - per-step and per-day (Δz / Δt) - and the per-day forms
+need 'times' in the trajectory dict.
 """
 
 import numpy as np
@@ -135,7 +122,7 @@ def trajectory_velocity(traj_dict: dict) -> tuple[np.ndarray, np.ndarray]:
 def trajectory_temporal_velocity(traj_dict: dict) -> tuple[np.ndarray, np.ndarray]:
     """Velocity in per-day units: Δz / Δt.
 
-    Requires `times` in traj_dict. Δt is clipped to a minimum of 1 day
+    Requires 'times' in traj_dict. Δt is clipped to a minimum of 1 day
     to avoid inf from same-day encounters.
 
     Parameters
@@ -292,7 +279,7 @@ def temporal_drift_rate(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-day drift rate toward a concept centroid.
 
-    Same as drift_toward_concept divided by Δt. Requires `times` in
+    Same as drift_toward_concept divided by Δt. Requires 'times' in
     traj_dict. Δt clipped to min 1 day for inf-safety.
 
     Parameters
@@ -517,8 +504,8 @@ def matched_trajectory_neighbors(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Find nearest neighbors using fixed-length early trajectory prefixes.
 
-    Computes Euclidean distance on the flattened first `prefix_len` steps
-    of each trajectory.  Only patients with at least `prefix_len` valid
+    Computes Euclidean distance on the flattened first 'prefix_len' steps
+    of each trajectory.  Only patients with at least 'prefix_len' valid
     steps are included.
 
     Parameters

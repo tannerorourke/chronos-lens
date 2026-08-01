@@ -38,7 +38,7 @@ from src.analysis.trajectories import (
     prospective_trajectory_probe
 )
 from src.infra.inference import load_embeddings_for_analysis, load_sae_info
-from src.utils.io import EXPS_DIR, DATA_DIR, load_sequences_dict
+from src.utils.io import resolve_run_dir, data_dir, DATA_DIR, load_sequences_dict
 from src.utils.system import load_exp_seed, set_global_seed
 
 
@@ -114,10 +114,10 @@ def main():
     sup_exp_id = args.sup_exp
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    jepa_exp_dir = EXPS_DIR / jepa_exp_id
-    sup_exp_dir = EXPS_DIR / sup_exp_id
+    jepa_exp_dir = resolve_run_dir(jepa_exp_id)
+    sup_exp_dir = resolve_run_dir(sup_exp_id)
     
-    set_global_seed(load_exp_seed(jepa_exp_dir))
+    set_global_seed(load_exp_seed(data_dir(jepa_exp_dir)))
 
     # -- Load embeddings ----------------------------------------------------
     with load_embeddings_for_analysis(
@@ -370,8 +370,6 @@ def main():
               f"{sae_overlap_result['frac_stable']:>12.4f} {'-':>12s}")
 
     # -- Save results -------------------------------------------------------
-    results_dir = jepa_exp_dir / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
 
     json_output = {
         "jepa_exp": args.jepa_exp,
@@ -392,7 +390,7 @@ def main():
         "label_subspace_alignment": label_sub_alignment,
     }
 
-    json_path = results_dir / "comparison.json"
+    json_path = jepa_exp_dir / "comparison.json"
     with open(json_path, "w") as f:
         json.dump(json_output, f, indent=2, default=float)
     print(f"\nScalar results -> {json_path}")
@@ -409,7 +407,7 @@ def main():
     if sae_matched_cosines is not None:
         npz_data["sae_matched_cosines"] = sae_matched_cosines
 
-    npz_path = results_dir / "comparison.npz"
+    npz_path = jepa_exp_dir / "comparison.npz"
     np.savez_compressed(npz_path, **npz_data)
     print(f"Array results  -> {npz_path}")
 

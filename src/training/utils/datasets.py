@@ -65,10 +65,10 @@ class MimicDataset(Dataset):
 
     In the non-supervised case, "tgt_x" is applied to target encoder.
     In the supervised setting the sample carries the causal per-encounter
-    label at the masked position, `{label_key}_per_enc[mask_pos]` - the same
-    label the analysis side reads (`infra.labels.load_label`), so the
+    label at the masked position, '{label_key}_per_enc[mask_pos]' - the same
+    label the analysis side reads ('infra.labels.load_label'), so the
     supervised baseline trains and is evaluated on identical targets. The
-    classifier reads the recency vector `z_enc[mask_pos-1]` to predict it.
+    classifier reads the recency vector 'z_enc[mask_pos-1]' to predict it.
     """
 
     def __init__(

@@ -1,30 +1,14 @@
 #!/usr/bin/env python3
 """
-Representation-health gate for a finished run.
+Representation-health gate: is a finished run's z_enc geometry usable at all?
 
-Resolves a run's embeddings (local .npz, else S3, else re-extraction from the
-stem-matched checkpoint), runs the latent-geometry health panel in
-`src.analysis.health`, and prints a GO / GO (marginal) / NO-GO verdict plus a
-structured JSON. Label-free and fast: the go/no-go check on whether a run
-produced usable `z_enc` geometry before the analysis lenses are run.
+Resolves the run's embeddings (local .npz, else S3, else re-extraction from the
+stem-matched checkpoint), runs the health panel in src.analysis.health, and prints a
+GO / GO (marginal) / NO-GO verdict alongside a structured JSON. Label-free and fast -
+run it before any analysis lens.
 
-Panel
------
-  variance            : per-dim std (collapse floor 0.25) and scale inflation
-  effective_rank      : participation ratio + Marchenko-Pastur signal count
-  covariance          : off-diagonal correlation mass (redundancy)
-  predictor_alignment : cos_dist + P-T radius-gap fraction (JEPA only)
-  time_scale          : learned temporal-encoding scale sanity band
-
-Usage
------
-  python -m scripts.diagnostic --exp sg-vr_256_v02 --ckpt last
-  python -m scripts.diagnostic --exp sg-vr_256_v02 --ckpt last --save-emb-local
-  python -m scripts.diagnostic --exp sg-vr_256_v02 --no-s3
-
-Resolution is local-first: a local ``embeddings/<stem>.npz`` is used directly and S3 is touched
-only when the local copy is absent. S3 egress is billed, so prefer staging artifacts on disk;
-``--no-s3`` hard-confines resolution to local disk.
+Resolution is local-first and S3 egress is billed, so stage artifacts on disk;
+--no-s3 confines resolution to local disk.
 """
 from os import environ
 environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -38,7 +22,7 @@ import torch
 from src.infra.inference import load_embeddings_for_analysis
 from src.infra.vector_computation import compute_derived_vectors
 from src.analysis import health
-from src.utils.io import EXPS_DIR
+from src.utils.io import resolve_run_dir, data_dir
 from src.utils.system import set_global_seed, load_exp_seed
 
 _DERIVED_INPUTS = ("z_encs", "mask_pos", "z_pred", "z_target")
@@ -62,9 +46,9 @@ def time_scale_from_model(model) -> float | None:
     return None
 
 
-def time_scale_from_metrics(run_dir: Path) -> float | None:
+def time_scale_from_metrics(ddir: Path) -> float | None:
     """Fall back to the last epoch record's time_scale in metrics.jsonl."""
-    path = run_dir / "metrics.jsonl"
+    path = ddir / "metrics.jsonl"
     if not path.exists():
         return None
     ts = None
@@ -114,15 +98,15 @@ def main():
     parser.add_argument("--ckpt", type=str, default="last",
                         help="embeddings/checkpoint stem to resolve (default: last)")
     parser.add_argument("--output", type=str, default=None,
-                        help="results JSON path (default: <run_dir>/results/repr_health.json)")
+                        help="results JSON path (default: <run-dir>/repr_health.json)")
     parser.add_argument("--no-s3", action="store_true",
                         help="confine embedding resolution to local disk")
     parser.add_argument("--save-emb-local", action="store_true",
                         help="persist a freshly extracted .npz to embeddings/")
     args = parser.parse_args()
 
-    run_dir = EXPS_DIR / args.exp
-    set_global_seed(load_exp_seed(run_dir))
+    run_dir = resolve_run_dir(args.exp)
+    set_global_seed(load_exp_seed(data_dir(run_dir)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"  Resolving embeddings for {args.exp} :: {args.ckpt} ...")
@@ -140,7 +124,7 @@ def main():
         vecs = compute_derived_vectors(raw)
         time_scale = time_scale_from_model(model)
         if time_scale is None:
-            time_scale = time_scale_from_metrics(run_dir)
+            time_scale = time_scale_from_metrics(data_dir(run_dir))
         result = health.assess(vecs, time_scale=time_scale)
 
     z_enc_recency = vecs["z_enc_recency"]
@@ -157,7 +141,7 @@ def main():
 
     print_report(report)
 
-    output_path = Path(args.output) if args.output else run_dir / "results" / "repr_health.json"
+    output_path = Path(args.output) if args.output else run_dir / "repr_health.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(report, f, indent=2, default=float)

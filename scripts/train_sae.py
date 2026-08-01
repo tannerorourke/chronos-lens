@@ -15,6 +15,7 @@ from src.infra.inference import load_embeddings_for_analysis
 from src.utils.io import init_exp_config
 from src.utils.constants import SAE_TARGETS
 from src.utils.system import set_global_seed, load_exp_seed, set_cuda_precision
+from src.utils.io import data_dir
 
 
 parser = argparse.ArgumentParser(description="""Trains a TopK sparse autoencoder on a JEPA latent vector.""")
@@ -30,7 +31,7 @@ parser.add_argument(
          "pred_error (z_pred - z_target). Must be present in the run's config['sae_config'].")
 parser.add_argument(
     "--embeddings", type=str, required=True,
-    help="Embeddings .npz filename within the run's embeddings/ dir (e.g., embedding_40.npz)")
+    help="Embeddings .npz filename within the run's data/embeddings/ dir (e.g., embedding_40.npz)")
 
 
 def train(
@@ -115,11 +116,12 @@ def main():
     args = parser.parse_args()
     target = args.target
     embeddings = args.embeddings if args.embeddings.endswith(".npz") else f"{args.embeddings}.npz"
-    run_dir, sae_params = init_exp_config(args.exp, "sae", target)
-    set_global_seed(load_exp_seed(run_dir))
+    sae_dir, sae_params = init_exp_config(args.exp, "sae", target)
+    # -- seed is the run's, not the SAE's: the frozen SAE config carries no meta block
+    set_global_seed(load_exp_seed(data_dir(args.exp)))
     
-    logger.info(f"  Experiment: '{run_dir.parent.name}' -> '{run_dir.name}'"
-                f"  Artifact dir: {run_dir}"
+    logger.info(f"  Experiment: '{sae_dir.parent.name}' -> '{sae_dir.name}'"
+                f"  Artifact dir: {sae_dir}"
                 f"  Target: {target}"
                 f"  Embeddings: {embeddings}")
     
@@ -129,7 +131,7 @@ def main():
     logger.info(f"  Device: {torch.cuda.get_device_name() if device.type == 'cuda' else device}")
     
     with load_embeddings_for_analysis(
-        run_id=run_dir.parent.name, name=embeddings, 
+        run_id=sae_dir.parent.name, name=embeddings, 
         device=device
     )[0] as embed:
         if target == "z_enc":
@@ -139,7 +141,7 @@ def main():
             data_vec = (embed["z_pred"] - embed["z_target"]).astype(np.float64)
         else:
             data_vec = embed[target].astype(np.float64)
-        train(sae_params, run_dir, data_vec, device)
+        train(sae_params, sae_dir, data_vec, device)
     
     
 if __name__ == "__main__":

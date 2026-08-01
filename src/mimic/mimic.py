@@ -1,36 +1,13 @@
 """
-Build patient-level temporal sequences from MIMIC-IV 3.1 (BigQuery).
+Build patient-level temporal sequences from MIMIC-IV 3.1 (BigQuery). Cohort is
+self-supervised: every patient with >= min_encounters alive-at-discharge admissions,
+regardless of diagnosis. Labels are computed downstream in labels.py.
 
-Cohort: 
-    - self-supervised
-    - all patients with >= min_encounters alive-at-discharge
-    - admissions are included regardless of diagnosis. 
-Labels (readmission, escalation, next-encounter ICD blocks) are 
-computed separately in labels.py.
+Emits {subject_id, encounters[{hadm_id, admittime, dischtime, icd_codes, meds}]}.
+F-codes are truncated to the 3-char block (F32.1 -> F32) with full dot notation kept
+in icd_codes_full for the escalation labels; other ICD-10 codes keep their dots.
 
-Schema per patient:
-{
-  "subject_id": str,
-  "encounters": [
-    {
-      "hadm_id": int,
-      "admittime": datetime,
-      "dischtime": datetime,
-      "icd_codes": ["F32", "I10.1", ...],
-      "meds": ["sertraline", ...]
-    }, 
-    ...
-  ]
-}
-
-ICD code processing:
-  - F-codes truncated to 3-char block level (F32.1 -> F32)
-  - Non-F ICD-10 codes retain full dot notation (I10.1 stays I10.1)
-  - icd_codes_full: full dot-notation F-codes kept separately for escalation labels
-
-BigQuery auth:
-  gcloud auth application-default login
-  gcloud config set project <project-id>
+Needs gcloud application-default credentials and a configured project.
 """
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -98,7 +75,7 @@ def load_tables() -> tuple:
     
     dfs = {}
     for name, (_, table) in _pq_bq_file_map.items():
-        df = client.query(f"SELECT * FROM `{table}`").to_dataframe()
+        df = client.query(f"SELECT * FROM '{table}'").to_dataframe()
         dfs[name] = df
         print(f"  {name:20s} {len(df):>8,} rows")
         

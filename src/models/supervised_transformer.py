@@ -61,8 +61,8 @@ class SupervisedTransformer(nn.Module):
     def forward(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode context, then classify the most recent encounter's vector.
 
-        Returns per-encounter representation `z_enc`, and logits for loss.
-        `mask_pos` is the target index `k`, so `mask_pos - 1`
+        Returns per-encounter representation 'z_enc', and logits for loss.
+        'mask_pos' is the target index 'k', so 'mask_pos - 1'
         is the last valid context slot (context is the chronological prefix,
         right-padded with no interior gaps).
         """

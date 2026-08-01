@@ -16,7 +16,7 @@ import torch
 
 from src.models import MODEL_TYPE, SparseAutoencoder, build_model
 from src.utils.system import SEED, _restore_rng
-from src.utils.io import EXPS_DIR, save_json
+from src.utils.io import data_dir, save_json
 
 
 def save_checkpoint(
@@ -85,7 +85,6 @@ def sync_model_checkpoint(
   
 def load_model_eval(
     device: torch.device,
-    run_dir: Path = EXPS_DIR,
     restore_rng: bool = True,
     run_id: str | None = None,
     filename: str | None = None,
@@ -95,7 +94,7 @@ def load_model_eval(
     Load model in eval mode at given checkpoint.
     """
     if run_id is not None and filename is not None:
-        path = run_dir / run_id / "checkpoints" / filename
+        path = data_dir(run_id) / "checkpoints" / filename
         assert path.exists(), f"[load_model_from_checkpoint] Checkpoint not found."
     elif abs_path is not None:
         path = abs_path

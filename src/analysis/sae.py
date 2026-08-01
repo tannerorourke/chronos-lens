@@ -1,16 +1,11 @@
 """
-SAE analysis utilities.
+SAE feature enrichment: what, if anything, does a learned dictionary feature mean?
 
-Functions
----------
-  sae_label_enrichment        : per-feature Fisher exact test + BH FDR correction
-  feature_label_specificity   : (n_features, n_labels) lift matrix
-  sae_coactivation_matrix     : pairwise co-activation lift over active features
-  sae_temporal_enrichment     : per-feature temporal correlation and quartile activation
-  cross_sae_overlap           : Hungarian matching of decoder directions between two SAEs
-  inspect_sae_feature_content : clinical content enrichment (secondary, post-identification)
-  sae_cluster_crossref        : cross-reference SAE features with HDBSCAN clusters
-  sae_seed_stability          : dictionary direction stability across seeds
+Identification comes first - per-feature Fisher tests with BH FDR, label lift,
+co-activation, temporal enrichment. Clinical content (the ICD/med profile of a
+feature's top activators) is read only after a feature is identified, so it describes
+rather than selects. Stability across seeds and overlap between two SAEs bound how
+much of any of it is dictionary noise.
 """
 from pathlib import Path
 from collections import Counter

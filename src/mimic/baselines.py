@@ -1,19 +1,13 @@
 """
-Baseline models for clinical prediction tasks.
+Baselines that bracket the JEPA on the clinical prediction tasks.
 
-Two tiers of baselines:
+Token-level is the fair comparison: multi-hot ICD codes and medications over the same
+vocabulary the model sees, so it isolates what the representation adds over the raw
+input. Metadata is the ceiling: expert-engineered features from extract_metadata(),
+establishing what hand-built domain knowledge achieves.
 
-1. Token-level (fair comparison)
-   Same input information as the JEPA - multi-hot encoded ICD codes and
-   medications from the same vocabulary.  High-dimensional, sparse.
-
-2. Metadata (ceiling comparison)
-   Expert-engineered features from extract_metadata(). Uses derived features
-   encoding domain knowledge (drug class groupings, temporal statistics,
-   escalation indicators). Establishes what's achievable with feature engineering.
-
-Both tiers are evaluated with logistic regression and XGBoost under
-stratified k-fold CV, for each available label (label_30d, label_escalation).
+Both tiers run logistic regression and XGBoost under stratified k-fold CV for every
+available label.
 """
 
 import argparse

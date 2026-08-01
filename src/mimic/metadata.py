@@ -1,28 +1,14 @@
 """
-Patient metadata feature extraction.
+Patient metadata feature extraction - the derived-feature layer above raw tokens.
 
-A baseline interpretability approach would entail utilizing (in the case of
-clinical health records) utilizing the raw input tokens (a bag of ICD codes
-and medication names) to perform interpretability (see inspect_sae_features()
-in src/analysis/sae_analysis.py).
+Interpretability against the raw input (a bag of ICD codes and medication names) can
+only surface what is literally present. Metadata features are second-order summaries
+we know to be clinically relevant but that no single token carries: drug-class
+groupings, temporal statistics, escalation indicators, trajectory summaries. They
+test whether the geometry captures structure beyond token frequency, and give feature
+identification a stronger basis. The construction is domain-agnostic.
 
-Metadata extraction is the additional layer we add on top. These can be defined as
-derived features that summarize higher-order patterns in our data, that we KNOW
-to be relevant but are NOT directly present in the data. We utilize these to
-both to test whether the geometry captures higher-order clinical patterns beyond
-what raw token frequencies explain, and to provide a more robust basis for feature
-identification.
-
-These features can be applied to any domain.
-
-Summary
------
-Summarative features    (~8)
-F-code indicators       (top_n_f_codes, dynamic)
-Medication indicators   (top_n_meds individual + drug classes)
-Temporal features       (6)
-Escalation features     (10) - requires labels.py to have run first
-Trajectory features     (3)
+Escalation features require labels.py to have run first.
 """
 
 from collections import Counter

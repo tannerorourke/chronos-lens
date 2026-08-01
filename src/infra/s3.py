@@ -88,7 +88,7 @@ class S3Client:
     
     def _as_posix(self, file: str | Path) -> str:
         """ 
-        Resolve `file` to POSIX-style relative string for use in _local/_key. 
+        Resolve 'file' to POSIX-style relative string for use in _local/_key. 
         """
         p = Path(file)
         if p.is_absolute():
@@ -149,7 +149,7 @@ class S3Client:
         _validate: bool = False
     ) -> bool | Future[bool]:
         """
-        Upload `<local_dir>/<filename>` to `s3://<bucket>/<prefix>/<filename>`.
+        Upload '<local_dir>/<filename>' to 's3://<bucket>/<prefix>/<filename>'.
         If _validate=True, checksum validation runs after the upload completes.
         If _validate=True and _async=True, both steps run on the executor thread
         and the Future resolves only after validation.
@@ -178,7 +178,7 @@ class S3Client:
         _validate: bool = False
     ) -> bool | Future[bool]:
         """ 
-        Fetch s3://<bucket>/<s3_subdir>/<local_dir.name> to disk at `<local_dir>/<filename>`.
+        Fetch s3://<bucket>/<s3_subdir>/<local_dir.name> to disk at '<local_dir>/<filename>'.
         """
         file = self._as_posix(file)
         def _do():
@@ -251,8 +251,8 @@ class S3Client:
         _validate: bool = False
     ) -> bool | Future[bool]:
         """
-        Rename an S3 key `s3://<bucket>/<s3_subdir>/<local_dir.name>/<old_file>` to
-        `s3://<bucket>/<s3_subdir>/<local_dir.name>/<new_file>` (server-side copy + delete).
+        Rename an S3 key 's3://<bucket>/<s3_subdir>/<local_dir.name>/<old_file>' to
+        's3://<bucket>/<s3_subdir>/<local_dir.name>/<new_file>' (server-side copy + delete).
  
         If _validate=True:
           - The local file is also renamed to match the new S3 key.
@@ -341,8 +341,8 @@ class S3Client:
         
     def stream(self, file: str | Path) -> io.BytesIO:
         """
-        Stream `s3://<bucket>/<prefix>/<filename>` into an in-memory BytesIO buffer.
-        Always raises on failure regardless of `strict` setting.
+        Stream 's3://<bucket>/<prefix>/<filename>' into an in-memory BytesIO buffer.
+        Always raises on failure regardless of 'strict' setting.
         """
         file = self._as_posix(file)
         try:

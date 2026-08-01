@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import date
 import os
 import re
 import json
@@ -18,14 +19,52 @@ DATA_DIR = ROOT / "data/processed"
 EXPERIMENTS_DIR = ROOT / "experiments"
 
 # ---------------------------------------------------------------------------
-# Run artifacts live OUTSIDE the repo working tree (default: ../artifacts,
-# beside the repo). ../artifacts/<run-id> IS one run - a clean sync/pull/output 
-# target. Override with ARTIFACTS_ROOT. Training and analysis consume
-# these and must never redefine them.
+# Run artifacts live OUTSIDE the repo working tree. One run is one directory,
+# <mm-dd>_<run-id>_<seed>, syncing to s3://<bucket>/runs/<dir-name>/ key-for-key.
+# data/ holds the frozen inputs (config, vocab, checkpoints, embeddings, logs);
+# analysis writes flat at the root, so globbing <run>/*.json is the record of what
+# has been run. The lookup key is the run-id, not the directory name - resolve_run_dir
+# maps it to the dated directory. Training and analysis must never redefine these.
 # ---------------------------------------------------------------------------
 ARTIFACTS_ROOT = Path(os.environ.get("ARTIFACTS_ROOT", ROOT.parent / "artifacts"))
-EXPS_DIR = ARTIFACTS_ROOT / "training-runs"
-ANALYSIS_DIR = ARTIFACTS_ROOT / "analysis"
+
+def run_dir_name(run_id: str, seed: int) -> str:
+    """ Directory name for a run started today """
+    return f"{date.today():%m-%d}_{run_id}_{seed}"
+
+def resolve_run_dir(exp: str | Path) -> Path:
+    """
+    Resolve a run-id (or a full run-dir name) to its directory under ARTIFACTS_ROOT.
+    A run-id matching two dirs raises rather than picking one, since the two would
+    differ by date or seed and are not the same cell.
+    """
+    exp = str(exp)
+    exact = ARTIFACTS_ROOT / exp
+    if exact.is_dir():
+        return exact
+
+    pat = re.compile(rf"\d{{2}}-\d{{2}}_{re.escape(exp)}(_\d+)?$")
+    hits = sorted(d for d in ARTIFACTS_ROOT.iterdir() if d.is_dir() and pat.fullmatch(d.name))
+    if not hits:
+        raise FileNotFoundError(
+            f"No run dir for '{exp}' under {ARTIFACTS_ROOT} "
+            f"(looked for '{exp}' and '<mm-dd>_{exp}_<seed>').")
+    if len(hits) > 1:
+        names = "\n  ".join(d.name for d in hits)
+        raise FileExistsError(
+            f"run-id '{exp}' matched {len(hits)} run dirs:\n  {names}\n"
+            f"Pass the full directory name instead.")
+    return hits[0]
+
+def data_dir(run: str | Path) -> Path:
+    """ Core run data: frozen config, vocab, checkpoints, embeddings, logs """
+    root = run if isinstance(run, Path) else resolve_run_dir(run)
+    return root / "data"
+
+def run_data_path(rel: str | Path) -> Path:
+    """ Run-relative reference into data/: '<run-id>/checkpoints/last.pt' """
+    parts = Path(rel).parts
+    return data_dir(parts[0]).joinpath(*parts[1:])
 
 # ============================================================================
 # JSON / Serialization / npz helpers
@@ -151,29 +190,32 @@ def save_metadata(
 # config IO
 # =============================================================================
 
-def make_run_id(tag: str | None, fallback: str = "run") -> str:
+def make_run_id(tag: str | None, fallback: str = "run", parent: Path | None = None) -> str:
+    """
+    Slugified id. With 'parent', suffixes _v2, _v3, ... until the name is free
+    under it; without, the raw slug (uniqueness is the caller's problem).
+    """
     def _slugify(s: str) -> str:
         """ keep [A-Za-z0-9._-], collapse the rest to '-' """
         return re.sub(r"[^A-Za-z0-9._-]+", "-", str(s)).strip("-")
-    from datetime import date
     tag = tag if tag is not None else fallback
     id = _slugify(f"{tag}")
+    if parent is None:
+        return id
 
-    if (EXPS_DIR / id).exists():
-        i=2
-        while (EXPS_DIR / id).exists():
-            id = _slugify(f"{tag}_v{i}")
-            i += 1
+    i = 2
+    while (parent / id).exists():
+        id = _slugify(f"{tag}_v{i}")
+        i += 1
     return id
 
 def init_exp_dir(run_dir: Path, params: dict | None = None) -> Path:
-    """ mkdir, freeze config.yaml """
+    """ mkdir run root + data/, freeze data/config.yaml """
     run_dir = Path(run_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    data_dir(run_dir).mkdir(parents=True, exist_ok=True)
     if params is not None:
-        from datetime import date
-        params["meta"]["run_date"] = date.today().isoformat()
-        with open(run_dir / "config.yaml", "w") as f:
+        params["meta"]["exp_date"] = date.today().isoformat()
+        with open(data_dir(run_dir) / "config.yaml", "w") as f:
             yaml.safe_dump(params, f, sort_keys=False)
     return run_dir
 
@@ -183,26 +225,18 @@ def init_exp_config(
     target: str = None,
     exists_ok: bool = False,
 ) -> tuple[Path, dict]:
-    """Resolve config + run directory. Returns (config_path, exp_dir, params): """
-    from datetime import date
-    
+    """Resolve config + run directory. Returns (exp_dir, params) """
     exp = Path(exp)
-    
+
     # -- SAE inside existing self-contained run dir
     if command == "sae":
-        exp_dir = EXPS_DIR / exp
-        if not exp_dir.exists():
-            raise FileNotFoundError(
-                f"Run dir not found for run '{exp}': {exp_dir}. SAE training "
-                f"requires an existing trained model under {EXPS_DIR}/<exp>."
-            )
-            
-        cfg_path = exp_dir / "config.yaml"
+        exp_dir = resolve_run_dir(exp)
+        cfg_path = data_dir(exp_dir) / "config.yaml"
         if not cfg_path.exists():
             raise FileNotFoundError(
                 f"Frozen config not found for run '{exp}': {cfg_path}. SAE training "
-                f"operates on an existing run dir under {EXPS_DIR}.")
-        
+                f"operates on an existing run dir under {ARTIFACTS_ROOT}.")
+
         with open(cfg_path) as f:
             params = yaml.safe_load(f)
 
@@ -215,8 +249,8 @@ def init_exp_config(
         
         sae_params = sae_cfg[target]
         
-        # init experiment subdirectory
-        sae_exp_dir = exp_dir / make_run_id(f"sae_{target}")
+        # -- SAE dicts are analysis output: run root beside the result JSONs, not in data/
+        sae_exp_dir = exp_dir / make_run_id(f"sae_{target}", parent=exp_dir)
         sae_exp_dir.mkdir(parents=True, exist_ok=True)
         
         # -- freeze SAE config, recording the target it was trained on and the date
@@ -247,19 +281,19 @@ def init_exp_config(
         assert params.get("meta", {}).get("seed"), \
             f"parameter 'seed' missing in config.yaml['meta']"
 
-        # Resume continues in the original run dir (run-id = first path component of
-        # resume_from); otherwise start a fresh date-stamped run id.
+        # Resume continues in the original run dir (first path component of
+        # resume_from names it); otherwise open a fresh <mm-dd>_<run-id>_<seed>.
         if params.get("resume_from"):
-            run_id = Path(params["resume_from"]).parts[0]
+            exp_dir = resolve_run_dir(Path(params["resume_from"]).parts[0])
         else:
             tag = params.get("meta", {}).get("tag", None)
             run_id = make_run_id(tag, fallback=cfg_path.stem)
-        
-        exp_dir = EXPS_DIR / run_id
+            seed = params["meta"]["seed"]
+            dir_name = make_run_id(run_dir_name(run_id, seed), parent=ARTIFACTS_ROOT)
+            exp_dir = ARTIFACTS_ROOT / dir_name
 
-        if not params.get("resume_from"):
             has_artifacts = any(
-                (exp_dir / sub).exists() and any((exp_dir / sub).iterdir())
+                (data_dir(exp_dir) / sub).exists() and any((data_dir(exp_dir) / sub).iterdir())
                 for sub in ["checkpoints", "logs"]
             )
             if has_artifacts and not exists_ok:
@@ -267,13 +301,8 @@ def init_exp_config(
                     f"Run '{run_id}' already has artifacts in {exp_dir}. Set "
                     f"config['resume_from'] to resume, or change meta.tag for a new run.")
 
-            # init experiment directory
-            exp_dir.mkdir(parents=True, exist_ok=True)
-
-            # freeze config
-            params["meta"]["exp_date"] = date.today().isoformat()
-            with open(exp_dir / "config.yaml", "w") as f:
-                yaml.safe_dump(params, f, sort_keys=False)
+            # init run dir + freeze config into data/
+            init_exp_dir(exp_dir, params)
       
         return exp_dir, params
     

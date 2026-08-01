@@ -16,6 +16,7 @@ from matplotlib import pyplot as plt
 
 from src.models import MODEL_TYPE, MODEL_TYPE_STR
 from src.infra.s3 import S3Client
+from src.utils.io import data_dir
 from src.training.utils.checkpoint import save_checkpoint
 
 
@@ -226,7 +227,7 @@ class TrainingLogger:
     """
     All-in-one metrics logger for loss, grad norms, embeddings, and 
     custom metrics. Logs to {RUN_ROOT}/logs:
-      - `metrics.jsonl` (always ON)
+      - 'metrics.jsonl' (always ON)
       - AWS S3 (default ON)
       - TensorBoard (optional)
       - CSV (optional)
@@ -247,10 +248,13 @@ class TrainingLogger:
         self._is_jepa = arch in ["ema", "stopgrad"]
         self._closed = False
         self._total_epochs = total_epochs
+        # -- S3 keys mirror the run dir, so the client roots at the run dir and
+        #    everything training writes hangs off data/.
         self._run_root = Path(run_dir)
-        self._logdir = self._run_root / "logs"
-        self._ckptdir = self._run_root / "checkpoints"
-        self._embdir = self._run_root / "embeddings"
+        self._data = data_dir(self._run_root)
+        self._logdir = self._data / "logs"
+        self._ckptdir = self._data / "checkpoints"
+        self._embdir = self._data / "embeddings"
         self._logdir.mkdir(parents=True, exist_ok=True)
         
         self.global_step = global_step
@@ -275,8 +279,8 @@ class TrainingLogger:
         else:
             self.trackers = { "z_enc": EmbeddingTracker() }
 
-        # --- default: logs/metrics.jsonl (run root, the canonical sink)
-        self._jsonl = JsonlWriter(self._run_root / "metrics.jsonl")
+        # --- default: data/metrics.jsonl (the canonical sink)
+        self._jsonl = JsonlWriter(self._data / "metrics.jsonl")
         if sync_s3:
             self._s3 = S3Client(self._run_root, s3_subdir="runs", strict=False)
         if log_csv:
@@ -288,8 +292,8 @@ class TrainingLogger:
         self._log_tb = self._tb_writer is not None
         
         if self._s3:
-            self._s3.upload(file=self._run_root / "config.yaml", _async=True)
-            self._s3.upload(file=self._run_root / "vocab.json", _async=True)
+            self._s3.upload(file=self._data / "config.yaml", _async=True)
+            self._s3.upload(file=self._data / "vocab.json", _async=True)
         
         # ----------
         self._ep_start = time.time()
@@ -421,7 +425,7 @@ class TrainingLogger:
         return raw_metrics
     
     def save_checkpoint(self, state_dict, model_params, optimizer, scheduler):
-        """ `model.pt` on ckpt_cycle or final epoch """
+        """ 'model.pt' on ckpt_cycle or final epoch """
         is_final = self.epoch == self._total_epochs
         is_cycle = bool(self.ckpt_cycle) and self.epoch % self.ckpt_cycle == 0
         
@@ -434,7 +438,7 @@ class TrainingLogger:
             )
         
         if self._s3:
-            self._s3.upload(file=self._run_root / "metrics.jsonl", _async=True, _overwrite=True)
+            self._s3.upload(file=self._data / "metrics.jsonl", _async=True, _overwrite=True)
             self._s3.upload(file=fp, _async=False, _validate=True, _overwrite=True)
         
         return self._last_ckpt_path
@@ -453,10 +457,10 @@ class TrainingLogger:
             from src.infra.inference import save_embeds
             save_embeds(
                 model, loader, device, emb_shape,
-                dir=self._embdir, 
+                dir=self._embdir,
                 file=self._last_ckpt_path.stem,
-                write_local=write_local, 
-                s3_client=self._s3
+                s3_client=self._s3,
+                write_local=write_local,
             )
         except Exception as e:
             logger.warning(f"Failed to save embeddings: {e}")
@@ -482,7 +486,7 @@ class TrainingLogger:
 
         total_time = time.time() - self._run_start
         self._logdir.mkdir(parents=True, exist_ok=True)
-        with open(self._run_root / "run_summary.json", "w") as f:
+        with open(self._data / "run_summary.json", "w") as f:
             json.dump({
                 "total_epochs": self.epoch,
                 "total_steps": self.global_step,

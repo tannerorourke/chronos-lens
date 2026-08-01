@@ -61,7 +61,7 @@ def select_terminal_by_patient(
     One row per patient by selecting each patient's terminal sample
 
     Accepts a single (N, D) array or a dict of {name: (N, D)} arrays. Returns
-    (terminal, unique_subject_ids); for dict input `terminal` is a dict with
+    (terminal, unique_subject_ids); for dict input 'terminal' is a dict with
     the same (optionally suffixed) keys.
     """
     sids = np.asarray(subject_ids, dtype=str)

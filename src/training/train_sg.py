@@ -30,7 +30,7 @@ from src.training.utils.datasets import (
 from src.training.utils.optimizers import init_optimizers
 from src.training.utils.logging import TrainingLogger, DriftMonitor
 from src.training.utils.checkpoint import sync_model_checkpoint
-from src.utils.io import load_sequences, EXPS_DIR
+from src.utils.io import load_sequences, data_dir, run_data_path
 
 
 def _set_requires_grad(modules: list[nn.Module], flag: bool) -> None:
@@ -73,7 +73,7 @@ def main(params: Dict, run_dir: Path, device: torch.device):
 
     # --- build sequences, vocab, dataset, loader
     patients = load_sequences(n=n_patients)
-    vocab = build_vocab(patients, pad_idx=0, dir=run_dir, save=True) # freeze vocab in run dir
+    vocab = build_vocab(patients, pad_idx=0, dir=data_dir(run_dir), save=True) # freeze vocab beside the config
 
     ds = MimicDataset(
         patients, 
@@ -116,7 +116,7 @@ def main(params: Dict, run_dir: Path, device: torch.device):
     start_epoch, start_step, loss_history = 1, 1, []
     # --- load checkpoint
     if params.get("resume_from"):
-        ckpt_path = EXPS_DIR / params["resume_from"]
+        ckpt_path = run_data_path(params["resume_from"])
         model, model_params, optimizer, scheduler, start_epoch, start_step, loss_history = \
             sync_model_checkpoint(
                 model, optimizer, scheduler, 
@@ -153,7 +153,7 @@ def main(params: Dict, run_dir: Path, device: torch.device):
         model.train()
         sampler.set_epoch(epoch)
 
-        # -- predictor warmup: for the first `pred_warmup_epochs`, freeze encoder +
+        # -- predictor warmup: for the first 'pred_warmup_epochs', freeze encoder +
         #    projector and train the predictor alone (at a static pred_warmup_lr),
         #    so it is not cold when it first pulls on the encoder. A cold predictor's
         #    gradient drags the encoder toward a constant (representation collapse);

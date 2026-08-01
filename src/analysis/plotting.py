@@ -493,7 +493,7 @@ def _s1_sae_cluster_crossref(sae_data,
 
     The full (n_features x n_clusters) mean-activation matrix is not
     persisted to JSON.  This reconstructs what it can from per-card
-    `dominant_cluster` and `activation_fraction` fields, and renders
+    'dominant_cluster' and 'activation_fraction' fields, and renders
     a summary figure.
     """
     cards = sae_data.get("feature_cards", [])

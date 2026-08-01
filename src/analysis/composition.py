@@ -5,12 +5,6 @@ Asks how many SAE features a clinical concept needs. Two views: how many feature
 predictor needs to reach a target held-out AUROC on the label, and how many decoder
 directions are needed to span a label subspace in embedding space. A small set means a
 near-monosemantic concept; a large one means the concept is distributed over features.
-
-Functions
----------
-  minimal_feature_set   : greedy forward selection to reach target AUROC
-  sae_feature_subspace  : L2-normalized decoder weight columns as a basis
-  sae_decomposition     : greedy matching pursuit of label subspace via SAE features
 """
 
 import numpy as np

@@ -33,7 +33,7 @@ from src.analysis.trajectories import (
     trajectory_curvature, trajectory_arc_length,
     concept_centroid, drift_toward_concept, temporal_drift_rate,
     prospective_trajectory_probe)
-from src.utils.io import EXPS_DIR, DATA_DIR, load_sequences_dict
+from src.utils.io import resolve_run_dir, data_dir, DATA_DIR, load_sequences_dict
 from src.utils.system import load_exp_seed, set_global_seed
 
 
@@ -83,7 +83,7 @@ def _build_labels_per_step(
 # =============================================================================
 parser = argparse.ArgumentParser(description="Trajectory analysis for JEPA embeddings")
 parser.add_argument("--exp", type=str, required=True,
-                    help="Run-id of a completed run (under artifacts/training-runs/)")
+                    help="Run-id of a completed run (under artifacts/)")
 group = parser.add_mutually_exclusive_group(required=True)
 group.add_argument("--emb", type=str, default=None,
                     help="Embeddings .npz file name (e.g. checkpoint_40.npz)")
@@ -100,9 +100,9 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     exp_id = args.exp
-    exp_dir = EXPS_DIR / exp_id
+    exp_dir = resolve_run_dir(exp_id)
     
-    set_global_seed(load_exp_seed(exp_dir))
+    set_global_seed(load_exp_seed(data_dir(exp_dir)))
 
     # -- Load or extract embeddings (the .npz stem pairs with checkpoints/<stem>.pt)
     emb_name = args.emb if args.emb else f"{Path(args.ckpt).stem}.npz"
@@ -234,8 +234,6 @@ def main():
               f"{res['delta_auroc']:>+12.4f}")
 
     # -- Save results ----------------------------------------------------------
-    results_dir = exp_dir / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
 
     # JSON: scalars and per-label probe results
     json_output = {
@@ -265,7 +263,7 @@ def main():
         },
     }
 
-    json_path = results_dir / "trajectories.json"
+    json_path = exp_dir / "trajectories.json"
     with open(json_path, "w") as f:
         json.dump(json_output, f, indent=2, default=float)
     print(f"\nScalar results -> {json_path}")
@@ -292,7 +290,7 @@ def main():
         "mask_pos": mask_pos,                             # (N,)
         "z_enc_recency": z_enc_recency,                   # (N, D)
     }
-    npz_path = results_dir / "trajectories.npz"
+    npz_path = exp_dir / "trajectories.npz"
     np.savez_compressed(npz_path, **npz_data)
     print(f"Array results  -> {npz_path}")
 

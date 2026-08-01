@@ -1,40 +1,15 @@
 """
-Clinical label computation for Chronos-Lens patient sequences.
+Clinical labels for patient sequences. compute_labels() is the single entry point;
+it overwrites every label field on each patient dict, keeping subject_id/encounters.
 
-compute_labels() is the single entry point. It computes ALL labels and
-attaches them to each patient dict, overwriting any pre-existing label fields
-while preserving "subject_id" and "encounters".
+Labels: label_30d (F-code readmission within 30d) and label_escalation, each with a
+causal per-encounter variant, plus escalation_criteria_fired and next_enc_icd_blocks
+(ICD-10 chapter letters of the *next* encounter). Per-encounter labels look strictly
+forward, so the terminal encounter is always 0 / [].
 
-Labels produced
----------------
-label_30d: 1 if any readmission within 30 days carries an F-code (mood-disorder) diagnosis (int)  
-label_30d_per_enc: per-encounter flag: 1 if any subsequent encounter within 30 days of this 
-                   encounter'sdischarge carries an F-code diagnosis. Last encounter is 
-                   always 0 (list[int])
-label_escalation: 1 if any clinical escalation event in the sequence (int)
-label_escalation_per_enc: per-encounter flag (first encounter always 0) (list[int])
-escalation_criteria_fired: which escalation criteria triggered (list[str])
-next_enc_icd_blocks: per-encounter ICD-10 chapter letters (first char of each ICD-10 code) 
-                     present in the next encounter. Last encounter is always []. ICD-9 codes 
-                     (numeric prefix) are excluded. (list[list[str]])
-
-Escalation criteria
--------------------
-new_subcategory   : An F-code subcategory (3-char) appears with no prior codes in
-                    that subcategory (always escalation regardless of severity).
-severity_increase : A new code within a known subcategory has positive severity >
-                    max positive severity in prior encounters for that subcategory.
-new_specifier     : A new code in a known subcategory has severity == -1, is not a
-                    remission code, and has not been seen before.
-f32_to_f33        : F33.x appears for the first time after F32.x was seen (single ->
-                    recurrent depression). Fires even if severity is equal or lower.
-med_initiation    : First psychiatric medication when none existed in any prior enc.
-new_drug_class    : A psychiatric drug class not seen in any prior encounter appears.
-
-Does NOT fire for:
-    - Codes with severity == 0 (unspecified/NOS)
-    - Codes with severity > 0 but <= prior max (plateau or improvement)
-    - Remission codes: F30.3, F30.4, F31.7x, F32.4, F32.5, F33.40-F33.42
+Escalation fires on the criteria in ESCALATION_CRITERIA: a new F-code subcategory,
+a severity increase within a known one, a new specifier, F32 -> F33, first psych med,
+or a new drug class. Plateaus, unspecified codes, and remission codes never fire.
 """
 
 import numpy as np

@@ -1,6 +1,7 @@
 import hashlib
 import concurrent.futures
 import io
+import re
 from collections.abc import Callable
 from concurrent.futures import Future
 from pathlib import Path
@@ -12,7 +13,7 @@ import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
-from src.utils.system import AWS_S3_BUCKET, AWS_REGION
+from src.utils.system import B2_BUCKET, B2_ENDPOINT, B2_KEY_ID, B2_APP_KEY
 
 class S3Client:
     """ 
@@ -32,15 +33,23 @@ class S3Client:
     def __init__(
         self, 
         local_dir: Path, 
-        bucket: str = AWS_S3_BUCKET, 
-        region: str = AWS_REGION,
+        bucket: str = B2_BUCKET, 
+        endpoint_url: str = B2_ENDPOINT,
         s3_subdir: str = "",
         strict: bool = True
     ):
-        self._client = boto3.client("s3", region_name=region)
-        self._sts = boto3.client("sts", region_name=region)
+        # B2 signs against the region embedded in the endpoint host
+        m = re.search(r"s3\.([^.]+)\.backblazeb2\.com", endpoint_url)
+        self._region = m.group(1) if m else None
+        self._client = boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            region_name=self._region,
+            aws_access_key_id=B2_KEY_ID or None,
+            aws_secret_access_key=B2_APP_KEY or None,
+        )
         self._bucket = bucket
-        self._region = region
+        self._endpoint = endpoint_url
         self._executor = concurrent.futures.ThreadPoolExecutor()
         self.local_dir = Path(local_dir)
         self._prefix = f"{s3_subdir}/{local_dir.name}" if s3_subdir else local_dir.name
@@ -48,7 +57,10 @@ class S3Client:
         
         if strict:
             if not self._is_live(): 
-                raise RuntimeError("AWS credentials not available.")
+                raise RuntimeError(
+                    f"bucket {self._bucket!r} unreachable at {self._endpoint} ({self._region}): "
+                    "credentials missing, key not scoped to this bucket, or bucket does not exist."
+                )
             if not self.local_dir.exists():
                 raise FileNotFoundError(f"../{self.local_dir.parts[-2:]} does not exist.")
     
@@ -366,8 +378,13 @@ class S3Client:
 
     # --- utilities/lifecycle
     def _is_live(self) -> bool:
+        """Credentials work and the target bucket is reachable through them.
+
+        head_bucket is the portable check: it authenticates and authorizes against
+        the bucket this client will actually write, on any S3-compatible endpoint.
+        """
         try:
-            boto3.client("sts", region_name=self._region).get_caller_identity()
+            self._client.head_bucket(Bucket=self._bucket)
             return True
         except (BotoCoreError, ClientError):
             return False

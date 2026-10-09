@@ -14,8 +14,11 @@ except:
     pass
 
 # --- Env vars ---
-AWS_S3_BUCKET: str = os.environ.get("AWS_S3_BUCKET", "chronos-ml")
-AWS_REGION: str = os.environ.get("AWS_REGION", "")
+# Object store: Backblaze B2 over the S3 API. Key pair and endpoint come from the shell, the bucket defaults here.
+B2_KEY_ID: str = os.environ.get("B2_KEY_ID", "")
+B2_APP_KEY: str = os.environ.get("B2_APP_KEY", "")
+B2_ENDPOINT: str = os.environ.get("B2_ENDPOINT", "https://s3.us-west-002.backblazeb2.com")
+B2_BUCKET: str = os.environ.get("B2_BUCKET", "chronos-ml")
 MIMIC_BQ_PID: str = os.environ.get("CHRONOS_BQ_PID", "")
 MIMIC_BQ_DATASET: str = os.environ.get("MIMIC_BQ_DATASET", "physionet-data.mimiciv_3_1_hosp")
 

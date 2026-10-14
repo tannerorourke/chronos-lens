@@ -113,19 +113,19 @@ class S3Client:
         """ 
         Compare the local file's MD5 against the S3 ETag. Handles both 
         single-part and multipart ETags, raising ValueError on mismatch.
- 
-        Note: multipart ETag computation assumes uploads used _TRANSFER_CONFIG.
-        If the object was uploaded externally with a different chunk size, the
-        multipart ETag will not match. 
+        A multipart ETag is rebuilt at the uploader's part size, read from part 1.
         """
         local_path = self._local(file)
-        etag = self._client.head_object(
-            Bucket=self._bucket, 
-            Key=self._key(file)
-        )["ETag"].strip('"')
-        local_etag = (self._multipart_md5(local_path) if "-" in etag else
-                      self._md5(local_path))
-        
+        key = self._key(file)
+        etag = self._client.head_object(Bucket=self._bucket, Key=key)["ETag"].strip('"')
+        if "-" in etag:
+            part_size = self._client.head_object(
+                Bucket=self._bucket, Key=key, PartNumber=1
+            )["ContentLength"]
+            local_etag = self._multipart_md5(local_path, part_size)
+        else:
+            local_etag = self._md5(local_path)
+
         if local_etag != etag:
             raise ValueError(f"Checksum mismatch for {file!r}: local={local_etag} s3={etag}")
         
@@ -139,15 +139,12 @@ class S3Client:
         return h.hexdigest()
     
     
-    def _multipart_md5(self, path: Path) -> str:
-        """
-        Replicates S3's multipart ETag: MD5 of the concatenated per-part MD5
-        digests (raw bytes), suffixed with the part count.
-        e.g. "d8e8fca2dc0f896fd7cb4cb0031ba249-3"
-        """
+    @staticmethod
+    def _multipart_md5(path: Path, part_size: int) -> str:
+        # -- S3 multipart ETag: MD5 of the concatenated raw per-part digests, '-<parts>' suffix
         part_digests: list[bytes] = []
         with open(path, "rb") as f:
-            while chunk := f.read(self._MULTIPART_CHUNK):
+            while chunk := f.read(part_size):
                 part_digests.append(hashlib.md5(chunk).digest())
         return f"{hashlib.md5(b"".join(part_digests)).hexdigest()}-{len(part_digests)}"
         

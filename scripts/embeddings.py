@@ -6,7 +6,7 @@ A run directory mirrors 's3://<bucket>/runs/<dir-name>/' key-for-key, so every
 never bulk syncs. Extraction is not done here - the analysis loader resolves local
 .npz -> S3 -> extract on demand.
 
-Env: B2_KEY_ID, B2_APP_KEY, B2_ENDPOINT, B2_BUCKET (default chronos-ml).
+Env: B2_KEY_ID, B2_APP_KEY, B2_ENDPOINT, B2_BUCKET (default chronos-lens).
 """
 import argparse
 from pathlib import Path

@@ -18,7 +18,7 @@ except:
 B2_KEY_ID: str = os.environ.get("B2_KEY_ID", "")
 B2_APP_KEY: str = os.environ.get("B2_APP_KEY", "")
 B2_ENDPOINT: str = os.environ.get("B2_ENDPOINT", "https://s3.us-west-002.backblazeb2.com")
-B2_BUCKET: str = os.environ.get("B2_BUCKET", "chronos-ml")
+B2_BUCKET: str = os.environ.get("B2_BUCKET", "chronos-lens")
 MIMIC_BQ_PID: str = os.environ.get("CHRONOS_BQ_PID", "")
 MIMIC_BQ_DATASET: str = os.environ.get("MIMIC_BQ_DATASET", "physionet-data.mimiciv_3_1_hosp")
 
